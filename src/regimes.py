@@ -29,7 +29,8 @@ if __name__ == "__main__":
         df = pd.read_csv('data/eth_hourly.csv')
         # Re-calculate volatility since we didn't save it to CSV last time
         df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
-        df['volatility'] = df['log_ret'].rolling(window=24).std()
+        # Annualized volatility for 24h window
+        df['volatility'] = df['log_ret'].rolling(window=24).std() * np.sqrt(365 * 24)
         df.dropna(inplace=True)
         
         detect_regimes(df)
