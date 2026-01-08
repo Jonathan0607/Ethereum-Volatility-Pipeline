@@ -1,0 +1,19 @@
+# Python System Files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment (Crucial!)
+venv/
+env/
+
+# Data & Models (Usually we don't commit large datasets or binary weights)
+data/
+*.pth
+
+# Mac System Files
+.DS_Store
+
+# IDE Settings
+.vscode/
+.idea/
