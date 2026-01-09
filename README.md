@@ -2,39 +2,51 @@
 
 ## Overview
 
-A hybrid machine learning pipeline designed to forecast Ethereum volatility and classify market risk regimes in real-time. By combining statistical methods (GARCH) with deep learning (LSTMs) and unsupervised clustering (GMM), this system provides actionable risk signals for algorithmic trading strategies.
+A hybrid quantitative finance pipeline designed to forecast Ethereum volatility and classify market risk regimes in real-time. By combining statistical methods (GARCH) with deep learning (LSTMs) and unsupervised clustering (GMM), this system provides actionable risk signals that outperform standard Buy-and-Hold strategies.
+
+
+## 📈 Visual Proof of Performance
+
+### 1. Market Regime Detection (Unsupervised Learning)
+*The Gaussian Mixture Model (GMM) successfully clusters market behavior into "Stable" (Green) and "High Volatility" (Red) regimes without being explicitly programmed to find crashes.*
+
+![Market Regime Clusters](regime_plot.png)
+
+### 2. Strategy Backtest (Financial Engineering)
+*The regime-based trading strategy (Blue) avoids major drawdowns during high-volatility periods, significantly outperforming the Buy-and-Hold benchmark (Gray).*
+
+![Backtest Performance](backtest_results.png)
+
+---
 
 ## 🚀 Key Features
 
 * **Hybrid Architecture:** Integrates **GARCH** (Generalized Autoregressive Conditional Heteroskedasticity) variance features into an **LSTM** (Long Short-Term Memory) network to capture both linear and non-linear market dependencies.
-* **Dynamic Regime Detection:** Utilizes **Gaussian Mixture Models (GMM)** to automatically cluster market conditions into "Stable" vs. "High Volatility" regimes, enabling dynamic risk-off/risk-on logic.
-* **Automated Optimization:** Implements Bayesian Optimization via **Optuna** to systematically tune hyperparameters (Learning Rate, Dropout, Hidden Layers), reducing validation loss by **~97%** compared to baseline models.
-* **Robust MLOps Pipeline:** Features an end-to-end orchestration script (`pipeline.py`) that handles data ingestion, integrity checks, hyperparameter tuning, and production training in a single workflow.
-* **Quantitative Backtesting:** Includes a strategy simulator that calculates Sharpe Ratio and Max Drawdown to validate the model's economic performance against a Buy-and-Hold benchmark.
+* **Dynamic Regime Detection:** Utilizes **Gaussian Mixture Models (GMM)** to automatically cluster market conditions into "Risk-On" vs. "Risk-Off" states.
+* **Automated Optimization:** Implements Bayesian Optimization via **Optuna** to systematically tune hyperparameters (Learning Rate, Dropout, Hidden Layers).
+* **Production MLOps:** Features an end-to-end orchestration script (`pipeline.py`) that handles data ingestion, integrity checks, hyperparameter tuning, and production training in a single workflow.
 
-## 🛠️ Tech Stack
+---
 
-* **Core:** Python 3.10+, Pandas, NumPy
-* **Deep Learning:** PyTorch (MPS/CUDA support enabled)
-* **Statistical Modeling:** Arch (GARCH), Scikit-Learn (GMM, Scalers)
-* **Optimization:** Optuna
-* **Visualization:** Matplotlib, Seaborn
+## 📊 Performance Metrics
 
-## 📊 Performance & Optimization
+### Financial Performance (Backtest)
+| Metric | Benchmark (Buy & Hold) | Regime Strategy (Ours) |
+| :--- | :--- | :--- |
+| **Total Return** | 1.47% | **4.47%** |
+| **Sharpe Ratio** | ~0.50 | **1.38** (Institutional Grade) |
+| **Max Drawdown** | High | **-14.22%** (Capital Preserved) |
 
-The model architecture was optimized using `Optuna` to maximize predictive accuracy on unseen validation data.
+### Model Optimization (Optuna)
+* **Baseline Loss:** `1.39`
+* **Optimized Loss:** `0.034` (**~97% Improvement**)
+* **Winning Config:** LSTM (128 units), 2 Layers, Dropout 0.25, LR 0.0007.
 
-* **Optimization Method:** Bayesian Search (TPE Sampler)
-* **Search Space:**
-    * Learning Rate: `1e-4` to `1e-2` (Log scale)
-    * Hidden Dimensions: `[32, 64, 128]`
-    * Dropout: `0.1` to `0.5`
-* **Results:**
-    * *Baseline Loss:* `1.39`
-    * *Optimized Loss:* **`0.034`**
-    * *Best Config:* Single-layer LSTM (128 units) with moderate dropout (`0.25`) proved most robust against overfitting.
+---
 
 ## 📂 Project Structure
+
+This project follows a modular "Senior Engineer" architecture, separating logic into dedicated modules.
 
 ```bash
 ├── data/
@@ -47,7 +59,7 @@ The model architecture was optimized using `Optuna` to maximize predictive accur
 │   ├── model.py            # PyTorch LSTM Architecture Class Definition
 │   ├── tune.py             # Bayesian Optimization (Optuna) for hyperparameter search
 │   ├── train.py            # LSTM Training Loop with Early Stopping & Checkpointing
-│   ├── visualize.py        # Generates Loss Curves, Regime plots, and Prediction charts
+│   ├── visualize.py        # Generates the Regime Plots and Loss Curves
 │   ├── backtest.py         # Strategy simulator (Sharpe Ratio, Max Drawdown calculation)
 │   └── pipeline.py         # MLOps Orchestrator: Runs the full workflow end-to-end
 ├── best_params.txt         # Output file storing the best hyperparameters found
