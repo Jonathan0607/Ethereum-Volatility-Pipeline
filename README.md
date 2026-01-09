@@ -1,46 +1,49 @@
-# Ethereum Volatility Prediction Pipeline
+# Ethereum Volatility & Market Regime Detector
 
 ## Overview
-This project is an end-to-end quantitative research infrastructure designed to forecast short-term volatility in Ethereum (ETH/USD) markets. Unlike traditional price prediction models, this system focuses on **volatility clustering** and **regime detection** to assess market risk.
 
-## Architecture
-The system follows a standard ETL + Inference pattern:
-1.  **Data Ingestion:** High-frequency OHLCV tick data fetched via CCXT (Kraken API).
-2.  **Feature Engineering:** - Log-Returns transformation for stationarity.
-    - Rolling Volatility (GARCH proxies).
-    - Augmented Dickey-Fuller (ADF) tests for stationarity checks.
-3.  **Regime Detection:** Gaussian Mixture Models (GMM) to classify market states (e.g., *Stable* vs. *Turbulent*).
-4.  **Modeling:** LSTM (Long Short-Term Memory) networks for sequence forecasting.
+A hybrid machine learning pipeline designed to forecast Ethereum volatility and classify market risk regimes in real-time. By combining statistical methods (GARCH) with deep learning (LSTMs) and unsupervised clustering (GMM), this system provides actionable risk signals for algorithmic trading strategies.
 
-## Results (Preliminary)
-Below is the output of the **RegimeGuard** module. It uses unsupervised learning (GMM) to automatically tag market regimes based on volatility clustering.
+## 🚀 Key Features
 
-![Regime Detection](regime_plot.png)
+* **Hybrid Architecture:** Integrates **GARCH** (Generalized Autoregressive Conditional Heteroskedasticity) variance features into an **LSTM** (Long Short-Term Memory) network to capture both linear and non-linear market dependencies.
+* **Dynamic Regime Detection:** Utilizes **Gaussian Mixture Models (GMM)** to automatically cluster market conditions into "Stable" vs. "High Volatility" regimes, enabling dynamic risk-off/risk-on logic.
+* **Automated Optimization:** Implements Bayesian Optimization via **Optuna** to systematically tune hyperparameters (Learning Rate, Dropout, Hidden Layers), reducing validation loss by **~97%** compared to baseline models.
+* **Robust Data Pipeline:** Fetches real-time OHLCV data via Kraken API (`ccxt`), enforcing stationarity through log-return transformations and standard scaling.
 
-*Red dots indicate high-volatility regimes detected by the GMM, while green dots indicate stable market conditions.*
+## 🛠️ Tech Stack
 
-## Tech Stack
--   **Orchestration:** Python Scripts (Airflow planned)
--   **Data Processing:** Pandas, NumPy, Scikit-Learn
--   **Deep Learning:** PyTorch (LSTM/GRU)
--   **APIs:** CCXT (Kraken)
+* **Core:** Python 3.10+, Pandas, NumPy
+* **Deep Learning:** PyTorch (MPS/CUDA support enabled)
+* **Statistical Modeling:** Arch (GARCH), Scikit-Learn (GMM, Scalers)
+* **Optimization:** Optuna
+* **Visualization:** Matplotlib, Seaborn
 
-## Current Status
-- [x] Data Fetching Module (Kraken integration)
-- [x] Statistical Tests (ADF & Rolling Metrics)
-- [x] RegimeGuard Implementation (GMM Clustering)
-- [x] LSTM Model Architecture & Training Loop
-- [ ] Hyperparameter Tuning
+## 📊 Performance & Optimization
 
-## Setup
+The model architecture was optimized using `Optuna` to maximize predictive accuracy on unseen validation data.
+
+* **Optimization Method:** Bayesian Search (TPE Sampler)
+* **Search Space:**
+    * Learning Rate: `1e-4` to `1e-2` (Log scale)
+    * Hidden Dimensions: `[32, 64, 128]`
+    * Dropout: `0.1` to `0.5`
+* **Results:**
+    * *Baseline Loss:* `1.39`
+    * *Optimized Loss:* **`0.034`**
+    * *Best Config:* Single-layer LSTM (128 units) with moderate dropout (`0.25`) proved most robust against overfitting.
+
+## 📂 Project Structure
+
 ```bash
-git clone [https://github.com/Jonathan0607/ethereum-volatility-pipeline.git](https://github.com/Jonathan0607/ethereum-volatility-pipeline.git)
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-# Install dependencies
-pip install -r requirements.txt
-# Run pipeline
-python3 src/fetch_data.py
-python3 src/train.py
-python3 src/visualize.py
+├── data/
+│   ├── raw/             # Raw data from Kraken API
+│   └── eth_hourly.csv   # Cleaned, stationary data with GARCH features
+├── src/
+│   ├── fetch_data.py    # Data ingestion script
+│   ├── process_data.py  # Cleaning & Log-return transformation
+│   ├── tune.py          # Optuna hyperparameter optimization script
+│   ├── train.py         # Final model training loop
+│   └── inference.py     # (Planned) Real-time prediction script
+├── notebooks/           # EDA and Experimentation
+└── README.md

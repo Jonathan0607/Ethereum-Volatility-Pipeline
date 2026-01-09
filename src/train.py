@@ -6,7 +6,7 @@ import numpy as np
 from model import LSTMModel, prepare_data
 from features import calculate_features
 
-def train_model(epochs=50, lr=0.001):
+def train_model(epochs=100, lr=0.01):
     print("Loading data...")
     try:
         df = pd.read_csv('data/eth_hourly.csv')
