@@ -3,7 +3,13 @@ import numpy as np
 from statsmodels.tsa.stattools import adfuller
 
 def calculate_features(df):
+    """
+    Adds Log Returns and Realized Volatility to the dataframe.
+    """
+    df = df.copy()
+    
     # 1. Log Returns (Price Stationarity)
+    # Formula: ln(Price_t / Price_t-1)
     df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
     
     # 2. Realized Volatility (Rolling Window)
@@ -22,26 +28,11 @@ def check_stationarity(series):
     """
     result = adfuller(series.values)
     p_value = result[1]
-    print(f"ADF P-Value: {p_value:.5f}")
+    
+    print(f"   [ADF Test] P-Value: {p_value:.5f}")
     if p_value < 0.05:
-        print("Result: Data is STATIONARY (Ready for LSTM)")
+        print("   [Result] Data is STATIONARY (Ready for LSTM)")
         return True
     else:
-        print("Result: Data is NON-STATIONARY (Needs differencing)")
+        print("   [Result] Data is NON-STATIONARY (Needs differencing)")
         return False
-
-if __name__ == "__main__":
-    # Create dummy data if file doesn't exist yet
-    try:
-        df = pd.read_csv('data/eth_hourly.csv')
-    except FileNotFoundError:
-        print("Run fetch_data.py first!")
-        exit()
-        
-    df = calculate_features(df)
-    
-    print("Checking Close Price Stationarity:")
-    check_stationarity(df['close'])
-    
-    print("\nChecking Log-Returns Stationarity:")
-    check_stationarity(df['log_ret'])

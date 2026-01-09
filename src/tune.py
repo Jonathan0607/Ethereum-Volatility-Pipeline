@@ -135,22 +135,17 @@ def objective(trial):
         
     return val_loss
 
-# --- 4. Run the Optimization ---
-if __name__ == "__main__":
-    # Create a "Study" to find the best params
+# CHANGE: Wrap the execution in a function we can call
+def run_optimization():
+    print("--- Starting Stage 1: Hyperparameter Tuning (Optuna) ---")
     study = optuna.create_study(direction="minimize")
-    print("Starting Hyperparameter Tuning...")
+    study.optimize(objective, n_trials=10) # Run 10 trials
     
-    # Run 10 trials
-    study.optimize(objective, n_trials=10)
+    print("--- Tuning Complete ---")
+    print(f"Best Loss: {study.best_trial.value}")
     
-    print("\nBest Results Found:")
-    trial = study.best_trial
-    print(f"  Validation Loss: {trial.value}")
-    print("  Best Parameters: ")
-    for key, value in trial.params.items():
-        print(f"    {key}: {value}")
-        
-    # Optional: Save best params to a file (to use later)
-    with open("best_params.txt", "w") as f:
-        f.write(str(trial.params))
+    # RETURN the best parameters as a dictionary
+    return study.best_trial.params
+
+if __name__ == "__main__":
+    run_optimization()
