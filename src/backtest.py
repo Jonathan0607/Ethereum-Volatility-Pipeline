@@ -2,9 +2,15 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import sys
+
+# Ensure we can import local modules
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from features import calculate_features
+from regimes import detect_regimes
 
 def load_data():
-    # Load your processed data
     current_dir = os.path.dirname(os.path.abspath(__file__))
     data_path = os.path.join(current_dir, '..', 'data', 'eth_hourly.csv')
     
@@ -16,37 +22,46 @@ def load_data():
 
 def run_backtest(df):
     """
-    Simulates a strategy where we:
-    - BUY when volatility is Low (Stable Regime)
-    - SELL/CASH when volatility is High (Risk Regime)
+    Simulates: Regime + Trend (EMA) + Volume Confirmation (The False Signal Filter)
     """
-    print("Running Backtest...")
+    print("Running Backtest with Volume Filter...")
 
-    # 1. Calculate Market Returns (Buy & Hold)
-    # We use 'close' price to calculate hourly percentage change
+    # 1. Pipeline Logic
+    df = calculate_features(df)
+    df = detect_regimes(df)
+    
+    # 2. Market Returns
     df['market_returns'] = df['close'].pct_change()
     
-    # 2. Simulate a Signal (If you haven't saved model predictions yet, we simulate a proxy)
-    # REALITY CHECK: In the future, replace this with: df['signal'] = model.predict(X)
-    # FOR NOW: We use Rolling Volatility as a proxy for the GMM Regime to test the engine
-    df['rolling_vol'] = df['close'].pct_change().rolling(window=24).std()
-    threshold = df['rolling_vol'].mean() + 0.5 * df['rolling_vol'].std()
+    # 3. Technical Indicators
+    # Trend: EMA 24 (Fast reaction)
+    df['fast_trend'] = df['close'].ewm(span=24, adjust=False).mean()
     
-    # Strategy: If Volatility is HIGH, go to Cash (0). Else, go Long (1).
-    df['signal'] = np.where(df['rolling_vol'] > threshold, 0, 1)
+    # Volume: 24-Hour Average Volume
+    df['vol_ma'] = df['volume'].rolling(window=24).mean()
     
-    # 3. Calculate Strategy Returns
-    # We shift signal by 1 because we act on the signal *next* hour
+    # 4. THE SHARPE BOOSTER LOGIC
+    # Condition A: Regime is Safe (0)
+    # Condition B: Price is in an Uptrend (Price > EMA)
+    # Condition C: Volume is Strong (Current Vol > Average Vol) -> NEW!
+    
+    long_condition = (
+        (df['regime'] == 0) & 
+        (df['close'] > df['fast_trend']) & 
+        (df['volume'] > df['vol_ma'])  # Only buy with conviction
+    )
+    
+    # Set Signal
+    df['signal'] = np.where(long_condition, 1, 0)
+    
+    # 5. Returns
     df['strategy_returns'] = df['market_returns'] * df['signal'].shift(1)
-    
-    # 4. Cumulative Returns (The "Equity Curve")
     df['cumulative_market'] = (1 + df['market_returns']).cumprod()
     df['cumulative_strategy'] = (1 + df['strategy_returns']).cumprod()
     
     return df
-
 def calculate_metrics(df):
-    # Annualized Sharpe Ratio (assuming 24/7 crypto trading)
+    # Annualized Sharpe Ratio
     risk_free_rate = 0.0
     strategy_mean = df['strategy_returns'].mean() * 24 * 365
     strategy_std = df['strategy_returns'].std() * np.sqrt(24 * 365)
@@ -58,18 +73,18 @@ def calculate_metrics(df):
     drawdown = (cumulative - peak) / peak
     max_drawdown = drawdown.min()
     
-    print("\n--- Performance Metrics ---")
-    print(f"Total Return (Market):   {(df['cumulative_market'].iloc[-1] - 1)*100:.2f}%")
-    print(f"Total Return (Strategy): {(df['cumulative_strategy'].iloc[-1] - 1)*100:.2f}%")
-    print(f"Sharpe Ratio:            {sharpe:.2f}")
-    print(f"Max Drawdown:            {max_drawdown*100:.2f}%")
+    print("\n=== AI-POWERED BACKTEST RESULTS ===")
+    print(f"Market Return:   {(df['cumulative_market'].iloc[-1] - 1)*100:.2f}%")
+    print(f"Strategy Return: {(df['cumulative_strategy'].iloc[-1] - 1)*100:.2f}%")
+    print(f"Sharpe Ratio:    {sharpe:.2f}")
+    print(f"Max Drawdown:    {max_drawdown*100:.2f}%")
 
 def plot_results(df):
     plt.figure(figsize=(12, 6))
     plt.plot(df.index, df['cumulative_market'], label='Buy & Hold (ETH)', color='gray', alpha=0.5)
-    plt.plot(df.index, df['cumulative_strategy'], label='Regime Strategy', color='blue')
+    plt.plot(df.index, df['cumulative_strategy'], label='AI Strategy (Aggressive)', color='blue', linewidth=1.5)
     
-    plt.title('Strategy Performance: Risk-Off during High Volatility')
+    plt.title('Strategy Performance: GMM Regime + EMA 24 Filter')
     plt.ylabel('Cumulative Return ($1 invested)')
     plt.legend()
     plt.grid(True, alpha=0.3)
@@ -78,7 +93,7 @@ def plot_results(df):
     current_dir = os.path.dirname(os.path.abspath(__file__))
     output_path = os.path.join(current_dir, '..', 'backtest_results.png')
     plt.savefig(output_path)
-    print(f"\nBacktest chart saved to: {output_path}")
+    print(f"Chart saved to {output_path}")
 
 if __name__ == "__main__":
     try:

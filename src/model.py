@@ -1,53 +1,68 @@
 import torch
 import torch.nn as nn
-import numpy as np
-import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
-from torch.utils.data import DataLoader, TensorDataset
 
 class LSTMModel(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers, output_dim):
+    """
+    Standard LSTM architecture for Time Series Forecasting.
+    """
+    def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, output_dim=1, dropout=0.2):
         super(LSTMModel, self).__init__()
+        
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         
         # LSTM Layer
-        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
+        # batch_first=True means input shape is (batch, seq_len, features)
+        self.lstm = nn.LSTM(
+            input_dim, 
+            hidden_dim, 
+            num_layers, 
+            batch_first=True, 
+            dropout=dropout
+        )
         
-        # Fully Connected Layer (Output)
+        # Fully Connected Output Layer
         self.fc = nn.Linear(hidden_dim, output_dim)
         
     def forward(self, x):
         # Initialize hidden state and cell state
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).requires_grad_()
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).requires_grad_()
+        # .to(x.device) ensures it works on both CPU and GPU/MPS automatically
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).to(x.device)
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).to(x.device)
         
         # Forward propagate LSTM
-        out, (hn, cn) = self.lstm(x, (h0.detach(), c0.detach()))
+        # out shape: (batch_size, seq_length, hidden_dim)
+        out, _ = self.lstm(x, (h0, c0))
         
-        # Decode the hidden state of the last time step
-        out = self.fc(out[:, -1, :]) 
+        # Decode the hidden state of the LAST time step
+        # We only care about the final prediction
+        out = self.fc(out[:, -1, :])
         return out
 
-def prepare_data(df, sequence_length=60):
-    """
-    Prepares data for LSTM (Sliding Window approach).
-    """
-    data = df['log_ret'].values.reshape(-1, 1)
-    
-    # Scale data (Standard practice for LSTMs)
-    scaler = MinMaxScaler(feature_range=(-1, 1))
-    data_scaled = scaler.fit_transform(data)
-    
-    X, y = [], []
-    for i in range(len(data_scaled) - sequence_length):
-        X.append(data_scaled[i:i+sequence_length])
-        y.append(data_scaled[i+sequence_length])
-        
-    return np.array(X), np.array(y)
-
+# --- SELF-TEST BLOCK ---
+# This runs only if you execute 'python src/model.py' directly.
+# It proves the model architecture is valid without needing data.
 if __name__ == "__main__":
-    # Test the model structure
-    model = LSTMModel(input_dim=1, hidden_dim=32, num_layers=2, output_dim=1)
-    print(model)
-    print("LSTM Architecture confirmed.")
+    print("Testing LSTM Model Architecture...")
+    
+    # 1. Create a dummy input (Batch=32, Seq_Len=60, Features=1)
+    # This simulates 32 different 60-hour windows of volatility data
+    dummy_input = torch.randn(32, 60, 1)
+    
+    # 2. Initialize Model
+    model = LSTMModel(input_dim=1, hidden_dim=64, output_dim=1, dropout=0.2)
+    
+    # 3. Forward Pass
+    try:
+        output = model(dummy_input)
+        print(f"Input Shape: {dummy_input.shape}")
+        print(f"Output Shape: {output.shape}")
+        
+        # Check if output is (32, 1)
+        if output.shape == (32, 1):
+            print("✅ SUCCESS: Model dimensions are correct.")
+        else:
+            print("❌ ERROR: Output shape is wrong.")
+            
+    except Exception as e:
+        print(f"❌ CRASHED: {e}")
