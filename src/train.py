@@ -1,13 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset # <--- Added this back
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 import pandas as pd
 import numpy as np
 import os
 import sys
 import ast
 
-# Ensure imports work
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from model import LSTMModel
 from features import calculate_features
@@ -15,6 +16,7 @@ from features import calculate_features
 # --- CONFIG ---
 SEQ_LENGTH = 60
 Target_Column = 'volatility'
+BATCH_SIZE = 1024  # <--- Process data in chunks of 512 rows
 
 def load_best_params():
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -33,7 +35,6 @@ def create_sequences(data, seq_length):
         ys.append(y)
     return np.array(xs), np.array(ys)
 
-# CHANGED: Added 'hyperparams=None' to accept arguments from pipeline.py
 def train_model(hyperparams=None):
     print("Starting Production Training...")
     
@@ -54,11 +55,14 @@ def train_model(hyperparams=None):
     # 4. Prepare Sequences
     X, y = create_sequences(data_scaled, SEQ_LENGTH)
     
-    # Feature dim is 1 (Volatility only)
     X_tensor = torch.from_numpy(X).unsqueeze(-1)
     y_tensor = torch.from_numpy(y).unsqueeze(-1)
     
-    # 5. Load Params (Use passed args OR load from file)
+    # --- NEW: Create DataLoader (The Fix) ---
+    dataset = TensorDataset(X_tensor, y_tensor)
+    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+    
+    # 5. Load Params
     if hyperparams:
         params = hyperparams
     else:
@@ -71,7 +75,7 @@ def train_model(hyperparams=None):
     print(f"Training on: {device}")
     
     model = LSTMModel(
-        input_dim=1,  # Ensuring this is 1 (Fixed)
+        input_dim=1,  
         hidden_dim=params['hidden_dim'], 
         num_layers=params['num_layers'], 
         output_dim=1, 
@@ -81,19 +85,35 @@ def train_model(hyperparams=None):
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=params['lr'])
     
-    # 7. Training Loop
-    model.train()
-    X_tensor, y_tensor = X_tensor.to(device), y_tensor.to(device)
+    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5)
     
-    for epoch in range(50):
-        optimizer.zero_grad()
-        output = model(X_tensor)
-        loss = criterion(output, y_tensor)
-        loss.backward()
-        optimizer.step()
+    # 7. Training Loop (Now using Mini-Batches)
+    model.train()
+    
+    for epoch in range(100):
+        batch_losses = []
+        
+        # Iterate through the loader (Chunks of 512)
+        for batch_X, batch_y in loader:
+            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+            
+            optimizer.zero_grad()
+            output = model(batch_X)
+            loss = criterion(output, batch_y)
+            loss.backward()
+            optimizer.step()
+            
+            batch_losses.append(loss.item())
+        
+        # Calculate average loss for the epoch
+        avg_loss = np.mean(batch_losses)
+        
+        # Step the Scheduler
+        scheduler.step(avg_loss)
         
         if (epoch+1) % 10 == 0:
-            print(f"Epoch {epoch+1}/50 | Loss: {loss.item():.5f}")
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"Epoch {epoch+1}/100 | Loss: {avg_loss:.5f} | LR: {current_lr:.6f}")
             
     # 8. Save Model
     save_path = os.path.join(current_dir, '..', 'lstm_model.pth')
