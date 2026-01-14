@@ -3,7 +3,7 @@ numpy
 ccxt
 torch
 scikit-learn
-statsmodels
 matplotlib
 optuna
 arch
+yfinance
