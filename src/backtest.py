@@ -4,13 +4,13 @@ import matplotlib.pyplot as plt
 import os
 import sys
 import torch
+import ast
 
-# Ensure we can import local modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 from features import calculate_features
 from regimes import detect_regimes
 from model import LSTMModel
+from data_split import split_data  # <--- Single Source of Truth
 
 # --- CONFIG ---
 SEQ_LENGTH = 60
@@ -24,16 +24,16 @@ def load_data():
     return df
 
 def get_lstm_predictions(df):
-    print("Generating LSTM Volatility Forecasts...")
+    """
+    Generates predictions for the TEST set using the saved model and saved scaler.
+    """
+    print("Generating LSTM Volatility Forecasts (Strict Test Set)...")
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    
-    import ast
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    params_path = os.path.join(current_dir, '..', 'best_params.txt')
-    model_path = os.path.join(current_dir, '..', 'lstm_model.pth')
     
-    # Defaults
-    hidden_dim, num_layers, dropout = 64, 2, 0.2
+    # 1. Load Params
+    params_path = os.path.join(current_dir, '..', 'best_params.txt')
+    hidden_dim, num_layers, dropout = 64, 2, 0.2 # Fallbacks
     
     if os.path.exists(params_path):
         with open(params_path, 'r') as f:
@@ -42,27 +42,45 @@ def get_lstm_predictions(df):
             num_layers = params.get('num_layers', 2)
             dropout = params.get('dropout', 0.2)
             
+    # 2. Load Model
     model = LSTMModel(input_dim=1, hidden_dim=hidden_dim, num_layers=num_layers, output_dim=1, dropout=dropout)
+    model_path = os.path.join(current_dir, '..', 'lstm_model.pth')
     
-    if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path, map_location=device))
-    else:
-        return pd.Series(0, index=df.index)
-
+    if not os.path.exists(model_path):
+        raise FileNotFoundError("Model not found! Run train.py first.")
+        
+    model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
     model.eval()
     
-    # Prepare Data
+    # 3. LOAD SAVED SCALER (CRITICAL)
+    # We must use the training set's mean/std to scale the test set.
+    mean_path = os.path.join(current_dir, '..', 'scaler_mean.npy')
+    std_path = os.path.join(current_dir, '..', 'scaler_std.npy')
+    
+    if not os.path.exists(mean_path) or not os.path.exists(std_path):
+        raise FileNotFoundError("Scaler stats not found! Run train.py first to generate them.")
+        
+    mean = np.load(mean_path)
+    std = np.load(std_path)
+    
+    # 4. Prepare Data
     data = df['volatility'].values.astype(np.float32)
-    mean = np.mean(data)
-    std = np.std(data)
+    # Apply the TRAINING mean/std to the TEST data
     data_scaled = (data - mean) / (std + 1e-8)
     
     predictions = [np.nan] * SEQ_LENGTH 
     inputs = []
+    
+    # Note: This simple loop misses the first SEQ_LENGTH points of the test set 
+    # because it doesn't look back into the train set for context. 
+    # For Phase 0, this is acceptable strict separation.
     for i in range(len(data_scaled) - SEQ_LENGTH):
         inputs.append(data_scaled[i:i+SEQ_LENGTH])
     
+    if len(inputs) == 0:
+        return pd.Series(0, index=df.index)
+
     inputs = np.array(inputs)
     inputs = torch.from_numpy(inputs).unsqueeze(-1).to(device)
     
@@ -71,62 +89,60 @@ def get_lstm_predictions(df):
         for i in range(0, len(inputs), batch_size):
             batch = inputs[i:i+batch_size]
             output = model(batch)
+            # Unscale the prediction
             preds = output.cpu().numpy().flatten() * (std + 1e-8) + mean
             predictions.extend(preds)
             
     return pd.Series(predictions, index=df.index)
 
 def run_backtest(df):
-    """
-    STRATEGY V6: 'THE SHARPE BREAKER'
-    1. Faster Entry: EMA 20 (Standard Bollinger Mean).
-    2. Stricter Safety: LSTM Threshold lowered to 1.8x.
-    3. Faster Volume: Volume MA lowered to 12 (React to breakout volume faster).
-    """
-    print("Running Backtest with Sharpe Optimization...")
+    print("Running Backtest with Strict Chronological Split...")
 
+    # 1. Feature Engineering (Calculate on full DF to ensure smooth MAs at the cut boundary)
     df = calculate_features(df)
-    df = detect_regimes(df) # Uses 2-component GMM (Safe vs Risk)
-    df['lstm_pred_vol'] = get_lstm_predictions(df)
     
-    df['market_returns'] = df['close'].pct_change()
+    # 2. STRICT SPLIT: We throw away the training data now.
+    _, test_df = split_data(df)
     
-    # --- TECHNICALS TUNING ---
-    # Tweak 1: EMA 20 is slightly faster than 24.
-    df['fast_trend'] = df['close'].ewm(span=20, adjust=False).mean()
+    if test_df.empty:
+        raise ValueError("Test Set is empty! Check your TEST_START_DATE in data_split.py")
+        
+    print(f"--- BACKTEST STARTING ON {test_df.index[0]} ---")
     
-    # Tweak 2: EMA 50 (Keep robust baseline for Parabolic check)
-    df['slow_trend'] = df['close'].ewm(span=50, adjust=False).mean()
+    # 3. Detect Regimes 
+    # ideally we fit GMM on train and predict on test, but refitting on test is OK for Phase 0
+    test_df = detect_regimes(test_df) 
     
-    # Tweak 3: Volume MA 12 (Reacts faster to pump volume than 24)
-    df['vol_ma'] = df['volume'].rolling(window=12).mean()
+    # 4. Get Predictions (Using Test Data only)
+    test_df['lstm_pred_vol'] = get_lstm_predictions(test_df)
+    
+    test_df['market_returns'] = test_df['close'].pct_change()
+    
+    # --- TECHNICALS ---
+    test_df['fast_trend'] = test_df['close'].ewm(span=20, adjust=False).mean()
+    test_df['slow_trend'] = test_df['close'].ewm(span=50, adjust=False).mean()
+    test_df['vol_ma'] = test_df['volume'].rolling(window=12).mean()
     
     # --- LOGIC ---
-    
-    # Base Signal
     base_signal = (
-        (df['regime'] == 0) & 
-        (df['close'] > df['fast_trend']) &
-        (df['volume'] > df['vol_ma'])
+        (test_df['regime'] == 0) & 
+        (test_df['close'] > test_df['fast_trend']) &
+        (test_df['volume'] > test_df['vol_ma'])
     )
     
-    # Tweak 4: Stricter LSTM Threshold (1.8 instead of 2.0)
-    # Filters out slightly more "medium-high" risk trades to lower Drawdown.
-    vol_threshold = df['volatility'].rolling(24).mean() * 1.8
-    lstm_risk_on = (df['lstm_pred_vol'] > vol_threshold)
-    
-    # Parabolic Exception (Keep this, it works great)
-    parabolic_move = (df['close'] > (df['slow_trend'] * 1.02))
+    vol_threshold = test_df['volatility'].rolling(24).mean() * 1.8
+    lstm_risk_on = (test_df['lstm_pred_vol'] > vol_threshold)
+    parabolic_move = (test_df['close'] > (test_df['slow_trend'] * 1.02))
     
     long_condition = base_signal & (~lstm_risk_on | parabolic_move)
     
-    df['signal'] = np.where(long_condition, 1, 0)
+    test_df['signal'] = np.where(long_condition, 1, 0)
     
-    df['strategy_returns'] = df['market_returns'] * df['signal'].shift(1)
-    df['cumulative_market'] = (1 + df['market_returns']).cumprod()
-    df['cumulative_strategy'] = (1 + df['strategy_returns']).cumprod()
+    test_df['strategy_returns'] = test_df['market_returns'] * test_df['signal'].shift(1)
+    test_df['cumulative_market'] = (1 + test_df['market_returns']).cumprod()
+    test_df['cumulative_strategy'] = (1 + test_df['strategy_returns']).cumprod()
     
-    return df
+    return test_df
 
 def calculate_metrics(df):
     risk_free_rate = 0.0
@@ -139,7 +155,7 @@ def calculate_metrics(df):
     drawdown = (cumulative - peak) / peak
     max_drawdown = drawdown.min()
     
-    print("\n=== AI-POWERED BACKTEST RESULTS ===")
+    print("\n=== AI-POWERED BACKTEST RESULTS (OUT OF SAMPLE) ===")
     print(f"Market Return:   {(df['cumulative_market'].iloc[-1] - 1)*100:.2f}%")
     print(f"Strategy Return: {(df['cumulative_strategy'].iloc[-1] - 1)*100:.2f}%")
     print(f"Sharpe Ratio:    {sharpe:.2f}")
@@ -148,8 +164,8 @@ def calculate_metrics(df):
 def plot_results(df):
     plt.figure(figsize=(12, 6))
     plt.plot(df.index, df['cumulative_market'], label='Buy & Hold (ETH)', color='gray', alpha=0.5)
-    plt.plot(df.index, df['cumulative_strategy'], label='Hybrid AI (Sharpe Optimized)', color='blue', linewidth=1.5)
-    plt.title('Strategy Performance: Optimized AI Model')
+    plt.plot(df.index, df['cumulative_strategy'], label='Hybrid AI (Test Set)', color='blue', linewidth=1.5)
+    plt.title('Strategy Performance: Out-of-Sample Test')
     plt.legend()
     plt.grid(True, alpha=0.3)
     

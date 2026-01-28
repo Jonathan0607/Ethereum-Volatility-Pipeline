@@ -31,12 +31,10 @@ def load_data():
 def get_lstm_predictions(df):
     print("   [AI] Generating LSTM Forecasts for Dashboard...")
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    params_path = os.path.join(current_dir, '..', 'best_params.txt')
-    model_path = os.path.join(current_dir, '..', 'lstm_model.pth')
     
-    # Defaults
+    # 1. Load Params
+    params_path = os.path.join(current_dir, '..', 'best_params.txt')
     hidden_dim, num_layers, dropout = 64, 2, 0.2
     
     if os.path.exists(params_path):
@@ -46,18 +44,33 @@ def get_lstm_predictions(df):
             num_layers = params.get('num_layers', 2)
             dropout = params.get('dropout', 0.2)
             
+    # 2. Load Model
     model = LSTMModel(input_dim=1, hidden_dim=hidden_dim, num_layers=num_layers, output_dim=1, dropout=dropout)
+    model_path = os.path.join(current_dir, '..', 'lstm_model.pth')
     
     if os.path.exists(model_path):
         model.load_state_dict(torch.load(model_path, map_location=device))
         model.to(device)
         model.eval()
     else:
+        print("   [WARNING] Model not found. Returning flat line.")
         return pd.Series(0, index=df.index)
 
-    # Prepare Data
+    # 3. LOAD SAVED SCALER (CRITICAL FIX)
+    # We use the training set's mean/std. If missing, we fallback (but warn).
+    mean_path = os.path.join(current_dir, '..', 'scaler_mean.npy')
+    std_path = os.path.join(current_dir, '..', 'scaler_std.npy')
+    
+    if os.path.exists(mean_path) and os.path.exists(std_path):
+        mean = np.load(mean_path)
+        std = np.load(std_path)
+    else:
+        print("   [WARNING] Scaler stats not found! Dashboard may look skewed.")
+        data = df['volatility'].values
+        mean, std = np.mean(data), np.std(data)
+
+    # 4. Prepare Data
     data = df['volatility'].values.astype(np.float32)
-    mean, std = np.mean(data), np.std(data)
     data_scaled = (data - mean) / (std + 1e-8)
     
     predictions = [np.nan] * SEQ_LENGTH 
@@ -82,22 +95,22 @@ def get_lstm_predictions(df):
 def plot_dashboard(df):
     print("   [Visual] Rendering Final Portfolio Dashboard...")
     
-    # Filter to last 2000 hours for clarity
+    # Filter to last 2000 hours for clarity (approx 3 months)
     subset = df.tail(2000)
     
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
     
-    # --- PLOT 1: Regimes & Parabolic Moves ---
+    # --- PLOT 1: Regimes & Price ---
     ax1.plot(subset.index, subset['close'], color='gray', alpha=0.3, label='Price')
     
     # Plot Regimes
     safe = subset[subset['regime'] == 0]
     risk = subset[subset['regime'] == 1]
     
-    ax1.scatter(safe.index, safe['close'], color='green', s=10, alpha=0.6, label='Safe Regime (GMM)')
-    ax1.scatter(risk.index, risk['close'], color='red', s=10, alpha=0.6, label='Risk Regime (GMM)')
+    ax1.scatter(safe.index, safe['close'], color='green', s=10, alpha=0.6, label='Safe Regime')
+    ax1.scatter(risk.index, risk['close'], color='red', s=10, alpha=0.6, label='Risk Regime')
     
-    ax1.set_title(f'Market Regimes & AI Strategy (Sharpe: 1.29)', fontsize=14, fontweight='bold')
+    ax1.set_title('Market Regimes & AI Strategy', fontsize=14, fontweight='bold')
     ax1.set_ylabel('Price (USD)')
     ax1.legend(loc='upper left')
     ax1.grid(True, alpha=0.15)
@@ -106,13 +119,14 @@ def plot_dashboard(df):
     ax2.plot(subset.index, subset['volatility'], color='blue', alpha=0.5, label='Actual Volatility')
     ax2.plot(subset.index, subset['lstm_pred'], color='magenta', linestyle='--', linewidth=1.5, label='AI Prediction')
     
-    # VISUALIZE THE 1.8x THRESHOLD (The "Veto" Line)
-    # This visually explains why the AI exited trades
+    # VISUALIZE THE THRESHOLD
     veto_line = subset['volatility'].rolling(24).mean() * 1.8
-    ax2.plot(subset.index, veto_line, color='black', linestyle=':', alpha=0.6, label='AI Veto Threshold (1.8σ)')
+    ax2.plot(subset.index, veto_line, color='black', linestyle=':', alpha=0.6, label='Risk Threshold (1.8σ)')
     
-    # Fill area where AI was triggered (Prediction > Threshold)
-    ax2.fill_between(subset.index, 0, 0.05, where=(subset['lstm_pred'] > veto_line), color='red', alpha=0.1, transform=ax2.get_xaxis_transform(), label='AI "Crash" Signal')
+    # Fill area where AI was triggered
+    ax2.fill_between(subset.index, 0, subset['volatility'].max(), 
+                     where=(subset['lstm_pred'] > veto_line), 
+                     color='red', alpha=0.1, label='AI Signal: CASH')
 
     ax2.set_title('AI Risk Detection (LSTM)', fontsize=12)
     ax2.set_ylabel('Volatility')
@@ -129,9 +143,12 @@ def plot_dashboard(df):
     plt.savefig(output_path, dpi=300)
     print(f"   [Success] Dashboard saved to {output_path}")
 
-if __name__ == "__main__":
+def run_visualizer():
     df = load_data()
     df = calculate_features(df)
     df = detect_regimes(df)
     df['lstm_pred'] = get_lstm_predictions(df)
     plot_dashboard(df)
+
+if __name__ == "__main__":
+    run_visualizer()
