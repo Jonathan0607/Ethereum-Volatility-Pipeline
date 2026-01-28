@@ -45,7 +45,7 @@ def objective(trial):
     
     # 2. STRICT SPLIT: We ONLY optimize on Historical Training Data
     # The 'Future' (Test Set) is completely discarded here.
-    train_df, _ = split_data(df)
+    train_df, _ = split_data(df, verbose=False)
     
     # Speed Patch: Use last 3000 rows of the TRAINING set (not the future!)
     if len(train_df) > 3000:

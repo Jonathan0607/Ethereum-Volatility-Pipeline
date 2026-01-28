@@ -60,7 +60,7 @@ def train_model(hyperparams=None):
     # We need to use these exact numbers to scale the test data later.
     np.save(os.path.join(current_dir, '..', 'scaler_mean.npy'), mean)
     np.save(os.path.join(current_dir, '..', 'scaler_std.npy'), std)
-    print(f"[Scaler] Saved training mean ({mean:.4f}) and std ({std:.4f})")
+    print(f"Saved training mean ({mean:.4f}) and std ({std:.4f})")
     
     data_scaled = (data - mean) / (std + 1e-8)
     

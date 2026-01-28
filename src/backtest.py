@@ -10,9 +10,8 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from features import calculate_features
 from regimes import detect_regimes
 from model import LSTMModel
-from data_split import split_data  # <--- Single Source of Truth
+from data_split import split_data  
 
-# --- CONFIG ---
 SEQ_LENGTH = 60
 
 def load_data():
@@ -53,8 +52,7 @@ def get_lstm_predictions(df):
     model.to(device)
     model.eval()
     
-    # 3. LOAD SAVED SCALER (CRITICAL)
-    # We must use the training set's mean/std to scale the test set.
+    # 3. LOAD SAVED SCALER 
     mean_path = os.path.join(current_dir, '..', 'scaler_mean.npy')
     std_path = os.path.join(current_dir, '..', 'scaler_std.npy')
     
@@ -66,7 +64,6 @@ def get_lstm_predictions(df):
     
     # 4. Prepare Data
     data = df['volatility'].values.astype(np.float32)
-    # Apply the TRAINING mean/std to the TEST data
     data_scaled = (data - mean) / (std + 1e-8)
     
     predictions = [np.nan] * SEQ_LENGTH 
@@ -102,7 +99,7 @@ def run_backtest(df):
     df = calculate_features(df)
     
     # 2. STRICT SPLIT: We throw away the training data now.
-    _, test_df = split_data(df)
+    _, test_df = split_data(df, verbose=False)
     
     if test_df.empty:
         raise ValueError("Test Set is empty! Check your TEST_START_DATE in data_split.py")

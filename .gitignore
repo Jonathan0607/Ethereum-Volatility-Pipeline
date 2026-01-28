@@ -1,19 +1,19 @@
-# Python System Files
+# Python cache
 __pycache__/
-*.py[cod]
-*$py.class
+*.pyc
 
-# Virtual Environment (Crucial!)
+# Virtual Environment
 venv/
-env/
+.env
 
-# Data & Models (Usually we don't commit large datasets or binary weights)
+# Data
 data/
+
+# Generated Artifacts (The Pipeline Output)
 *.pth
+*.npy
+*.png
+best_params.txt
 
-# Mac System Files
+# Mac System files
 .DS_Store
-
-# IDE Settings
-.vscode/
-.idea/

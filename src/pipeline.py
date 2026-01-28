@@ -15,7 +15,6 @@ import visualize
 def run_pipeline():
     print("==========================================")
     print("   ETHEREUM QUANT STRATEGY PIPELINE       ")
-    print("   Phase: Production (End-to-End)         ")
     print("==========================================\n")
     
     # 1. FETCH DATA (The Miner)

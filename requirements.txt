@@ -7,3 +7,5 @@ matplotlib
 optuna
 arch
 yfinance
+fastapi
+uvicorn
