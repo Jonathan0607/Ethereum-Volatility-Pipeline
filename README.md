@@ -15,8 +15,8 @@ Unlike traditional bots that rely solely on lagging indicators, this system uses
 | Metric | Buy & Hold (Benchmark) | **AI Strategy** |
 | :--- | :--- | :--- |
 | **Total Return** | -41.14% | **+24.10%** |
-| **Sharpe Ratio** | N/A | **1.82** |
-| **Max Drawdown** | *< -41.00%* | **-7.75%** |
+| **Sharpe Ratio** | Low | **1.82** |
+| **Max Drawdown** | High | **-7.75%** |
 
 
 > *Backtest Period: Out-of-Sample (Strict Chronological Split)*
