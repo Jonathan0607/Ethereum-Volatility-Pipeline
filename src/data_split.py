@@ -1,27 +1,29 @@
 import pandas as pd
+import numpy as np
 
-# --- CONFIGURATION ---
-TEST_START_DATE = "2025-01-01"
-
-def split_data(df: pd.DataFrame, verbose: bool = False):
+def split_data(df: pd.DataFrame, verbose: bool = True):
     """
-    Splits the DataFrame.
-    verbose=True: Prints the config (Use this only once per pipeline run).
-    verbose=False: Runs silently.
+    Splits data chronologically:
+    - First 80% = Train (History)
+    - Last 20%  = Test (Future)
     """
+    # Ensure sorted by date
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index)
-        df.sort_index(inplace=True)
-        
-    mask = (df.index < TEST_START_DATE)
+    df.sort_index(inplace=True)
     
-    train_df = df.loc[mask].copy()
-    test_df = df.loc[~mask].copy()
+    # Calculate the split point (80% mark)
+    split_idx = int(len(df) * 0.75)
+    
+    train_df = df.iloc[:split_idx].copy()
+    test_df = df.iloc[split_idx:].copy()
     
     if verbose:
-        print(f"[Data Split] Configuration:")
-        print(f"   - Cutoff Date: {TEST_START_DATE}")
-        print(f"   - Train Set:   {len(train_df)} rows")
-        print(f"   - Test Set:    {len(test_df)} rows\n")
+        print(f"\n[Data Split] Configuration (Dynamic 80/20):")
+        print(f"   - Total Rows:  {len(df)}")
+        print(f"   - Train Range: {train_df.index.min()} to {train_df.index.max()}")
+        print(f"   - Test Range:  {test_df.index.min()} to {test_df.index.max()}")
+        print(f"   - Train Size:  {len(train_df)} rows")
+        print(f"   - Test Size:   {len(test_df)} rows")
     
     return train_df, test_df
