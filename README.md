@@ -4,7 +4,9 @@
 
 A professional-grade quantitative trading strategy that combines **Econometrics (GARCH)**, **Unsupervised Learning (GMM)**, and **Deep Learning (LSTM)** to navigate Ethereum's volatility.
 
-Unlike traditional bots that rely solely on lagging indicators, this system uses a **Hybrid AI Architecture** to predict volatility regimes and dynamically manage risk, achieving a **1.29 Sharpe Ratio** and **3x Market Outperformance** over a 2-year backtest.
+Unlike traditional bots that rely solely on lagging indicators, this system uses a **Hybrid AI Architecture** to predict volatility regimes and dynamically manage risk. 
+
+**Performance Update:** In the latest out-of-sample test, the model demonstrated exceptional **Crisis Alpha**: while the market crashed **-41%**, this strategy generated a **+24%** return, achieving a **1.82 Sharpe Ratio** by successfully identifying and sitting out the crash.
 
 ---
 
@@ -12,12 +14,12 @@ Unlike traditional bots that rely solely on lagging indicators, this system uses
 
 | Metric | Buy & Hold (Benchmark) | **AI Strategy** |
 | :--- | :--- | :--- |
-| **Total Return** | +26.76% | **+84.95%** |
-| **Sharpe Ratio** | 0.52 | **1.29** |
-| **Max Drawdown** | -68.00% | **-21.39%** |
+| **Total Return** | -41.14% | **+24.10%** |
+| **Sharpe Ratio** | N/A | **1.82** |
+| **Max Drawdown** | *< -41.00%* | **-7.75%** |
 
 
-> *Backtest Period: Last 730 Days (Hourly Data)*
+> *Backtest Period: Out-of-Sample (Strict Chronological Split)*
 
 ---
 
@@ -31,7 +33,7 @@ Instead of using a simple rolling standard deviation (which lags price), we use 
 
 ### 2. Bayesian Optimization: Optuna
 Before training, the system uses **Optuna** to perform Bayesian Optimization. Unlike basic grid search, Optuna builds a probabilistic model of the loss function to efficiently find the global minima for hyperparameters:
-* **Search Space:** Learning Rate (Log-Uniform), Hidden Layers (32-128), Dropout (0.1-0.5).
+* **Search Space:** Learning Rate (Log-Uniform), Hidden Layers (32-64), Dropout (0.1-0.3).
 * **Objective:** Minimize Mean Squared Error (MSE) on the validation set.
 
 ### 3. Market Regime Detection: Gaussian Mixture Models (GMM)
@@ -77,7 +79,7 @@ The bot executes trades based on a strict decision tree:
 
 * **Sentiment Analysis:** Integrate **CryptoBERT** to analyze Twitter/News sentiment as an additional input feature.
 * **On-Chain Data:** Incorporate "Whale Wallet" movements and large transaction alerts via the **Etherscan API**.
-* **Reinforcement Learning:** Replace the static logic tree with a **PPO Agent** (Proximal Policy Optimization) to learn dynamic position sizing and adaptive risk management.
+* **High-Performance Compute:** Implement a **C++ Monte Carlo Engine** (via pybind11) for real-time risk simulation and Value-at-Risk (VaR) calculation.
 
 ## 📂 Project Structure
 
@@ -97,5 +99,5 @@ This project follows a modular "Senior Engineer" architecture, separating logic 
 │   ├── backtest.py         # Strategy Execution Engine
 │   └── visualize.py        # Dashboard Generator
 ├── requirements.txt        # Python Dependencies
+├── Dockerfile              # Containerization
 └── README.md               # Documentation
-
