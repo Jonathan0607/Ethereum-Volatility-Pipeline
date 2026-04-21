@@ -29,7 +29,6 @@ def fetch_data():
             "Volume": "volume"
         }, inplace=True)
         
-        df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_localize(None)
         
         if df.empty:
             print("ERROR: Yahoo Finance returned empty data. Check your internet.")
