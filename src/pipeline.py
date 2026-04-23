@@ -6,11 +6,9 @@ import pandas as pd
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import the modules
-import fetch_data
-import tune
-import train
+import data
+import strategy
 import backtest
-import visualize
 
 def run_pipeline():
     print("==========================================")
@@ -23,19 +21,17 @@ def run_pipeline():
     
     if not os.path.exists(data_path):
         print("[1/4] Data missing. Fetching fresh data...")
-        fetch_data.fetch_data()
+        data.fetch_data()
     else:
         print("[1/4] Data found. Skipping download.")
 
     # 2. HYPERPARAMETER TUNING (The Architect)
-    # We only tune if we haven't already found the best params.
-    # To force re-tuning, just delete 'best_params.txt'.
     params_path = os.path.join(current_dir, '..', 'best_params.txt')
     
     if not os.path.exists(params_path):
         print("\n[2/4] No params found. Running Bayesian Optimization...")
         try:
-            tune.run_optimization()
+            strategy.run_optimization()
         except Exception as e:
             print(f"CRITICAL ERROR during tuning: {e}")
             return
@@ -45,7 +41,7 @@ def run_pipeline():
     # 3. TRAIN MODEL (The Teacher)
     print("\n[3/4] Training Model on History...")
     try:
-        train.train_model()
+        strategy.train_model()
     except Exception as e:
         print(f"CRITICAL ERROR during training: {e}")
         return
@@ -56,12 +52,12 @@ def run_pipeline():
         # Load and Backtest
         df = backtest.load_data()
         results = backtest.run_backtest(df)
-        backtest.calculate_metrics(results)
-        backtest.plot_results(results) # Saves backtest_results.png
+        metrics = backtest.calculate_metrics(results)
+        backtest.export_json(results, metrics)
+        backtest.plot_results(results) 
         
         # Generate Detailed Dashboard
-        # We re-run the visualizer logic on the full dataset for the final chart
-        visualize.run_visualizer()
+        backtest.plot_dashboard(results)
         
     except Exception as e:
         print(f"CRITICAL ERROR during backtesting: {e}")
