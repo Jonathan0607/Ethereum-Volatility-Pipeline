@@ -1,27 +1,38 @@
+import requests
 import os
 import sys
 import sqlite3
 import pandas as pd
 import numpy as np
 import torch
+import pickle
 import ast
-import yfinance as yf  # <-- Replaced ccxt with yfinance
+import yfinance as yf
 import json
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 
-# Sibling imports for your models
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from data import calculate_features_test
-from strategy import predict_regimes, LSTMModel
+from data import calculate_features_test, FEATURE_COLS
+from strategy import predict_regimes, ProgressiveModel
+import monte_carlo
 
 app = FastAPI(title="Ethereum Quant Execution Engine")
 
-def initialize_database():
+# Volatility-Scaled Sizing
+TARGET_VOLATILITY = 0.02
+SEQ_LENGTH = 60
+
+def get_db_path():
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    db_path = os.path.join(current_dir, '..', 'trades.db')
+    data_dir = os.path.join(current_dir, '..', 'data')
+    os.makedirs(data_dir, exist_ok=True)
+    return os.path.join(data_dir, 'trades.db')
+
+def initialize_database():
+    db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute('''
@@ -34,176 +45,223 @@ def initialize_database():
         predicted_volatility REAL NOT NULL,
         regime INTEGER NOT NULL,
         status TEXT NOT NULL,
-        realized_pnl_pct REAL DEFAULT 0.0
+        realized_pnl_pct REAL DEFAULT 0.0,
+        position_size REAL DEFAULT 1.0
     )
     ''')
+    try:
+        cursor.execute("ALTER TABLE paper_trades ADD COLUMN position_size REAL DEFAULT 1.0")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
-    print(f"[Database] SQLite execution database initialized at {db_path}")
+    print(f"[Database] SQLite initialized at {db_path}")
 
-# Add CORS Middleware to allow Next.js port 3000
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- GLOBAL STATE ---
-MODEL_STATE = {
-    'lstm': None,
-    'mean': None,
-    'std': None,
-    'device': None
-}
+MODEL_STATE = {'model': None, 'feat_scaler': None, 'tgt_scaler': None, 'device': None}
 
 @app.on_event("startup")
 def load_artifacts():
-    print("[API] Booting up Execution Engine...")
+    print("[API] Booting Execution Engine (Volatility-Scaled Sizing)...")
     initialize_database()
     current_dir = os.path.dirname(os.path.abspath(__file__))
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     MODEL_STATE['device'] = device
-    
-    # 1. Load Scaler
-    MODEL_STATE['mean'] = np.load(os.path.join(current_dir, '..', 'scaler_mean.npy'))
-    MODEL_STATE['std'] = np.load(os.path.join(current_dir, '..', 'scaler_std.npy'))
-    
-    # 2. Load LSTM
+
+    # 1. Load Feature Scaler
+    scaler_path = os.path.join(current_dir, '..', 'scaler.pkl')
+    if os.path.exists(scaler_path):
+        with open(scaler_path, 'rb') as f:
+            MODEL_STATE['feat_scaler'] = pickle.load(f)
+    else:
+        mean_path = os.path.join(current_dir, '..', 'scaler_mean.npy')
+        std_path = os.path.join(current_dir, '..', 'scaler_std.npy')
+        if os.path.exists(mean_path) and os.path.exists(std_path):
+            print("   [Scaler] WARNING: Legacy scaler. Retrain to generate scaler.pkl.")
+            MODEL_STATE['feat_scaler'] = {'legacy': True, 'mean': np.load(mean_path), 'std': np.load(std_path)}
+
+    # 2. Load Target Scaler
+    tgt_path = os.path.join(current_dir, '..', 'target_scaler.pkl')
+    if os.path.exists(tgt_path):
+        with open(tgt_path, 'rb') as f:
+            MODEL_STATE['tgt_scaler'] = pickle.load(f)
+
+    # 3. Load ProgressiveModel
     params_path = os.path.join(current_dir, '..', 'best_params.txt')
     with open(params_path, 'r') as f:
         params = ast.literal_eval(f.read())
-        
-    model = LSTMModel(
-        input_dim=1, 
-        hidden_dim=params.get('hidden_dim', 64), 
-        num_layers=params.get('num_layers', 2), 
-        output_dim=1, 
-        dropout=params.get('dropout', 0.2)
+
+    input_dim = params.get('input_dim', len(FEATURE_COLS))
+    model = ProgressiveModel(
+        input_dim=input_dim, hidden_dim=params.get('hidden_dim', 64),
+        output_dim=1, dropout=params.get('dropout', 0.2)
     )
     model.load_state_dict(torch.load(os.path.join(current_dir, '..', 'lstm_model.pth'), map_location=device))
     model.to(device)
     model.eval()
-    MODEL_STATE['lstm'] = model
-    
-    print("[API] AI Models loaded into memory successfully.")
-    
-    # 3. Start Scheduler (The Shadow Mode Daemon)
+    MODEL_STATE['model'] = model
+
+    print(f"[API] ProgressiveModel loaded (input_dim={input_dim})")
+    print(f"[API] TARGET_VOLATILITY = {TARGET_VOLATILITY}")
+
     scheduler = BackgroundScheduler()
-    # Runs exactly at the top of every hour (e.g., 10:00:00, 11:00:00)
     scheduler.add_job(execute_trade_cycle, 'cron', minute=0, second=0)
     scheduler.start()
-    
-    print("[API] Shadow Mode Daemon active. Waiting for next hourly candle...")
-    
-    # Uncomment the line below if you want it to run immediately upon booting (for testing)
+    print("[API] Shadow Mode Daemon active.")
     execute_trade_cycle()
 
 def execute_trade_cycle():
-    """
-    The Core Loop: Fetch Data -> AI Inference -> Execute Trade -> Log State
-    """
-    print(f"\n[{datetime.now()}] Waking up for hourly execution cycle...")
-    
+    """Core Loop: Fetch → Features → Inference → Vol-Scaled Sizing → Execute"""
+    print(f"\n[{datetime.now()}] Hourly execution cycle...")
     try:
-        # 1. Fetch live data using Yahoo Finance
         raw_df = yf.download("ETH-USD", period="7d", interval="1h", progress=False, auto_adjust=True)
-        
-        # Format columns exactly like fetch_data.py
         if isinstance(raw_df.columns, pd.MultiIndex):
             raw_df.columns = [col[0] for col in raw_df.columns]
-            
-        raw_df.rename(columns={
-            "Open": "open", 
-            "High": "high", 
-            "Low": "low", 
-            "Close": "close", 
-            "Volume": "volume"
-        }, inplace=True)
-        
-        # Standardize the index name
+        raw_df.rename(columns={"Open":"open","High":"high","Low":"low","Close":"close","Volume":"volume"}, inplace=True)
         raw_df.index.name = 'timestamp'
-        
-        # Slice to the last 100 hours
         df = raw_df.tail(100).copy()
-        
-        # 2. Engineer Features & Detect Regime
+
+        # Feature engineering (identical to training pipeline)
         df = calculate_features_test(df)
         df = predict_regimes(df)
-        
-        # 3. Predict Volatility
-        data = df['volatility'].values.astype(np.float32)
-        data_scaled = (data - MODEL_STATE['mean']) / (MODEL_STATE['std'] + 1e-8)
-        
-        seq = data_scaled[-60:]
-        seq_tensor = torch.from_numpy(seq).unsqueeze(0).unsqueeze(-1).to(MODEL_STATE['device'])
-        
+
+        # Multi-feature inference
+        feat_scaler = MODEL_STATE['feat_scaler']
+        tgt_scaler = MODEL_STATE['tgt_scaler']
+
+        if isinstance(feat_scaler, dict) and feat_scaler.get('legacy'):
+            data = df['volatility'].values.astype(np.float32)
+            data_scaled = (data - feat_scaler['mean']) / (feat_scaler['std'] + 1e-8)
+            seq = data_scaled[-SEQ_LENGTH:]
+            seq_tensor = torch.from_numpy(seq).unsqueeze(0).unsqueeze(-1).to(MODEL_STATE['device'])
+        else:
+            feature_data = df[FEATURE_COLS].values.astype(np.float32)
+            feature_scaled = feat_scaler.transform(feature_data)
+            seq = feature_scaled[-SEQ_LENGTH:]
+            seq_tensor = torch.from_numpy(seq).unsqueeze(0).to(MODEL_STATE['device'])
+
         with torch.no_grad():
-            pred_scaled = MODEL_STATE['lstm'](seq_tensor).cpu().numpy().flatten()[0]
-            
-        pred_vol = pred_scaled * (MODEL_STATE['std'] + 1e-8) + MODEL_STATE['mean']
-        
-# 4. Evaluate Trading Logic (The Alpha)
+            pred_scaled = MODEL_STATE['model'](seq_tensor).cpu().numpy().flatten()[0]
+
+        if tgt_scaler is not None:
+            forecasted_vol = float(tgt_scaler.inverse_transform([[pred_scaled]])[0, 0])
+        elif isinstance(feat_scaler, dict) and feat_scaler.get('legacy'):
+            forecasted_vol = float(pred_scaled * (feat_scaler['std'] + 1e-8) + feat_scaler['mean'])
+        else:
+            forecasted_vol = float(pred_scaled)
+        forecasted_vol = max(forecasted_vol, 1e-8)
+
+        # Trading logic
         current_row = df.iloc[-1]
         fast_trend = df['close'].ewm(span=20, adjust=False).mean().iloc[-1]
         slow_trend = df['close'].ewm(span=50, adjust=False).mean().iloc[-1]
         vol_ma = df['volume'].rolling(window=12).mean().iloc[-1]
-        
         regime_gmm = current_row['regime_gmm']
-        regime_hmm = current_row['regime_hmm']
         close_price = current_row['close']
-        
-        # GMM ONLY: Winning logic from the Sharpe ablation study (2.47 Sharpe)
         market_safe = (regime_gmm == 0)
-        
-        base_signal = market_safe and (close_price > fast_trend) and (current_row['volume'] > vol_ma)        
+
+        base_signal = market_safe and (close_price > fast_trend) and (current_row['volume'] > vol_ma)
         vol_threshold = df['volatility'].rolling(24).mean().iloc[-1] * 1.8
-        lstm_risk_on = pred_vol > vol_threshold
+        lstm_risk_on = forecasted_vol > vol_threshold
         parabolic_move = close_price > (slow_trend * 1.02)
-        
-        # The Decision Tree
+
         action = "CASH"
+        position_size = 0.0
+
+        # Convert forecasted hourly volatility to daily volatility for sizing
+        daily_forecasted_vol = forecasted_vol * np.sqrt(24)
+
         if base_signal and (not lstm_risk_on or parabolic_move):
             action = "BUY"
-            
-        # 5. Log to SQLite Engine (Using GMM as the primary logged regime)
-        log_trade(action, close_price, float(pred_vol), int(regime_gmm))        
-    except Exception as e:
-        print(f"[API] CRITICAL ERROR during execution cycle: {e}")
+            position_size = min(TARGET_VOLATILITY / (daily_forecasted_vol + 1e-8), 1.0)
 
-def log_trade(action, price, pred_vol, regime):
-    """Writes the execution state to the local database"""
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    db_path = os.path.join(current_dir, '..', 'trades.db')
-    
+        mc_results = monte_carlo.simulate_gbm(
+            current_price=close_price, predicted_vol=float(forecasted_vol),
+            num_sims=10000, steps=24
+        )
+        log_trade(action, close_price, float(forecasted_vol), int(regime_gmm),
+                  mc_results['lower_bound'], mc_results['upper_bound'], position_size)
+    except Exception as e:
+        print(f"[API] CRITICAL ERROR: {e}")
+        import traceback; traceback.print_exc()
+
+def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0, position_size=0.0):
+    """Writes execution state to DB and fires Discord alert."""
+    db_path = get_db_path()
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    
+
+    cursor.execute("SELECT execution_price FROM paper_trades WHERE status = 'OPEN' ORDER BY timestamp ASC LIMIT 1")
+    open_trade = cursor.fetchone()
+
+    actual_action = action
+    status = 'CLOSED'
+
+    if action == "BUY":
+        if open_trade is None:
+            status = 'OPEN'
+        else:
+            actual_action = 'HOLDING'
+            status = 'OPEN'
+    elif action == "CASH":
+        if open_trade is not None:
+            entry_price = open_trade[0]
+            realized_pnl = ((price - entry_price) / entry_price) * 100
+            cursor.execute("UPDATE paper_trades SET status = 'CLOSED', realized_pnl_pct = ? WHERE status = 'OPEN'", (realized_pnl,))
+            status = 'CLOSED'
+        else:
+            actual_action = 'FLAT'
+            status = 'CLOSED'
+
     cursor.execute('''
-    INSERT INTO paper_trades (asset, action, execution_price, predicted_volatility, regime, status)
-    VALUES (?, ?, ?, ?, ?, ?)
-    ''', ('ETH/USDT', action, price, pred_vol, regime, 'OPEN'))
-    
+    INSERT INTO paper_trades (asset, action, execution_price, predicted_volatility, regime, status, position_size)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', ('ETH/USDT', actual_action, price, pred_vol, regime, status, position_size))
     conn.commit()
     conn.close()
-    
-    print(f"   [EXECUTED] {action} | Price: ${price:.2f} | AI Vol: {pred_vol:.4f} | Regime: {regime}")
+
+    size_pct = position_size * 100
+    print(f"   [EXECUTED] {actual_action} | ${price:.2f} | Vol: {pred_vol:.4f} | Regime: {regime} | Size: {size_pct:.1f}%")
+
+    WEBHOOK_URL = "https://discord.com/api/webhooks/1496988735961825383/ilhgj56YXQraoaQG4QyUwDzz83NJKkYhRyUlLxCGS5woxevFMIO3k47dlvMxDcPC2Q3F"
+    embed_color = 5763719 if actual_action == "BUY" else (15548997 if actual_action == "CASH" else 9807270)
+    payload = {
+        "username": "Chronos Execution Engine",
+        "embeds": [{
+            "title": f"\U0001f6a8 TRADE EXECUTED: {actual_action}",
+            "color": embed_color,
+            "fields": [
+                {"name": "Asset", "value": "ETH/USD", "inline": True},
+                {"name": "Execution Price", "value": f"${price:.2f}", "inline": True},
+                {"name": "GMM Regime", "value": "SAFE (0)" if regime == 0 else "DANGER (1)", "inline": True},
+                {"name": "AI Volatility", "value": f"{pred_vol:.5f}", "inline": True},
+                {"name": "Position Size", "value": f"{size_pct:.1f}%", "inline": True},
+                {"name": "Target Vol", "value": f"{TARGET_VOLATILITY*100:.1f}%", "inline": True},
+                {"name": "24h Risk Bottom", "value": f"${lower_bound:.2f}", "inline": True},
+                {"name": "24h Risk Top", "value": f"${upper_bound:.2f}", "inline": True}
+            ],
+            "footer": {"text": "Chronos • Volatility-Scaled Sizing"}
+        }]
+    }
+    try:
+        requests.post(WEBHOOK_URL, json=payload, timeout=5)
+    except Exception as e:
+        print(f"[Alert Error] Discord webhook failed: {e}")
 
 # --- DASHBOARD ENDPOINTS ---
 @app.get("/")
 def health_check():
-    return {"status": "Execution Engine Online", "engine": "FastAPI + ccxt + PyTorch"}
+    return {"status": "Online", "engine": "ProgressiveModel", "sizing": "Volatility-Scaled"}
 
 @app.get("/latest-state")
 def get_latest_state():
-    """Endpoint for the Next.js Command Center to poll the live SQLite database"""
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    db_path = os.path.join(current_dir, '..', 'trades.db')
-    
+    db_path = get_db_path()
     try:
         conn = sqlite3.connect(db_path)
-        # Fetch the last 10 execution states
         df = pd.read_sql_query("SELECT * FROM paper_trades ORDER BY timestamp DESC LIMIT 10", conn)
         conn.close()
         return df.to_dict(orient='records')
@@ -212,7 +270,6 @@ def get_latest_state():
 
 @app.get("/backtest-data")
 def get_backtest_data():
-    """Serves the pre-generated backtest results JSON for the frontend chart."""
     from starlette.responses import Response
     current_dir = os.path.dirname(os.path.abspath(__file__))
     json_path = os.path.join(current_dir, '..', 'backtest_results.json')
@@ -222,3 +279,70 @@ def get_backtest_data():
         return Response(content=content, media_type="application/json")
     except FileNotFoundError:
         return {"error": "Backtest results not found. Run backtest.py first."}
+
+@app.get("/force-trade")
+def force_trade():
+    execute_trade_cycle()
+    return {"status": "Trade cycle manually triggered."}
+
+@app.get("/portfolio-stats")
+def get_portfolio_stats():
+    db_path = get_db_path()
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT SUM(realized_pnl_pct) FROM paper_trades WHERE action = 'BUY' AND status = 'CLOSED'")
+        total_realized = cursor.fetchone()[0] or 0.0
+        cursor.execute("SELECT COUNT(*) FROM paper_trades WHERE action = 'BUY' AND status = 'CLOSED'")
+        total_closed = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM paper_trades WHERE action = 'BUY' AND status = 'CLOSED' AND realized_pnl_pct > 0")
+        winning_trades = cursor.fetchone()[0]
+        win_rate = (winning_trades / total_closed * 100) if total_closed > 0 else 0.0
+        unrealized_pnl = 0.0
+        cursor.execute("SELECT execution_price FROM paper_trades WHERE status = 'OPEN' AND action = 'BUY' ORDER BY timestamp ASC LIMIT 1")
+        open_trade = cursor.fetchone()
+        if open_trade:
+            entry_price = open_trade[0]
+            cursor.execute("SELECT execution_price FROM paper_trades ORDER BY timestamp DESC LIMIT 1")
+            latest_row = cursor.fetchone()
+            if latest_row:
+                unrealized_pnl = ((latest_row[0] - entry_price) / entry_price) * 100
+        conn.close()
+        return {
+            "total_realized_pnl_pct": round(total_realized, 2),
+            "win_rate": round(win_rate, 2),
+            "total_closed_trades": total_closed,
+            "current_unrealized_pnl_pct": round(unrealized_pnl, 2)
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/monte-carlo-visual")
+def get_monte_carlo_visual():
+    db_path = get_db_path()
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT execution_price FROM paper_trades ORDER BY timestamp DESC LIMIT 1")
+        latest_trade = cursor.fetchone()
+        conn.close()
+        current_price = latest_trade[0] if latest_trade else 2300.0
+    except Exception:
+        current_price = 2300.0
+
+    volatility, steps, num_paths = 0.05, 24, 50
+    dt = 1.0 / steps
+    shocks = np.random.normal(0.0, 1.0, (num_paths, steps))
+    paths = np.zeros((num_paths, steps + 1))
+    paths[:, 0] = current_price
+    for t in range(1, steps + 1):
+        paths[:, t] = paths[:, t-1] * np.exp(-0.5 * (volatility**2) * dt + volatility * np.sqrt(dt) * shocks[:, t-1])
+    median_path = np.median(paths, axis=0)
+    result = []
+    for t in range(steps + 1):
+        dp = {"hour": t}
+        for p in range(num_paths):
+            dp[f"path_{p}"] = round(paths[p, t], 2)
+        dp["median"] = round(median_path[t], 2)
+        result.append(dp)
+    return result

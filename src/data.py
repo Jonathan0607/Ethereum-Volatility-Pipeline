@@ -7,6 +7,12 @@ import os
 
 warnings.filterwarnings("ignore")
 
+# =====================================================================
+# FEATURE COLUMNS used by the ProgressiveModel (RNN→GRU→LSTM)
+# These must stay in sync with strategy.py and api.py
+# =====================================================================
+FEATURE_COLS = ['volatility', 'log_return', 'rolling_vol_24h', 'ma_20_dist', 'ma_50_dist']
+
 # --- fetch_data.py & process_data.py & data_split.py logic ---
 
 def split_data(df: pd.DataFrame, verbose: bool = True):
@@ -98,9 +104,38 @@ def run_processing():
     print("   [Process Data] Processing complete.")
     return True
 
-# --- features.py logic ---
+# =====================================================================
+# FEATURE ENGINEERING — Stationary Features for Volatility-Scaled Sizing
+# =====================================================================
+
+def _compute_stationary_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Computes the 4 stationary features required by the ProgressiveModel.
+    Called by both calculate_features() and calculate_features_test().
+
+    Features:
+        1. log_return      — np.log(close / close.shift(1))
+        2. rolling_vol_24h — log_return.rolling(24).std()
+        3. ma_20_dist      — (close - SMA_20) / SMA_20
+        4. ma_50_dist      — (close - SMA_50) / SMA_50
+    """
+    df['log_return'] = np.log(df['close'] / df['close'].shift(1))
+    df['rolling_vol_24h'] = df['log_return'].rolling(window=24).std()
+
+    sma_20 = df['close'].rolling(window=20).mean()
+    sma_50 = df['close'].rolling(window=50).mean()
+    df['ma_20_dist'] = (df['close'] - sma_20) / sma_20
+    df['ma_50_dist'] = (df['close'] - sma_50) / sma_50
+
+    return df
+
 
 def calculate_features(df, train_df=None):
+    """
+    Full feature engineering for TRAINING data.
+    Fits GARCH on training data and computes all features including
+    the forward-looking target (fwd_vol_24h).
+    """
     df = df.copy()
     df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
     df.dropna(inplace=True)
@@ -129,12 +164,27 @@ def calculate_features(df, train_df=None):
     df['volatility'] = df['garch_vol']
     df['returns']    = df['log_ret']
     df['rolling_vol'] = df['log_ret'].rolling(window=24).std()
+
+    # --- Stationary features for ProgressiveModel ---
+    df = _compute_stationary_features(df)
+
+    # --- Forward-looking target: realized vol over the NEXT 24 hours ---
+    df['fwd_vol_24h'] = df['log_return'].rolling(window=24).std().shift(-24)
+
+    # Drop all NaN rows from rolling windows and forward target
     df.dropna(inplace=True)
 
-    print("Feature Engineering Complete.")
+    print(f"Feature Engineering Complete. Columns: {list(df.columns)}")
+    print(f"   Stationary features: {FEATURE_COLS}")
+    print(f"   Forward target:      fwd_vol_24h")
+    print(f"   Rows after dropna:   {len(df)}")
     return df
 
 def calculate_features_test(df):
+    """
+    Feature engineering for TEST / LIVE data.
+    Uses pre-fitted GARCH params. Does NOT compute forward target.
+    """
     df = df.copy()
     df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
     df.dropna(inplace=True)
@@ -152,9 +202,16 @@ def calculate_features_test(df):
     df['volatility'] = df['garch_vol']
     df['returns']    = df['log_ret']
     df['rolling_vol'] = df['log_ret'].rolling(window=24).std()
+
+    # --- Stationary features for ProgressiveModel ---
+    df = _compute_stationary_features(df)
+
+    # Drop all NaN rows from rolling windows
     df.dropna(inplace=True)
 
-    print("Test Feature Engineering Complete (no GARCH refit).")
+    print(f"Test Feature Engineering Complete (no GARCH refit).")
+    print(f"   Stationary features: {FEATURE_COLS}")
+    print(f"   Rows after dropna:   {len(df)}")
     return df
 
 def _apply_garch(returns_pct: pd.Series, params: dict) -> pd.Series:

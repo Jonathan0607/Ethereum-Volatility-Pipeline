@@ -1,6 +1,7 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 pandas
 numpy
-ccxt
+requests
 torch
 scikit-learn
 matplotlib
@@ -9,3 +10,5 @@ arch
 yfinance
 fastapi
 uvicorn
+apscheduler
+hmmlearn

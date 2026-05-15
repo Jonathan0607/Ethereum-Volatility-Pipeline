@@ -7,12 +7,14 @@ import os
 import sys
 import torch
 import ast
+import pickle
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from data import calculate_features, calculate_features_test, split_data
-from strategy import predict_regimes, LSTMModel
+from data import calculate_features, calculate_features_test, split_data, FEATURE_COLS
+from strategy import predict_regimes, ProgressiveModel
 
 SEQ_LENGTH = 60
+TARGET_VOLATILITY = 0.02  # Must match api.py
 
 def load_data():
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -23,21 +25,26 @@ def load_data():
     return df
 
 def get_lstm_predictions(df):
-    print("Generating LSTM Volatility Forecasts (Strict Test Set)...")
+    """
+    Generates forward 24h volatility forecasts using the ProgressiveModel
+    with 5-feature input and StandardScaler.
+    """
+    print("Generating Volatility Forecasts (ProgressiveModel, 5-feature)...")
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
     params_path = os.path.join(current_dir, '..', 'best_params.txt')
-    hidden_dim, num_layers, dropout = 64, 2, 0.2
+    hidden_dim, dropout = 64, 0.2
+    input_dim = len(FEATURE_COLS)
 
     if os.path.exists(params_path):
         with open(params_path, 'r') as f:
             params = ast.literal_eval(f.read())
             hidden_dim = params.get('hidden_dim', 64)
-            num_layers = params.get('num_layers', 2)
-            dropout    = params.get('dropout', 0.2)
+            dropout = params.get('dropout', 0.2)
+            input_dim = params.get('input_dim', len(FEATURE_COLS))
 
-    model = LSTMModel(input_dim=1, hidden_dim=hidden_dim, num_layers=num_layers, output_dim=1, dropout=dropout)
+    model = ProgressiveModel(input_dim=input_dim, hidden_dim=hidden_dim, output_dim=1, dropout=dropout)
     model_path = os.path.join(current_dir, '..', 'lstm_model.pth')
 
     if not os.path.exists(model_path):
@@ -48,92 +55,137 @@ def get_lstm_predictions(df):
     model.to(device)
     model.eval()
 
-    mean_path = os.path.join(current_dir, '..', 'scaler_mean.npy')
-    std_path  = os.path.join(current_dir, '..', 'scaler_std.npy')
+    # Load scalers
+    scaler_path = os.path.join(current_dir, '..', 'scaler.pkl')
+    tgt_scaler_path = os.path.join(current_dir, '..', 'target_scaler.pkl')
 
-    if not os.path.exists(mean_path) or not os.path.exists(std_path):
-        print("   [WARNING] Scaler stats not found! Dashboard may look skewed.")
-        data = df['volatility'].values
-        mean, std = np.mean(data), np.std(data)
+    if os.path.exists(scaler_path):
+        with open(scaler_path, 'rb') as f:
+            feat_scaler = pickle.load(f)
     else:
-        mean = np.load(mean_path)
-        std  = np.load(std_path)
+        print("   [WARNING] scaler.pkl not found! Using raw features.")
+        feat_scaler = None
 
-    data = df['volatility'].values.astype(np.float32)
-    data_scaled = (data - mean) / (std + 1e-8)
+    tgt_scaler = None
+    if os.path.exists(tgt_scaler_path):
+        with open(tgt_scaler_path, 'rb') as f:
+            tgt_scaler = pickle.load(f)
+
+    # Extract and scale features
+    feature_data = df[FEATURE_COLS].values.astype(np.float32)
+
+    if feat_scaler is not None:
+        feature_scaled = feat_scaler.transform(feature_data)
+    else:
+        feature_scaled = feature_data
 
     predictions = [np.nan] * SEQ_LENGTH
     inputs = []
 
-    for i in range(len(data_scaled) - SEQ_LENGTH):
-        inputs.append(data_scaled[i:i + SEQ_LENGTH])
+    for i in range(len(feature_scaled) - SEQ_LENGTH):
+        inputs.append(feature_scaled[i:i + SEQ_LENGTH])
 
     if len(inputs) == 0:
         return pd.Series(0, index=df.index)
 
-    inputs = np.array(inputs)
-    inputs = torch.from_numpy(inputs).unsqueeze(-1).to(device)
+    inputs = np.array(inputs)  # [N, 60, 5]
+    inputs = torch.from_numpy(inputs).to(device)
 
     batch_size = 1024
     with torch.no_grad():
         for i in range(0, len(inputs), batch_size):
-            batch  = inputs[i:i + batch_size]
+            batch = inputs[i:i + batch_size]
             output = model(batch)
-            preds  = output.cpu().numpy().flatten() * (std + 1e-8) + mean
+            preds_scaled = output.cpu().numpy().flatten()
+
+            if tgt_scaler is not None:
+                preds = tgt_scaler.inverse_transform(preds_scaled.reshape(-1, 1)).flatten()
+            else:
+                preds = preds_scaled
+
             predictions.extend(preds)
 
     return pd.Series(predictions, index=df.index)
 
-def run_backtest(df):
-    print("Running Backtest with Strict Chronological Split...")
+def run_backtest(df, target_volatility=TARGET_VOLATILITY):
+    print("Running Backtest with Volatility-Scaled Sizing...")
     train_raw, test_raw = split_data(df, verbose=False)
 
     if test_raw.empty:
-        raise ValueError("Test set is empty! Check TEST_START_DATE in data_split.py")
+        raise ValueError("Test set is empty!")
 
     train_df = calculate_features(train_raw, train_df=train_raw)
     test_df = calculate_features_test(test_raw)
 
     print(f"--- BACKTEST STARTING ON {test_df.index[0]} ---")
     test_df = predict_regimes(test_df)
-    test_df['lstm_pred_vol'] = get_lstm_predictions(test_df)
+    test_df['forecasted_vol'] = get_lstm_predictions(test_df)
     test_df['market_returns'] = test_df['close'].pct_change()
     test_df['fast_trend'] = test_df['close'].ewm(span=20, adjust=False).mean()
     test_df['slow_trend'] = test_df['close'].ewm(span=50, adjust=False).mean()
-    test_df['vol_ma']     = test_df['volume'].rolling(window=12).mean()
+    test_df['vol_ma'] = test_df['volume'].rolling(window=12).mean()
 
-    base_signal = ((test_df['regime_gmm'] == 0) & (test_df['close'] > test_df['fast_trend']) & (test_df['volume'] > test_df['vol_ma']))
-    vol_threshold  = test_df['volatility'].rolling(24).mean() * 1.8
-    lstm_risk_on   = test_df['lstm_pred_vol'] > vol_threshold
+    base_signal = (
+        (test_df['regime_gmm'] == 0) &
+        (test_df['close'] > test_df['fast_trend']) &
+        (test_df['volume'] > test_df['vol_ma'])
+    )
+    vol_threshold = test_df['volatility'].rolling(24).mean() * 1.8
+    lstm_risk_on = test_df['forecasted_vol'] > vol_threshold
     parabolic_move = test_df['close'] > (test_df['slow_trend'] * 1.02)
 
     long_condition = base_signal & (~lstm_risk_on | parabolic_move)
     test_df['signal'] = np.where(long_condition, 1, 0)
-    test_df['strategy_returns']    = test_df['market_returns'] * test_df['signal'].shift(1)
-    test_df['cumulative_market']   = (1 + test_df['market_returns']).cumprod()
+
+    # Convert forecasted hourly volatility to daily volatility (since TARGET is likely daily risk)
+    daily_forecasted_vol = test_df['forecasted_vol'] * np.sqrt(24)
+
+    # Volatility-Scaled Position Sizing
+    uncapped_size = target_volatility / (daily_forecasted_vol + 1e-8)
+    test_df['position_size'] = uncapped_size.clip(upper=1.0)
+    test_df.loc[test_df['signal'] == 0, 'position_size'] = 0.0
+    
+    print(f"   [Debug] Avg Uncapped Position Size: {uncapped_size.mean():.4f}")
+
+    # Weighted strategy returns
+    test_df['strategy_returns'] = (
+        test_df['market_returns'] *
+        test_df['signal'].shift(1) *
+        test_df['position_size'].shift(1)
+    )
+    test_df['cumulative_market'] = (1 + test_df['market_returns']).cumprod()
     test_df['cumulative_strategy'] = (1 + test_df['strategy_returns']).cumprod()
+
+    # Backward compat alias
+    test_df['lstm_pred_vol'] = test_df['forecasted_vol']
 
     return test_df
 
-def calculate_metrics(df):
+def calculate_metrics(df, verbose=True):
     risk_free_rate = 0.0
-    strategy_mean  = df['strategy_returns'].mean() * 24 * 365
-    strategy_std   = df['strategy_returns'].std()  * np.sqrt(24 * 365)
-    sharpe         = (strategy_mean - risk_free_rate) / (strategy_std + 1e-9)
+    strategy_mean = df['strategy_returns'].mean() * 24 * 365
+    strategy_std = df['strategy_returns'].std() * np.sqrt(24 * 365)
+    sharpe = (strategy_mean - risk_free_rate) / (strategy_std + 1e-9)
 
-    cumulative   = df['cumulative_strategy']
-    peak         = cumulative.cummax()
-    drawdown     = (cumulative - peak) / peak
+    cumulative = df['cumulative_strategy']
+    peak = cumulative.cummax()
+    drawdown = (cumulative - peak) / peak
     max_drawdown = drawdown.min()
 
-    market_ret  = (df['cumulative_market'].iloc[-1] - 1) * 100
-    strat_ret   = (df['cumulative_strategy'].iloc[-1] - 1) * 100
+    market_ret = (df['cumulative_market'].iloc[-1] - 1) * 100
+    strat_ret = (df['cumulative_strategy'].iloc[-1] - 1) * 100
 
-    print("\n=== AI-POWERED BACKTEST RESULTS (OUT OF SAMPLE) ===")
-    print(f"Market Return:   {market_ret:.2f}%")
-    print(f"Strategy Return: {strat_ret:.2f}%")
-    print(f"Sharpe Ratio:    {sharpe:.2f}")
-    print(f"Max Drawdown:    {max_drawdown * 100:.2f}%")
+    if verbose:
+        print("\n=== VOLATILITY-SCALED BACKTEST RESULTS (OUT OF SAMPLE) ===")
+        print(f"Market Return:   {market_ret:.2f}%")
+        print(f"Strategy Return: {strat_ret:.2f}%")
+        print(f"Sharpe Ratio:    {sharpe:.2f}")
+        print(f"Max Drawdown:    {max_drawdown * 100:.2f}%")
+        try:
+            target_vol_val = df['position_size'].iloc[-1] # Approximation just for printing if available
+            print(f"Sizing Mode:     Volatility-Scaled")
+        except:
+            pass
 
     return {
         'market_return': round(market_ret, 2),
@@ -156,6 +208,7 @@ def export_json(df, metrics):
             'cumulative_market': round(float(row['cumulative_market']), 4),
             'cumulative_strategy': round(float(row['cumulative_strategy']), 4),
             'signal': int(row['signal']),
+            'position_size': round(float(row.get('position_size', 1.0)), 4),
         })
 
     payload = {'metrics': metrics, 'series': records}
@@ -166,12 +219,11 @@ def export_json(df, metrics):
 
 def plot_results(df):
     plt.figure(figsize=(12, 6))
-    plt.plot(df.index, df['cumulative_market'],   label='Buy & Hold (ETH)', color='gray', alpha=0.5)
-    plt.plot(df.index, df['cumulative_strategy'], label='Hybrid AI (Test Set)', color='blue', linewidth=1.5)
-    plt.title('Strategy Performance: Out-of-Sample Test')
+    plt.plot(df.index, df['cumulative_market'], label='Buy & Hold (ETH)', color='gray', alpha=0.5)
+    plt.plot(df.index, df['cumulative_strategy'], label='Vol-Scaled AI (Test Set)', color='blue', linewidth=1.5)
+    plt.title('Volatility-Scaled Strategy Performance: Out-of-Sample')
     plt.legend()
     plt.grid(True, alpha=0.3)
-
     current_dir = os.path.dirname(os.path.abspath(__file__))
     output_path = os.path.join(current_dir, '..', 'backtest_results.png')
     plt.savefig(output_path)
@@ -181,43 +233,40 @@ def plot_dashboard(df):
     print("   [Visual] Rendering Final Portfolio Dashboard...")
     subset = df.tail(2000)
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
-    
+
     ax1.plot(subset.index, subset['close'], color='gray', alpha=0.3, label='Price')
     safe = subset[subset['regime'] == 0]
     risk = subset[subset['regime'] == 1]
-    
+
     ax1.scatter(safe.index, safe['close'], color='green', s=10, alpha=0.6, label='Safe Regime')
     ax1.scatter(risk.index, risk['close'], color='red', s=10, alpha=0.6, label='Risk Regime')
-    
-    ax1.set_title('Market Regimes & AI Strategy', fontsize=14, fontweight='bold')
+
+    ax1.set_title('Market Regimes & Vol-Scaled AI Strategy', fontsize=14, fontweight='bold')
     ax1.set_ylabel('Price (USD)')
     ax1.legend(loc='upper left')
     ax1.grid(True, alpha=0.15)
-    
-    if 'lstm_pred_vol' in subset.columns:
-        lstm_col = 'lstm_pred_vol'
-    else:
-        lstm_col = 'lstm_pred'
-        
+
+    lstm_col = 'forecasted_vol' if 'forecasted_vol' in subset.columns else 'lstm_pred_vol'
+
     ax2.plot(subset.index, subset['volatility'], color='blue', alpha=0.5, label='Actual Volatility')
-    
+
     if lstm_col in subset.columns:
-        ax2.plot(subset.index, subset[lstm_col], color='magenta', linestyle='--', linewidth=1.5, label='AI Prediction')
+        ax2.plot(subset.index, subset[lstm_col], color='magenta', linestyle='--', linewidth=1.5, label='AI Forecast')
         veto_line = subset['volatility'].rolling(24).mean() * 1.8
         ax2.plot(subset.index, veto_line, color='black', linestyle=':', alpha=0.6, label='Risk Threshold (1.8σ)')
-        ax2.fill_between(subset.index, 0, subset['volatility'].max(), 
-                         where=(subset[lstm_col] > veto_line), 
+        ax2.fill_between(subset.index, 0, subset['volatility'].max(),
+                         where=(subset[lstm_col] > veto_line),
                          color='red', alpha=0.1, label='AI Signal: CASH')
 
-    ax2.set_title('AI Risk Detection (LSTM)', fontsize=12)
+    ax2.set_title('AI Risk Detection (ProgressiveModel)', fontsize=12)
     ax2.set_ylabel('Volatility')
     ax2.legend(loc='upper left')
     ax2.grid(True, alpha=0.15)
-    
+
     ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
     plt.xticks(rotation=45)
     plt.tight_layout()
-    
+
     output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'model_dashboard.png')
     plt.savefig(output_path, dpi=300)
     print(f"   [Success] Dashboard saved to {output_path}")
@@ -226,12 +275,13 @@ def run_visualizer():
     df = load_data()
     df = calculate_features(df)
     df = predict_regimes(df)
-    df['lstm_pred_vol'] = get_lstm_predictions(df)
+    df['forecasted_vol'] = get_lstm_predictions(df)
+    df['lstm_pred_vol'] = df['forecasted_vol']
     plot_dashboard(df)
 
 if __name__ == "__main__":
     try:
-        data    = load_data()
+        data = load_data()
         results = run_backtest(data)
         metrics = calculate_metrics(results)
         export_json(results, metrics)
