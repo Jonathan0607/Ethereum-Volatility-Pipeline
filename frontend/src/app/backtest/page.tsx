@@ -31,7 +31,7 @@ interface BacktestData {
   series: BacktestPoint[];
 }
 
-const API = "http://127.0.0.1:8000";
+const API = "http://142.93.189.92:8000";
 
 /* ── Tooltip ── */
 function BacktestTooltip({ active, payload }: any) {
@@ -52,9 +52,8 @@ function BacktestTooltip({ active, payload }: any) {
         <div className="flex items-center justify-between gap-6">
           <span className="text-[11px] text-slate-400">AI Strategy</span>
           <span
-            className={`text-[13px] font-bold font-mono ${
-              parseFloat(stratPct) >= 0 ? "text-emerald-400" : "text-rose-400"
-            }`}
+            className={`text-[13px] font-bold font-mono ${parseFloat(stratPct) >= 0 ? "text-emerald-400" : "text-rose-400"
+              }`}
           >
             {parseFloat(stratPct) >= 0 ? "+" : ""}
             {stratPct}%
@@ -63,9 +62,8 @@ function BacktestTooltip({ active, payload }: any) {
         <div className="flex items-center justify-between gap-6">
           <span className="text-[11px] text-slate-400">Buy & Hold</span>
           <span
-            className={`text-[13px] font-bold font-mono ${
-              parseFloat(mktPct) >= 0 ? "text-emerald-400" : "text-rose-400"
-            }`}
+            className={`text-[13px] font-bold font-mono ${parseFloat(mktPct) >= 0 ? "text-emerald-400" : "text-rose-400"
+              }`}
           >
             {parseFloat(mktPct) >= 0 ? "+" : ""}
             {mktPct}%

@@ -16,7 +16,7 @@ interface MonteCarloDataPoint {
   [key: string]: number; // path_0, path_1, ...
 }
 
-const API = "http://127.0.0.1:8000";
+const API = "http://142.93.189.92:8000";
 
 function MonteCarloTooltip({ active, payload }: any) {
   if (!active || !payload?.length) return null;
