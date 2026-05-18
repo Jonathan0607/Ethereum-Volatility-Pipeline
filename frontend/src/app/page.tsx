@@ -22,7 +22,7 @@ interface PortfolioStats {
   current_unrealized_pnl_pct: number;
 }
 
-const API = "http://142.93.189.92:3000";
+const API = "http://142.93.189.92:8000";
 
 /* ── Helpers ── */
 function formatTime(ts: string): string {
