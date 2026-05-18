@@ -14,7 +14,7 @@ from data import calculate_features, calculate_features_test, split_data, FEATUR
 from strategy import predict_regimes, ProgressiveModel
 
 SEQ_LENGTH = 60
-TARGET_VOLATILITY = 0.02  # Must match api.py
+TARGET_VOLATILITY = 0.06  # Must match api.py
 
 def load_data():
     current_dir = os.path.dirname(os.path.abspath(__file__))
