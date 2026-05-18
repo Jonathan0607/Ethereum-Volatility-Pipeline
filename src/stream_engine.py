@@ -122,6 +122,19 @@ async def stream_ethereum_data():
                             print(f"   LSTM Volatility Forecast (24h): {volatility_forecast:.4%}")
                             print("="*60 + "\n")
 
+                            # Fire the Microservice Handshake to the FastAPI engine
+                            try:
+                                api_url = "http://api:8000/execution/live-stream"
+                                payload = {
+                                    "current_price": float(current_price),
+                                    "forecasted_vol": float(volatility_forecast)
+                                }
+                                import requests
+                                response = requests.post(api_url, json=payload, timeout=5)
+                                print(f">>> Handshake successful. API Server Response: {response.json()}")
+                            except Exception as e:
+                                print(f">>> [Handshake Failed] Could not route signal to Execution Engine: {e}")
+
     except Exception as e:
         print(f"\n[!] FATAL CONNECTION ERROR: {e}")
         print("Are you on a restricted University Wi-Fi or behind a VPN?")

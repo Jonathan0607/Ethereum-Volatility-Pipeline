@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
+from pydantic import BaseModel
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from data import calculate_features_test, FEATURE_COLS
@@ -22,7 +23,7 @@ import monte_carlo
 app = FastAPI(title="Ethereum Quant Execution Engine")
 
 # Volatility-Scaled Sizing
-TARGET_VOLATILITY = 0.02
+TARGET_VOLATILITY = 0.06
 SEQ_LENGTH = 60
 
 def get_db_path():
@@ -227,10 +228,13 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
     size_pct = position_size * 100
     print(f"   [EXECUTED] {actual_action} | ${price:.2f} | Vol: {pred_vol:.4f} | Regime: {regime} | Size: {size_pct:.1f}%")
 
-    WEBHOOK_URL = "https://discord.com/api/webhooks/1496988735961825383/ilhgj56YXQraoaQG4QyUwDzz83NJKkYhRyUlLxCGS5woxevFMIO3k47dlvMxDcPC2Q3F"
+    WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+    if WEBHOOK_URL is None:
+        print("[WARN] DISCORD_WEBHOOK_URL not set in environment variables")
+        return
     embed_color = 5763719 if actual_action == "BUY" else (15548997 if actual_action == "CASH" else 9807270)
     payload = {
-        "username": "Chronos Execution Engine",
+        "username": "Execution Engine",
         "embeds": [{
             "title": f"\U0001f6a8 TRADE EXECUTED: {actual_action}",
             "color": embed_color,
@@ -251,6 +255,63 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
         requests.post(WEBHOOK_URL, json=payload, timeout=5)
     except Exception as e:
         print(f"[Alert Error] Discord webhook failed: {e}")
+
+class LiveExecutionPayload(BaseModel):
+    current_price: float
+    forecasted_vol: float
+
+@app.post("/execution/live-stream")
+def execute_live_stream_trade(payload: LiveExecutionPayload):
+    """Real-Time Gateway: Triggered instantly by the WebSocket stream aggregator"""
+    print(f"\n[{datetime.now()}] Live WebSocket signal received...")
+    try:
+        close_price = payload.current_price
+        forecasted_vol = max(payload.forecasted_vol, 1e-8)
+        
+        # 1. Fetch historical data for volume/trend indicators
+        raw_df = yf.download("ETH-USD", period="5d", interval="1h", progress=False, auto_adjust=True)
+        if isinstance(raw_df.columns, pd.MultiIndex):
+            raw_df.columns = [col[0] for col in raw_df.columns]
+        raw_df.rename(columns={"Open":"open","High":"high","Low":"low","Close":"close","Volume":"volume"}, inplace=True)
+        
+        df = raw_df.copy()
+        df = calculate_features_test(df)
+        df = predict_regimes(df)
+        
+        current_row = df.iloc[-1]
+        fast_trend = df['close'].ewm(span=20, adjust=False).mean().iloc[-1]
+        slow_trend = df['close'].ewm(span=50, adjust=False).mean().iloc[-1]
+        vol_ma = df['volume'].rolling(window=12).mean().iloc[-1]
+        regime_gmm = current_row['regime_gmm']
+        
+        # 2. Logic using LIVE streamed price and AI volatility
+        base_signal = (regime_gmm == 0) and (close_price > fast_trend) and (current_row['volume'] > vol_ma)
+        vol_threshold = df['volatility'].rolling(24).mean().iloc[-1] * 1.8
+        lstm_risk_on = forecasted_vol > vol_threshold
+        parabolic_move = close_price > (slow_trend * 1.02)
+        
+        action = "CASH"
+        position_size = 0.0
+        daily_forecasted_vol = forecasted_vol * np.sqrt(24)
+        
+        if base_signal and (not lstm_risk_on or parabolic_move):
+            action = "BUY"
+            position_size = min(TARGET_VOLATILITY / (daily_forecasted_vol + 1e-8), 1.0)
+            
+        # 3. Fire custom C++ Monte Carlo
+        mc_results = monte_carlo.simulate_gbm(
+            current_price=close_price, predicted_vol=float(forecasted_vol),
+            num_sims=10000, steps=24
+        )
+        
+        # 4. Write to DB and push Discord notification
+        log_trade(action, close_price, float(forecasted_vol), int(regime_gmm),
+                  mc_results['lower_bound'], mc_results['upper_bound'], position_size)
+                  
+        return {"status": "Success", "action": action, "position_size": position_size}
+    except Exception as e:
+        print(f"[API Webhook Error] Execution failed: {e}")
+        return {"status": "Error", "message": str(e)}
 
 # --- DASHBOARD ENDPOINTS ---
 @app.get("/")
