@@ -22,7 +22,7 @@ interface PortfolioStats {
   current_unrealized_pnl_pct: number;
 }
 
-const API = "http://127.0.0.1:8000";
+const API = "http://142.93.189.92:8000";
 
 /* ── Helpers ── */
 function formatTime(ts: string): string {
@@ -260,8 +260,8 @@ export default function LiveOps() {
                       <span className={`inline-flex items-center gap-1.5 text-[10px] font-semibold tracking-wide ${row.regime === 0 ? "text-emerald-400/80" : "text-rose-400/80"
                         }`}>
                         <span className={`w-1.5 h-1.5 rounded-full ${row.regime === 0
-                            ? "bg-emerald-400 shadow-[0_0_4px_rgba(52,211,153,0.5)]"
-                            : "bg-rose-400 shadow-[0_0_4px_rgba(251,113,133,0.5)]"
+                          ? "bg-emerald-400 shadow-[0_0_4px_rgba(52,211,153,0.5)]"
+                          : "bg-rose-400 shadow-[0_0_4px_rgba(251,113,133,0.5)]"
                           }`} />
                         {row.regime === 0 ? "SAFE" : "DANGER"}
                       </span>
