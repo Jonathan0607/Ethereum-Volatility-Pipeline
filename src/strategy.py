@@ -348,5 +348,4 @@ def train_model(hyperparams=None):
     print("  lstm_model.pth       — ProgressiveModel weights (RNN→GRU→LSTM)")
     print("  scaler.pkl           — Feature StandardScaler (5 features)")
     print("  target_scaler.pkl    — Target StandardScaler (fwd_vol_24h)")
-    print("  garch_params.npy     — GARCH(1,1) coefficients")
     print("  gmm_model.pkl        — Fitted GMM regime detector")

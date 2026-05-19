@@ -58,17 +58,21 @@ def check_integrity(df):
 
 def fetch_data():
     """
-    Fetches 2 YEARS of hourly Ethereum data using Yahoo Finance.
+    Fetches recent Ethereum data and appends it to the existing dataset.
+    No API keys, no rate limits, no IP bans.
     """
-    print("\nDownloading 2 Years of ETH Data via Yahoo Finance...")
+    print("\nDownloading ETH Data via Yahoo Finance...")
+    
     try:
-        df = yf.download("ETH-USD", period="2y", interval="1h", progress=False, auto_adjust=True)
-        df.reset_index(inplace=True)
+        # 1. Fetch the maximum allowed hourly data window
+        new_df = yf.download("ETH-USD", period="2y", interval="1h", progress=False, auto_adjust=True)
         
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [col[0] for col in df.columns]
+        new_df.reset_index(inplace=True)
+        
+        if isinstance(new_df.columns, pd.MultiIndex):
+            new_df.columns = [col[0] for col in new_df.columns]
             
-        df.rename(columns={
+        new_df.rename(columns={
             "Datetime": "timestamp",
             "Open": "open", 
             "High": "high", 
@@ -77,19 +81,39 @@ def fetch_data():
             "Volume": "volume"
         }, inplace=True)
         
-        if df.empty:
+        if new_df.empty:
             print("ERROR: Yahoo Finance returned empty data. Check your internet.")
             return
 
+        # 2. File Path Management
         current_dir = os.path.dirname(os.path.abspath(__file__))
         data_dir = os.path.join(current_dir, '..', 'data')
         os.makedirs(data_dir, exist_ok=True)
-        
         output_path = os.path.join(data_dir, 'eth_hourly.csv')
-        df.to_csv(output_path, index=False)
         
-        print(f"SUCCESS: Saved {len(df)} rows to {output_path}\n")
-        split_data(df, verbose=True)
+        # 3. Smart Merge Logic (Append & Deduplicate)
+        if os.path.exists(output_path):
+            print(f"Existing data found at {output_path}. Merging new data...")
+            old_df = pd.read_csv(output_path)
+            
+            # Unify timezone formats to prevent concatenation crashes
+            old_df['timestamp'] = pd.to_datetime(old_df['timestamp'], utc=True)
+            new_df['timestamp'] = pd.to_datetime(new_df['timestamp'], utc=True)
+            
+            # Combine, sort, and drop duplicates based on the timestamp
+            combined_df = pd.concat([old_df, new_df], ignore_index=True)
+            combined_df.drop_duplicates(subset=['timestamp'], keep='last', inplace=True)
+            combined_df.sort_values(by='timestamp', inplace=True)
+            final_df = combined_df
+        else:
+            print("No existing data found. Creating new dataset...")
+            final_df = new_df
+
+        # 4. Save to CSV
+        final_df.to_csv(output_path, index=False)
+        print(f"SUCCESS: Dataset now contains {len(final_df)} rows. Saved to {output_path}\n")
+        
+        split_data(final_df, verbose=True)
         
     except Exception as e:
         print(f"Error fetching data: {e}")
@@ -139,28 +163,12 @@ def calculate_features(df, train_df=None):
     df = df.copy()
     df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
     df.dropna(inplace=True)
-    print("Fitting GARCH(1,1) Model on TRAINING DATA only...")
+    print("Fitting Dynamic GARCH(1,1) Model on TRAINING DATA...")
 
-    fit_target = train_df.copy() if train_df is not None else df.copy()
-    fit_target['log_ret'] = np.log(fit_target['close'] / fit_target['close'].shift(1))
-    fit_target.dropna(inplace=True)
-    train_returns = fit_target['log_ret'] * 100
+    garch_model = arch_model(df['log_ret'] * 100, vol='Garch', p=1, q=1, mean='Constant', dist='Normal')
+    res = garch_model.fit(update_freq=0, disp='off')
 
-    garch_model = arch_model(train_returns, vol='Garch', p=1, q=1, mean='Constant', dist='Normal')
-    res = garch_model.fit(disp='off')
-
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    params = {
-        'mu':    float(res.params['mu']),
-        'omega': float(res.params['omega']),
-        'alpha': float(res.params.get('alpha[1]', res.params.get('alpha', 0.05))),
-        'beta':  float(res.params.get('beta[1]',  res.params.get('beta',  0.90))),
-    }
-    params_path = os.path.join(current_dir, '..', 'garch_params.npy')
-    np.save(params_path, params)
-    print(f"GARCH params saved → {params_path}")
-
-    df['garch_vol'] = _apply_garch(df['log_ret'] * 100, params) / 100
+    df['garch_vol'] = res.conditional_volatility / 100
     df['volatility'] = df['garch_vol']
     df['returns']    = df['log_ret']
     df['rolling_vol'] = df['log_ret'].rolling(window=24).std()
@@ -189,16 +197,10 @@ def calculate_features_test(df):
     df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
     df.dropna(inplace=True)
 
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    params_path = os.path.join(current_dir, '..', 'garch_params.npy')
+    garch_model = arch_model(df['log_ret'] * 100, vol='Garch', p=1, q=1, mean='Constant', dist='Normal')
+    res = garch_model.fit(update_freq=0, disp='off')
 
-    if not os.path.exists(params_path):
-        raise FileNotFoundError("garch_params.npy not found. Fit GARCH on training data.")
-
-    params = np.load(params_path, allow_pickle=True).item()
-    print(f"Loaded GARCH params: {params}")
-
-    df['garch_vol'] = _apply_garch(df['log_ret'] * 100, params) / 100
+    df['garch_vol'] = res.conditional_volatility / 100
     df['volatility'] = df['garch_vol']
     df['returns']    = df['log_ret']
     df['rolling_vol'] = df['log_ret'].rolling(window=24).std()
@@ -214,16 +216,7 @@ def calculate_features_test(df):
     print(f"   Rows after dropna:   {len(df)}")
     return df
 
-def _apply_garch(returns_pct: pd.Series, params: dict) -> pd.Series:
-    mu, omega, alpha, beta = params['mu'], params['omega'], params['alpha'], params['beta']
-    vals = returns_pct.values
-    n = len(vals)
-    uncond_var = omega / max(1 - alpha - beta, 1e-6)
-    sigma2 = np.full(n, uncond_var)
-    for t in range(1, n):
-        eps2 = (vals[t - 1] - mu) ** 2
-        sigma2[t] = omega + alpha * eps2 + beta * sigma2[t - 1]
-    return pd.Series(np.sqrt(sigma2), index=returns_pct.index)
+
 
 if __name__ == "__main__":
     fetch_data()

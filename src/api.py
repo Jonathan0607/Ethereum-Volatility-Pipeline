@@ -111,81 +111,6 @@ def load_artifacts():
 
     print("[API] Shadow Mode Daemon active.")
 
-def execute_trade_cycle():
-    """Core Loop: Fetch → Features → Inference → Vol-Scaled Sizing → Execute"""
-    print(f"\n[{datetime.now()}] Hourly execution cycle...")
-    try:
-        raw_df = yf.download("ETH-USD", period="7d", interval="1h", progress=False, auto_adjust=True)
-        if isinstance(raw_df.columns, pd.MultiIndex):
-            raw_df.columns = [col[0] for col in raw_df.columns]
-        raw_df.rename(columns={"Open":"open","High":"high","Low":"low","Close":"close","Volume":"volume"}, inplace=True)
-        raw_df.index.name = 'timestamp'
-        df = raw_df.tail(100).copy()
-
-        # Feature engineering (identical to training pipeline)
-        df = calculate_features_test(df)
-        df = predict_regimes(df)
-
-        # Multi-feature inference
-        feat_scaler = MODEL_STATE['feat_scaler']
-        tgt_scaler = MODEL_STATE['tgt_scaler']
-
-        if isinstance(feat_scaler, dict) and feat_scaler.get('legacy'):
-            data = df['volatility'].values.astype(np.float32)
-            data_scaled = (data - feat_scaler['mean']) / (feat_scaler['std'] + 1e-8)
-            seq = data_scaled[-SEQ_LENGTH:]
-            seq_tensor = torch.from_numpy(seq).unsqueeze(0).unsqueeze(-1).to(MODEL_STATE['device'])
-        else:
-            feature_data = df[FEATURE_COLS].values.astype(np.float32)
-            feature_scaled = feat_scaler.transform(feature_data)
-            seq = feature_scaled[-SEQ_LENGTH:]
-            seq_tensor = torch.from_numpy(seq).unsqueeze(0).to(MODEL_STATE['device'])
-
-        with torch.no_grad():
-            pred_scaled = MODEL_STATE['model'](seq_tensor).cpu().numpy().flatten()[0]
-
-        if tgt_scaler is not None:
-            forecasted_vol = float(tgt_scaler.inverse_transform([[pred_scaled]])[0, 0])
-        elif isinstance(feat_scaler, dict) and feat_scaler.get('legacy'):
-            forecasted_vol = float(pred_scaled * (feat_scaler['std'] + 1e-8) + feat_scaler['mean'])
-        else:
-            forecasted_vol = float(pred_scaled)
-        forecasted_vol = max(forecasted_vol, 1e-8)
-
-        # Trading logic
-        current_row = df.iloc[-1]
-        fast_trend = df['close'].ewm(span=20, adjust=False).mean().iloc[-1]
-        slow_trend = df['close'].ewm(span=50, adjust=False).mean().iloc[-1]
-        vol_ma = df['volume'].rolling(window=12).mean().iloc[-1]
-        regime_gmm = current_row['regime_gmm']
-        close_price = current_row['close']
-        market_safe = (regime_gmm == 0)
-
-        base_signal = market_safe and (close_price > fast_trend) and (current_row['volume'] > vol_ma)
-        vol_threshold = df['volatility'].rolling(24).mean().iloc[-1] * 1.8
-        lstm_risk_on = forecasted_vol > vol_threshold
-        parabolic_move = close_price > (slow_trend * 1.02)
-
-        action = "CASH"
-        position_size = 0.0
-
-        # Convert forecasted hourly volatility to daily volatility for sizing
-        daily_forecasted_vol = forecasted_vol * np.sqrt(24)
-
-        if base_signal and (not lstm_risk_on or parabolic_move):
-            action = "BUY"
-            position_size = min(TARGET_VOLATILITY / (daily_forecasted_vol + 1e-8), 1.0)
-
-        mc_results = monte_carlo.simulate_gbm(
-            current_price=close_price, predicted_vol=float(forecasted_vol),
-            num_sims=10000, steps=24
-        )
-        log_trade(action, close_price, float(forecasted_vol), int(regime_gmm),
-                  mc_results['lower_bound'], mc_results['upper_bound'], position_size)
-    except Exception as e:
-        print(f"[API] CRITICAL ERROR: {e}")
-        import traceback; traceback.print_exc()
-
 def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0, position_size=0.0):
     """Writes execution state to DB and fires Discord alert."""
     db_path = get_db_path()
@@ -341,11 +266,6 @@ def get_backtest_data():
         return Response(content=content, media_type="application/json")
     except FileNotFoundError:
         return {"error": "Backtest results not found. Run backtest.py first."}
-
-@app.get("/force-trade")
-def force_trade():
-    execute_trade_cycle()
-    return {"status": "Trade cycle manually triggered."}
 
 @app.get("/portfolio-stats")
 def get_portfolio_stats():

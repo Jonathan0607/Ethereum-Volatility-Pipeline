@@ -5,10 +5,7 @@ requests
 torch
 scikit-learn
 matplotlib
-optuna
-arch
 yfinance
 fastapi
 uvicorn
-apscheduler
 arch==7.0.0
