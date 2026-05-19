@@ -11,7 +11,6 @@ import yfinance as yf
 import json
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 from pydantic import BaseModel
 
@@ -109,11 +108,7 @@ def load_artifacts():
     print(f"[API] ProgressiveModel loaded (input_dim={input_dim})")
     print(f"[API] TARGET_VOLATILITY = {TARGET_VOLATILITY}")
 
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(execute_trade_cycle, 'cron', minute=0, second=0)
-    scheduler.start()
     print("[API] Shadow Mode Daemon active.")
-    execute_trade_cycle()
 
 def execute_trade_cycle():
     """Core Loop: Fetch → Features → Inference → Vol-Scaled Sizing → Execute"""

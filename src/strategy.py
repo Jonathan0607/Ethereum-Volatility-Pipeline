@@ -11,7 +11,6 @@ import os
 import ast
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
-from hmmlearn.hmm import GaussianHMM
 from data import calculate_features, split_data, FEATURE_COLS
 
 # --- CONFIG ---
@@ -98,7 +97,7 @@ LSTMModel = ProgressiveModel
 # =====================================================================
 
 def fit_and_save_regimes(train_df: pd.DataFrame, vol_col: str = 'volatility', n_components: int = 2) -> pd.DataFrame:
-    """Fits both GMM and HMM on TRAINING DATA ONLY and saves them."""
+    """Fits GMM on TRAINING DATA ONLY and saves it."""
     train_df = train_df.copy()
     if vol_col not in train_df.columns:
         raise ValueError(f"Column '{vol_col}' not found.")
@@ -113,22 +112,14 @@ def fit_and_save_regimes(train_df: pd.DataFrame, vol_col: str = 'volatility', n_
     gmm.fit(X)
     gmm = _enforce_label_order_gmm(gmm)
 
-    print("[Regimes] Fitting HMM (This may take a few seconds)...")
-    hmm = GaussianHMM(n_components=n_components, covariance_type="full", n_iter=100, random_state=42)
-    hmm.fit(X)
-    hmm = _enforce_label_order_hmm(hmm)
-
     current_dir = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(current_dir, '..', 'gmm_model.pkl'), 'wb') as f:
         pickle.dump(gmm, f)
-    with open(os.path.join(current_dir, '..', 'hmm_model.pkl'), 'wb') as f:
-        pickle.dump(hmm, f)
         
-    print("[Regimes] Fitted GMM & HMM saved successfully.")
+    print("[Regimes] Fitted GMM saved successfully.")
 
     train_df['regime_gmm'] = gmm.predict(X)
-    train_df['regime_hmm'] = hmm.predict(X)
-    train_df['regime'] = train_df['regime_hmm'] 
+    train_df['regime'] = train_df['regime_gmm'] 
 
     return train_df
 
@@ -137,15 +128,12 @@ def predict_regimes(df: pd.DataFrame, vol_col: str = 'volatility') -> pd.DataFra
     df = df.copy()
     current_dir = os.path.dirname(os.path.abspath(__file__))
     gmm_path = os.path.join(current_dir, '..', 'gmm_model.pkl')
-    hmm_path = os.path.join(current_dir, '..', 'hmm_model.pkl')
 
     with open(gmm_path, 'rb') as f: gmm = pickle.load(f)
-    with open(hmm_path, 'rb') as f: hmm = pickle.load(f)
 
     X = df[vol_col].values.reshape(-1, 1)
     df['regime_gmm'] = gmm.predict(X)
-    df['regime_hmm'] = hmm.predict(X)
-    df['regime'] = df['regime_hmm']
+    df['regime'] = df['regime_gmm']
 
     return df
 
@@ -158,18 +146,6 @@ def _enforce_label_order_gmm(gmm: GaussianMixture) -> GaussianMixture:
     gmm.precisions_ = gmm.precisions_[[1, 0]]
     gmm.precisions_cholesky_ = gmm.precisions_cholesky_[[1, 0]]
     return gmm
-
-def _enforce_label_order_hmm(hmm: GaussianHMM) -> GaussianHMM:
-    means = hmm.means_.flatten()
-    if means[0] <= means[1]: return hmm
-    hmm.means_ = hmm.means_[[1, 0]]
-    hmm.covars_ = hmm.covars_[[1, 0]]
-    hmm.startprob_ = hmm.startprob_[[1, 0]]
-    transmat = hmm.transmat_
-    transmat = transmat[[1, 0], :]
-    transmat = transmat[:, [1, 0]]
-    hmm.transmat_ = transmat
-    return hmm
 
 
 # =====================================================================
@@ -346,7 +322,7 @@ def train_model(hyperparams=None):
     scheduler = ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5)
 
     model.train()
-    for epoch in range(100):
+    for epoch in range(200):
         batch_losses = []
         for batch_X, batch_y in loader:
             batch_X, batch_y = batch_X.to(device), batch_y.to(device)
@@ -362,7 +338,7 @@ def train_model(hyperparams=None):
 
         if (epoch + 1) % 10 == 0:
             current_lr = optimizer.param_groups[0]['lr']
-            print(f"Epoch {epoch+1}/100 | Loss: {avg_loss:.5f} | LR: {current_lr:.6f}")
+            print(f"Epoch {epoch+1}/200 | Loss: {avg_loss:.5f} | LR: {current_lr:.6f}")
 
     save_path = os.path.join(current_dir, '..', 'lstm_model.pth')
     torch.save(model.state_dict(), save_path)
@@ -374,4 +350,3 @@ def train_model(hyperparams=None):
     print("  target_scaler.pkl    — Target StandardScaler (fwd_vol_24h)")
     print("  garch_params.npy     — GARCH(1,1) coefficients")
     print("  gmm_model.pkl        — Fitted GMM regime detector")
-    print("  hmm_model.pkl        — Fitted HMM regime detector")

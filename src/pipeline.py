@@ -19,11 +19,8 @@ def run_pipeline():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     data_path = os.path.join(current_dir, '..', 'data', 'eth_hourly.csv')
     
-    if not os.path.exists(data_path):
-        print("[1/4] Data missing. Fetching fresh data...")
-        data.fetch_data()
-    else:
-        print("[1/4] Data found. Skipping download.")
+    print("[1/4] Fetching fresh data for the training cycle...")
+    data.fetch_data()
 
     # 2. HYPERPARAMETER TUNING (The Architect)
     params_path = os.path.join(current_dir, '..', 'best_params.txt')
