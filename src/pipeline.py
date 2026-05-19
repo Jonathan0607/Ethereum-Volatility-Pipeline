@@ -22,18 +22,15 @@ def run_pipeline():
     print("[1/4] Fetching fresh data for the training cycle...")
     data.fetch_data()
 
-    # 2. HYPERPARAMETER TUNING (The Architect)
+    # 2. VERIFY HYPERPARAMETERS EXIST
     params_path = os.path.join(current_dir, '..', 'best_params.txt')
     
     if not os.path.exists(params_path):
-        print("\n[2/4] No params found. Running Bayesian Optimization...")
-        try:
-            strategy.run_optimization()
-        except Exception as e:
-            print(f"CRITICAL ERROR during tuning: {e}")
-            return
+        print("\n[2/3] ERROR: best_params.txt not found!")
+        print("       Run the Optuna sandbox first:  python research/optuna_tuner.py")
+        return
     else:
-        print("\n[2/4] optimized params found. Skipping tuning.")
+        print("\n[2/3] Optimized params found. Proceeding to training.")
 
     # 3. TRAIN MODEL (The Teacher)
     print("\n[3/4] Training Model on History...")
