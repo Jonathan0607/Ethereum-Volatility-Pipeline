@@ -9,6 +9,7 @@ import pickle
 import ast
 import yfinance as yf
 import json
+from arch import arch_model
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
@@ -269,6 +270,11 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
             raw_df.columns = [col[0] for col in raw_df.columns]
         raw_df.rename(columns={"Open":"open","High":"high","Low":"low","Close":"close","Volume":"volume"}, inplace=True)
         
+        returns = (np.log(raw_df['close'] / raw_df['close'].shift(1)).dropna()) * 100
+        garch = arch_model(returns, vol='Garch', p=1, q=1, dist='Normal')
+        garch_fit = garch.fit(update_freq=0, disp='off')
+        live_garch_vol = float(garch_fit.conditional_volatility.iloc[-1] / 100)
+
         df = raw_df.copy()
         df = calculate_features_test(df)
         df = predict_regimes(df)
@@ -295,7 +301,7 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
             
         # 3. Fire custom C++ Monte Carlo
         mc_results = monte_carlo.simulate_gbm(
-            current_price=close_price, predicted_vol=float(forecasted_vol),
+            current_price=close_price, predicted_vol=live_garch_vol,
             num_sims=10000, steps=24
         )
         
