@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-import optuna
 import pandas as pd
 import numpy as np
 import pickle
@@ -182,83 +181,6 @@ def load_best_params():
     params['input_dim'] = len(FEATURE_COLS)
     return params
 
-def objective(trial):
-    hidden_dim = trial.suggest_int("hidden_dim", 32, 128)
-    learning_rate = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
-    dropout = trial.suggest_float("dropout", 0.1, 0.4)
-    
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    data_path = os.path.join(current_dir, '..', 'data', 'eth_hourly.csv')
-    df = pd.read_csv(data_path, parse_dates=['timestamp'], index_col='timestamp')
-    df = calculate_features(df) 
-    
-    train_df, _ = split_data(df, verbose=False)
-    if len(train_df) > 3000:
-        train_df = train_df.tail(3000)
-    
-    # Multi-feature input
-    feature_data = train_df[FEATURE_COLS].values.astype(np.float32)
-    target_data = train_df[TARGET_COLUMN].values.astype(np.float32)
-
-    # Fit scalers on this trial's data
-    feat_scaler = StandardScaler()
-    feature_data = feat_scaler.fit_transform(feature_data)
-    tgt_scaler = StandardScaler()
-    target_scaled = tgt_scaler.fit_transform(target_data.reshape(-1, 1)).flatten()
-
-    X, y = create_sequences(feature_data, target_scaled, SEQ_LENGTH)
-    split_idx = int(len(X) * 0.8)
-    X_train, X_val = X[:split_idx], X[split_idx:]
-    y_train, y_val = y[:split_idx], y[split_idx:]
-    
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    X_train = torch.from_numpy(X_train).to(device)
-    X_val = torch.from_numpy(X_val).to(device)
-    y_train = torch.from_numpy(y_train).unsqueeze(-1).to(device)
-    y_val = torch.from_numpy(y_val).unsqueeze(-1).to(device)
-    
-    model = ProgressiveModel(
-        input_dim=len(FEATURE_COLS),
-        hidden_dim=hidden_dim,
-        output_dim=1,
-        dropout=dropout
-    ).to(device)
-
-    criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    
-    model.train()
-    for epoch in range(5):
-        optimizer.zero_grad()
-        outputs = model(X_train)
-        loss = criterion(outputs, y_train)
-        loss.backward()
-        optimizer.step()
-
-    model.eval()
-    with torch.no_grad():
-        val_outputs = model(X_val)
-        val_loss = criterion(val_outputs, y_val)
-        
-    return val_loss.item()
-
-def run_optimization():
-    print("Starting Bayesian Hyperparameter Optimization (ProgressiveModel)...")
-    study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=15)
-    
-    print(f"Best Trial Loss: {study.best_value:.5f}")
-    print(f"Best Params: {study.best_params}")
-    
-    best = study.best_params
-    best['input_dim'] = len(FEATURE_COLS)
-
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    save_path = os.path.join(current_dir, '..', 'best_params.txt')
-    with open(save_path, "w") as f:
-        f.write(str(best))
-    
-    return best
 
 def train_model(hyperparams=None):
     print("Starting Production Training (STRICT SPLIT — ProgressiveModel)...")
