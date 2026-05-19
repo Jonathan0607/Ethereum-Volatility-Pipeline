@@ -8,4 +8,4 @@ matplotlib
 yfinance
 fastapi
 uvicorn
-arch
+arch==7.0.0
