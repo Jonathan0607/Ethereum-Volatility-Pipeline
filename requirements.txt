@@ -11,4 +11,4 @@ yfinance
 fastapi
 uvicorn
 apscheduler
-hmmlearnarch==7.0.0
+arch==7.0.0
