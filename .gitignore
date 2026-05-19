@@ -11,9 +11,10 @@ data/
 
 # Generated Artifacts (The Pipeline Output)
 *.pth
-.npy
+*.npy
 *.png
 *.pkl
+*.json
 best_params.txt
 
 # Mac System files
