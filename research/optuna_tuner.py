@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║  OPTUNA BAYESIAN HYPERPARAMETER SANDBOX                            ║
-║  Maximizes simulated Sharpe Ratio over historical ETH data.        ║
-║  Auto-writes optimal params → best_params.txt on completion.       ║
-║                                                                    ║
-║  Usage:  python research/optuna_tuner.py                           ║
-║  Resume: Trials persist in sqlite:///research/optuna_study.db      ║
+║  OPTUNA BAYESIAN HYPERPARAMETER SANDBOX                              ║
+║  Maximizes simulated Sharpe Ratio over historical ETH data.          ║
+║  Auto-writes optimal params → best_params.txt on completion.         ║
+║                                                                      ║
+║  Usage:  python research/optuna_tuner.py                             ║
+║  Resume: Trials persist in sqlite:///research/optuna_study.db        ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """
 
 import os
 import sys
 import json
+import gc
 import warnings
 import numpy as np
 import pandas as pd
+os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -232,6 +234,12 @@ def simulate_sharpe(df: pd.DataFrame, params: dict) -> float:
     preds_arr = tgt_scaler.inverse_transform(preds.reshape(-1, 1)).flatten()
     preds_arr = np.maximum(preds_arr, 1e-8)
 
+    # ── Force MPS memory cleanup ──
+    del model, optimizer, X_t, y_t, X_test_t
+    gc.collect()
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+
     # ── Backtest with vol-scaled sizing ──
     bt = test_df.iloc[n_lags:].copy()
     bt = bt.iloc[:len(preds_arr)].copy()
@@ -285,7 +293,6 @@ def objective(trial, df):
     params = {
         'n_lags':           trial.suggest_int('n_lags', 30, 90),
         'lstm_hidden_size': trial.suggest_categorical('lstm_hidden_size', [64, 128, 256]),
-
         'dropout_rate':     trial.suggest_float('dropout_rate', 0.2, 0.5),
         'learning_rate':    trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True),
         'batch_size':       trial.suggest_categorical('batch_size', [32, 64]),
@@ -323,7 +330,6 @@ def write_best_params(study):
         'input_dim':   len(FEATURE_COLS),
         # Extended search space (metadata for research)
         'n_lags':           best['n_lags'],
-
         'batch_size':       best['batch_size'],
         'epochs':           best['epochs'],
         'gmm_components':   best['gmm_components'],
@@ -366,13 +372,11 @@ def main():
         print("\n[Sandbox] Interrupted — writing best params found so far...")
 
     try:
-        if len(study.trials) > 0:
-            write_best_params(study)
+        best_trial = study.best_trial
+        write_best_params(study)
     except ValueError:
-        pass
-    else:
-        print("[Sandbox] No completed trials. best_params.txt unchanged.")
-
+        print("[Sandbox] No completed trials yet. best_params.txt unchanged.")
+        
     print("\n[Sandbox] Done.")
 
 
