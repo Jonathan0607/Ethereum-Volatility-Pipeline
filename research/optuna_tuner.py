@@ -214,16 +214,22 @@ def simulate_sharpe(df: pd.DataFrame, params: dict) -> float:
             loss.backward()
             optimizer.step()
 
-    # ── Inference on test set ──
+    # ── Inference on test set (Vectorized for Speed) ──
     model.eval()
-    preds = []
+    
+    # Pre-build the entire test sequence matrix
+    X_test, _ = create_sequences(test_feats, np.zeros(len(test_feats)), n_lags)
+    
+    if len(X_test) == 0:
+        return -999.0
+        
+    X_test_t = torch.from_numpy(X_test).to(device)
+    
     with torch.no_grad():
-        for i in range(len(test_feats) - n_lags):
-            seq = torch.from_numpy(test_feats[i:i + n_lags]).unsqueeze(0).to(device)
-            p = model(seq).cpu().numpy().flatten()[0]
-            preds.append(p)
+        # Blast the entire matrix through the model at once
+        preds = model(X_test_t).cpu().numpy().flatten()
 
-    preds_arr = tgt_scaler.inverse_transform(np.array(preds).reshape(-1, 1)).flatten()
+    preds_arr = tgt_scaler.inverse_transform(preds.reshape(-1, 1)).flatten()
     preds_arr = np.maximum(preds_arr, 1e-8)
 
     # ── Backtest with vol-scaled sizing ──
@@ -279,7 +285,7 @@ def objective(trial, df):
     params = {
         'n_lags':           trial.suggest_int('n_lags', 30, 90),
         'lstm_hidden_size': trial.suggest_categorical('lstm_hidden_size', [64, 128, 256]),
-        'lstm_num_layers':  trial.suggest_int('lstm_num_layers', 2, 4),
+
         'dropout_rate':     trial.suggest_float('dropout_rate', 0.2, 0.5),
         'learning_rate':    trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True),
         'batch_size':       trial.suggest_categorical('batch_size', [32, 64]),
@@ -317,7 +323,7 @@ def write_best_params(study):
         'input_dim':   len(FEATURE_COLS),
         # Extended search space (metadata for research)
         'n_lags':           best['n_lags'],
-        'lstm_num_layers':  best['lstm_num_layers'],
+
         'batch_size':       best['batch_size'],
         'epochs':           best['epochs'],
         'gmm_components':   best['gmm_components'],
@@ -359,8 +365,11 @@ def main():
     except KeyboardInterrupt:
         print("\n[Sandbox] Interrupted — writing best params found so far...")
 
-    if len(study.trials) > 0 and study.best_trial is not None:
-        write_best_params(study)
+    try:
+        if len(study.trials) > 0:
+            write_best_params(study)
+    except ValueError:
+        pass
     else:
         print("[Sandbox] No completed trials. best_params.txt unchanged.")
 
