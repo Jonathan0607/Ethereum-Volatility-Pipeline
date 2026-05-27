@@ -326,26 +326,22 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         vol_shock = payload.vol_24h > (payload.vol_168h * best_params.get('vol_shock_mult', 1.5))
 
         if payload.prob_high_vol > hmm_trend_min or vol_shock:
-            # Route to Breakout Agent
-            if payload.current_price > payload.rolling_max:
-                action = "BUY"
-            elif payload.current_price < payload.rolling_min:
+            # Route to Breakout (Short Only)
+            if payload.current_price < payload.rolling_min: 
                 action = "SELL_SHORT"
-            else:
-                action = "HOLDING" if current_position in ["LONG", "SHORT"] else "FLAT"
+            elif payload.current_price > payload.rolling_max and current_position == "SHORT":
+                action = "CASH" # Stop out the short
+            else: 
+                action = "HOLDING" if current_position == "SHORT" else "CASH" if current_position == "LONG" else "FLAT"
+                
         elif payload.prob_high_vol < hmm_chop_max and not vol_shock:
-            # Route to GMM Agent
-            if payload.gmm_z_score < gmm_z_buy or payload.gmm_cluster == 0:
+            # Route to GMM (Long Only)
+            if payload.gmm_z_score < gmm_z_buy or payload.gmm_cluster == 0: 
                 action = "BUY"
-            elif payload.gmm_z_score > gmm_z_sell or payload.gmm_cluster == 2:
-                action = "CASH"
-            else:
-                if current_position == "LONG":
-                    action = "HOLDING"
-                elif current_position == "SHORT":
-                    action = "CASH"  # Cover short in mean reversion mode
-                else:
-                    action = "FLAT"
+            elif payload.gmm_z_score > gmm_z_sell or payload.gmm_cluster == 2: 
+                action = "CASH" # Take profit on the long
+            else: 
+                action = "HOLDING" if current_position == "LONG" else "CASH" if current_position == "SHORT" else "FLAT"
         else:
             # Transition Zone - Force Cash
             action = "CASH"

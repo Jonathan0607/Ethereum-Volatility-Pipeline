@@ -207,17 +207,20 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     # Bi-directional HMM/GMM Hierarchical Logic
     test_df['signal'] = np.nan
     
-    # AGENT 1: Momentum Breakout (Activated when HMM > trend_min OR vol_shock)
+    # AGENT 1: Breakout Sub-Agent (SHORT ONLY)
     trend_active = (test_df['prob_high_vol'] > hmm_trend_min) | vol_shock
-    test_df.loc[trend_active & (test_df['close'] > test_df['rolling_max']), 'signal'] = 1
     test_df.loc[trend_active & (test_df['close'] < test_df['rolling_min']), 'signal'] = -1
     
-    # AGENT 2: GMM Mean-Reversion (Activated when HMM < chop_max AND NOT vol_shock)
+    # AGENT 2: GMM Mean-Reversion (LONG ONLY)
     chop_active = (test_df['prob_high_vol'] < hmm_chop_max) & ~vol_shock
     test_df.loc[chop_active & (test_df['z_score'] < gmm_z_buy), 'signal'] = 1
-    test_df.loc[chop_active & (test_df['z_score'] > gmm_z_sell), 'signal'] = 0
     
     # 3. Master Exits
+    # Exit Longs when overbought, Exit Shorts when trend breaks upward
+    test_df.loc[chop_active & (test_df['z_score'] > gmm_z_sell), 'signal'] = 0
+    test_df.loc[trend_active & (test_df['close'] > test_df['rolling_max']), 'signal'] = 0
+    
+    # Force Cash in the Transition Zone
     test_df.loc[(test_df['prob_high_vol'] >= hmm_chop_max) & (test_df['prob_high_vol'] <= hmm_trend_min) & ~vol_shock, 'signal'] = 0
     
     test_df['signal'] = test_df['signal'].ffill().fillna(0)
@@ -376,15 +379,15 @@ def plot_results(df):
         
         handles, labels = ax.get_legend_handles_labels()
         handles.extend([breakout_patch, gmm_patch, cash_patch])
-        ax.legend(handles=handles, loc='upper left')
+        ax.legend(handles=handles, loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0)
     else:
-        plt.legend()
+        plt.legend(loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0)
         
     plt.title('Volatility-Scaled Strategy Performance: Out-of-Sample')
     plt.grid(True, alpha=0.3)
     current_dir = os.path.dirname(os.path.abspath(__file__))
     output_path = os.path.join(current_dir, '..', 'backtest_results.png')
-    plt.savefig(output_path)
+    plt.savefig(output_path, bbox_inches='tight')
     print(f"Chart saved to {output_path}")
 
 def plot_dashboard(df):
