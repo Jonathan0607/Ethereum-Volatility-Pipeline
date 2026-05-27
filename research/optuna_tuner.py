@@ -273,15 +273,15 @@ def main():
     df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
     df.dropna(subset=FEATURE_COLS, inplace=True)
 
-    # Split data to get the test set
-    _, test_raw = split_data(df, verbose=True)
+    # Split data to get the train set
+    train_raw, _ = split_data(df, verbose=True)
     
-    # Feature engineering for test set
-    test_df = calculate_features_test(test_raw)
+    # Feature engineering for train set
+    train_df = calculate_features_test(train_raw)
     
     # Pre-generate forecasts
-    test_df['forecasted_vol'] = get_lstm_predictions(test_df, best_params)
-    test_df.dropna(subset=['forecasted_vol'], inplace=True)
+    train_df['forecasted_vol'] = get_lstm_predictions(train_df, best_params)
+    train_df.dropna(subset=['forecasted_vol'], inplace=True)
 
     print(f"\n[Sandbox] Feature engineering & pre-computation complete.")
     print(f"[Sandbox] Beginning {N_TRIALS} fast Optuna trials...\n")
@@ -293,7 +293,7 @@ def main():
         load_if_exists=True,
     )
 
-    study.optimize(lambda trial: objective(trial, test_df), n_trials=N_TRIALS)
+    study.optimize(lambda trial: objective(trial, train_df), n_trials=N_TRIALS)
 
     try:
         write_best_params(study, best_params)
