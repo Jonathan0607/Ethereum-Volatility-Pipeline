@@ -293,9 +293,27 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     gmm_returns = test_df.loc[test_df['trade_owner'] == 'GMM', 'strategy_returns'].sum()
     breakout_returns = test_df.loc[test_df['trade_owner'] == 'Breakout', 'strategy_returns'].sum()
     
+    # Calculate Max Drawdown for each agent
+    strat_rets = test_df['strategy_returns'].fillna(0.0)
+    trade_owners = test_df['trade_owner'].fillna('CASH')
+    
+    gmm_series = np.where(trade_owners == 'GMM', strat_rets, 0.0)
+    gmm_cum = np.cumprod(1 + gmm_series)
+    gmm_peak = np.maximum.accumulate(gmm_cum)
+    gmm_drawdown = (gmm_cum - gmm_peak) / gmm_peak
+    gmm_max_dd = np.min(gmm_drawdown) * 100
+    
+    breakout_series = np.where(trade_owners == 'Breakout', strat_rets, 0.0)
+    breakout_cum = np.cumprod(1 + breakout_series)
+    breakout_peak = np.maximum.accumulate(breakout_cum)
+    breakout_drawdown = (breakout_cum - breakout_peak) / breakout_peak
+    breakout_max_dd = np.min(breakout_drawdown) * 100
+    
     print("\n=== AGENT PNL ATTRIBUTION ===")
     print(f"GMM Sub-Agent Contribution:      {gmm_returns * 100:.2f}%")
-    print(f"Breakout Sub-Agent Contribution: {breakout_returns * 100:.2f}%\n")
+    print(f"GMM Sub-Agent Max Drawdown:      {gmm_max_dd:.2f}%")
+    print(f"Breakout Sub-Agent Contribution: {breakout_returns * 100:.2f}%")
+    print(f"Breakout Sub-Agent Max Drawdown: {breakout_max_dd:.2f}%\n")
 
     return test_df
 
@@ -322,8 +340,26 @@ def calculate_metrics(df, verbose=True):
         if 'trade_owner' in df.columns:
             gmm_contrib = df.loc[df['trade_owner'] == 'GMM', 'strategy_returns'].sum() * 100
             breakout_contrib = df.loc[df['trade_owner'] == 'Breakout', 'strategy_returns'].sum() * 100
+            
+            strat_rets = df['strategy_returns'].fillna(0.0)
+            trade_owners = df['trade_owner'].fillna('CASH')
+            
+            gmm_series = np.where(trade_owners == 'GMM', strat_rets, 0.0)
+            gmm_cum = np.cumprod(1 + gmm_series)
+            gmm_peak = np.maximum.accumulate(gmm_cum)
+            gmm_drawdown = (gmm_cum - gmm_peak) / gmm_peak
+            gmm_max_dd = np.min(gmm_drawdown) * 100
+            
+            breakout_series = np.where(trade_owners == 'Breakout', strat_rets, 0.0)
+            breakout_cum = np.cumprod(1 + breakout_series)
+            breakout_peak = np.maximum.accumulate(breakout_cum)
+            breakout_drawdown = (breakout_cum - breakout_peak) / breakout_peak
+            breakout_max_dd = np.min(breakout_drawdown) * 100
+            
             print(f"GMM Sub-Agent Contribution:      {gmm_contrib:.2f}%")
+            print(f"GMM Sub-Agent Max Drawdown:      {gmm_max_dd:.2f}%")
             print(f"Breakout Sub-Agent Contribution: {breakout_contrib:.2f}%")
+            print(f"Breakout Sub-Agent Max Drawdown: {breakout_max_dd:.2f}%")
         try:
             target_vol_val = df['position_size'].iloc[-1] # Approximation just for printing if available
             print(f"Sizing Mode:     Volatility-Scaled")
