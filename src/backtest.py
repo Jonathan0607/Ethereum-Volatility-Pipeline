@@ -12,6 +12,7 @@ import pickle
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from data import calculate_features, calculate_features_test, split_data, FEATURE_COLS
 from strategy import ProgressiveModel
+from hmm_engine import get_high_vol_probability
 
 SEQ_LENGTH = 60
 
@@ -133,21 +134,40 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     else:
         best_params = {}
         
-    z_window        = best_params.get('z_window', 20)
-    z_buy           = best_params.get('z_buy', -2.0)
-    z_sell          = best_params.get('z_sell', 0.5)
-    hurst_threshold = best_params.get('hurst_threshold', 0.45)
-    hurst_window    = best_params.get('hurst_window', 48)
-    sl_mult         = best_params.get('sl_mult', 1.5)
-    cooldown_hours  = best_params.get('cooldown_hours', 3)
-    vol_mult        = best_params.get('vol_mult', 1.8)
-    use_partial_sell = best_params.get('use_partial_sell', True)
-    partial_sell_ratio = best_params.get('partial_sell_ratio', 0.5)
-    use_ema_exit    = best_params.get('use_ema_exit', False)
+    breakout_window = best_params.get('breakout_window', 48)
+    hmm_threshold   = best_params.get('hmm_threshold', 0.85)
 
-    # Calculate Hurst Exponent and EMA-200 on full df before splitting to prevent lookback cold-start NaNs
+    # Calculate HMM Probability on full df before splitting to prevent NaNs
     df = df.copy()
-    df['hurst'] = df['close'].rolling(window=hurst_window).apply(lambda x: get_hurst_exponent(x), raw=True)
+    
+    # Check HMM cache
+    import pickle
+    cache_path = os.path.join(current_dir, '..', 'data', 'hmm_features_cache.pkl')
+    hmm_loaded = False
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'rb') as f:
+                cached_df = pickle.load(f)
+            if cached_df.index[-1] == df.index[-1] and len(cached_df) == len(df):
+                df['prob_high_vol'] = cached_df['prob_high_vol']
+                print("[Cache] Loaded HMM prob_high_vol from cache.")
+                hmm_loaded = True
+        except Exception as e:
+            print(f"[Cache] Cache load error: {e}. Recomputing...")
+            
+    if not hmm_loaded:
+        print("Computing rolling HMM high-vol probability (this might take a few minutes if not cached)...")
+        df['prob_high_vol'] = df['close'].rolling(window=500).apply(
+            lambda x: get_high_vol_probability(x) if not np.isnan(x).any() else 0.0, raw=True
+        )
+        try:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            with open(cache_path, 'wb') as f:
+                pickle.dump(df[['close', 'prob_high_vol']], f)
+            print("[Cache] Saved computed HMM prob_high_vol to cache.")
+        except Exception as e:
+            print(f"[Cache] Save error: {e}")
+            
     df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
     
     train_raw, test_raw = split_data(df, verbose=False)
@@ -162,95 +182,16 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     test_df['forecasted_vol'] = get_lstm_predictions(test_df)
     test_df['market_returns'] = test_df['close'].pct_change()
 
-    # Calculate rolling Z-Score
-    roll_mean = test_df['close'].rolling(window=z_window).mean()
-    roll_std  = test_df['close'].rolling(window=z_window).std()
-    test_df['z_score'] = (test_df['close'] - roll_mean) / (roll_std + 1e-8)
+    # Compression Breakout Filters
+    test_df['rolling_max'] = test_df['close'].rolling(window=breakout_window).max().shift(1)
+    test_df['rolling_mean'] = test_df['close'].rolling(window=24).mean()
 
-    # Volatility threshold
-    vol_thresholds = test_df['volatility'].rolling(24).mean() * vol_mult
+    # The HMM Breakout Logic
+    buy_cond = (test_df['close'] > test_df['rolling_max']) & (test_df['prob_high_vol'] > hmm_threshold)
+    sell_cond = (test_df['prob_high_vol'] < 0.40) | (test_df['close'] < test_df['rolling_mean'])
 
-    # Execution Loop (Stop Loss, Cooldown, Soft Exit, Macro EMA-200 Filter)
-    signals = []
-    position_multipliers = []
-    position = 0  # 0: FLAT, 1: LONG
-    entry_price = 0.0
-    current_mult = 0.0
-    cooldown_until_idx = -1
-    has_partial_sold = False
-
-    for i in range(len(test_df)):
-        row = test_df.iloc[i]
-        price = row['close']
-        forecasted_vol = row['forecasted_vol']
-        z_score = row['z_score']
-        hurst = row['hurst']
-        vol_threshold = vol_thresholds.iloc[i]
-        
-        is_safe_vol = forecasted_vol < vol_threshold
-        is_mean_reverting = hurst < hurst_threshold
-        is_macro_uptrend = price > row['ema_200']
-        
-        # Dynamic Z-Score Band
-        dynamic_z_buy = z_buy - (forecasted_vol * 10)
-        
-        # Check cooldown
-        in_cooldown = i < cooldown_until_idx
-        
-        action = "HOLDING" if position == 1 else "FLAT"
-        
-        # Stop Loss Check (Gate 4)
-        if position == 1:
-            stop_loss_pct = forecasted_vol * sl_mult
-            if price < entry_price * (1.0 - stop_loss_pct):
-                action = "CASH"
-                cooldown_until_idx = i + cooldown_hours
-            elif use_ema_exit and price < row['ema_200']:
-                action = "CASH"
-                cooldown_until_idx = i + cooldown_hours
-                
-        # If not stopped out and not in cooldown
-        if action not in ["CASH"] and not in_cooldown:
-            if is_mean_reverting and is_safe_vol and is_macro_uptrend and z_score <= dynamic_z_buy:
-                action = "BUY"
-            elif z_score >= z_sell or not is_safe_vol:
-                action = "CASH"
-            elif use_partial_sell and z_score >= 0.0 and position == 1 and not has_partial_sold:
-                action = "PARTIAL_SELL"
-                
-        # State machine updates
-        if action == "BUY":
-            if position == 0:
-                entry_price = price
-                current_mult = 1.0
-                has_partial_sold = False
-            position = 1
-            signals.append(1)
-        elif action == "PARTIAL_SELL":
-            current_mult = current_mult * partial_sell_ratio
-            position = 1
-            has_partial_sold = True
-            signals.append(1)
-        elif action == "CASH":
-            if position == 1 and price < entry_price:
-                cooldown_until_idx = i + cooldown_hours
-            position = 0
-            entry_price = 0.0
-            current_mult = 0.0
-            has_partial_sold = False
-            signals.append(0)
-        elif action == "HOLDING":
-            signals.append(1)
-        else:  # FLAT
-            position = 0
-            entry_price = 0.0
-            current_mult = 0.0
-            has_partial_sold = False
-            signals.append(0)
-            
-        position_multipliers.append(current_mult)
-
-    test_df['signal'] = signals
+    test_df['signal'] = np.where(buy_cond, 1, np.where(sell_cond, 0, np.nan))
+    test_df['signal'] = test_df['signal'].ffill().fillna(0)
 
     # Convert forecasted hourly volatility to daily volatility (since TARGET is likely daily risk)
     daily_forecasted_vol = test_df['forecasted_vol'] * np.sqrt(24)
@@ -258,14 +199,13 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     # Volatility-Scaled Position Sizing
     uncapped_size = target_volatility / (daily_forecasted_vol + 1e-8)
     base_position_size = uncapped_size.clip(upper=1.0)
-    test_df['position_size'] = base_position_size * position_multipliers
+    test_df['position_size'] = base_position_size * test_df['signal']
     
     print(f"   [Debug] Avg Uncapped Position Size: {uncapped_size.mean():.4f}")
 
     # Weighted strategy returns
     test_df['strategy_returns'] = (
         test_df['market_returns'] *
-        test_df['signal'].shift(1) *
         test_df['position_size'].shift(1)
     )
     test_df['cumulative_market'] = (1 + test_df['market_returns']).cumprod()
@@ -347,10 +287,10 @@ def plot_results(df):
 def plot_dashboard(df):
     print("   [Visual] Rendering Final Portfolio Dashboard...")
     
-    # Load parameters to get hurst_threshold
+    # Load parameters to get hmm_threshold
     current_dir = os.path.dirname(os.path.abspath(__file__))
     params_path = os.path.join(current_dir, '..', 'best_params.txt')
-    hurst_threshold = 0.45
+    hmm_threshold = 0.85
     if os.path.exists(params_path):
         try:
             with open(params_path, 'r') as f:
@@ -359,7 +299,7 @@ def plot_dashboard(df):
                     best_params = json.loads(content)
                 except Exception:
                     best_params = ast.literal_eval(content)
-                hurst_threshold = best_params.get('hurst_threshold', 0.45)
+                hmm_threshold = best_params.get('hmm_threshold', 0.85)
         except Exception:
             pass
 
@@ -368,14 +308,14 @@ def plot_dashboard(df):
 
     ax1.plot(subset.index, subset['close'], color='gray', alpha=0.3, label='Price')
     
-    # Color coding based on Hurst regime filter
-    mean_revert = subset[subset['hurst'] < hurst_threshold]
-    trending = subset[subset['hurst'] >= hurst_threshold]
+    # Color coding based on HMM Probability
+    high_vol = subset[subset['prob_high_vol'] > hmm_threshold]
+    low_vol = subset[subset['prob_high_vol'] <= hmm_threshold]
 
-    ax1.scatter(mean_revert.index, mean_revert['close'], color='green', s=10, alpha=0.6, label=f'Mean-Reverting (Hurst < {hurst_threshold})')
-    ax1.scatter(trending.index, trending['close'], color='red', s=10, alpha=0.6, label=f'Trending (Hurst >= {hurst_threshold})')
+    ax1.scatter(high_vol.index, high_vol['close'], color='red', s=10, alpha=0.6, label=f'HMM High-Vol (Prob > {hmm_threshold:.2f})')
+    ax1.scatter(low_vol.index, low_vol['close'], color='blue', s=10, alpha=0.6, label=f'HMM Low-Vol (Prob <= {hmm_threshold:.2f})')
 
-    ax1.set_title('Market Regimes & Vol-Scaled AI Strategy', fontsize=14, fontweight='bold')
+    ax1.set_title('Market Regimes & HMM Breakout Strategy', fontsize=14, fontweight='bold')
     ax1.set_ylabel('Price (USD)')
     ax1.legend(loc='upper left')
     ax1.grid(True, alpha=0.15)
@@ -409,21 +349,33 @@ def run_visualizer():
     df = load_data()
     
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    params_path = os.path.join(current_dir, '..', 'best_params.txt')
-    hurst_window = 48
-    if os.path.exists(params_path):
+    # Load HMM probability from cache or compute it
+    import pickle
+    cache_path = os.path.join(current_dir, '..', 'data', 'hmm_features_cache.pkl')
+    hmm_loaded = False
+    if os.path.exists(cache_path):
         try:
-            with open(params_path, 'r') as f:
-                content = f.read()
-                try:
-                    best_params = json.loads(content)
-                except Exception:
-                    best_params = ast.literal_eval(content)
-                hurst_window = best_params.get('hurst_window', 48)
-        except:
-            pass
+            with open(cache_path, 'rb') as f:
+                cached_df = pickle.load(f)
+            if cached_df.index[-1] == df.index[-1] and len(cached_df) == len(df):
+                df['prob_high_vol'] = cached_df['prob_high_vol']
+                print("[Cache] Loaded HMM prob_high_vol from cache.")
+                hmm_loaded = True
+        except Exception as e:
+            print(f"[Cache] Cache load error: {e}. Recomputing...")
             
-    df['hurst'] = df['close'].rolling(window=hurst_window).apply(lambda x: get_hurst_exponent(x), raw=True)
+    if not hmm_loaded:
+        print("Computing rolling HMM high-vol probability...")
+        df['prob_high_vol'] = df['close'].rolling(window=500).apply(
+            lambda x: get_high_vol_probability(x.values) if len(x.dropna()) == 500 else 0.0, raw=True
+        )
+        try:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            with open(cache_path, 'wb') as f:
+                pickle.dump(df[['close', 'prob_high_vol']], f)
+        except Exception as e:
+            pass
+
     df = calculate_features(df)
     df['forecasted_vol'] = get_lstm_predictions(df)
     df['lstm_pred_vol'] = df['forecasted_vol']

@@ -13,10 +13,11 @@ from datetime import datetime
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from strategy import ProgressiveModel
+from hmm_engine import get_high_vol_probability
 
 # --- 1. The Cold Start (REST API Seed) ---
 print("=== FETCHING HOURLY MACRO-CONTEXT ===")
-rest_url = "https://api.binance.us/api/v3/klines?symbol=ETHUSDT&interval=1h&limit=100"
+rest_url = "https://api.binance.us/api/v3/klines?symbol=ETHUSDT&interval=1h&limit=500"
 req = urllib.request.Request(rest_url, headers={'User-Agent': 'Mozilla/5.0'})
 try:
     with urllib.request.urlopen(req) as response:
@@ -99,10 +100,10 @@ async def stream_ethereum_data():
                     if timestamp_dt.minute == 0:
                         hourly_price_buffer.append(current_price)
                         
-                        if len(hourly_price_buffer) > 100:
+                        if len(hourly_price_buffer) > 500:
                             hourly_price_buffer.pop(0)
                             
-                        if len(hourly_price_buffer) >= 90:
+                        if len(hourly_price_buffer) >= 500:
                             closes = np.array(hourly_price_buffer)
                             
                             log_return = np.log(closes[-1] / closes[-2])
@@ -127,19 +128,17 @@ async def stream_ethereum_data():
                                 
                             volatility_forecast = target_scaler.inverse_transform(output_scaled.cpu().numpy())[0][0]
                             
-                            z_window = best_params.get('z_window', 20)
-                            window_closes = closes[-z_window:]
-                            z_score = (current_price - np.mean(window_closes)) / (np.std(window_closes, ddof=1) + 1e-8)
+                            breakout_window = best_params.get('breakout_window', 48)
+                            rolling_max = float(max(closes[-breakout_window-1:-1]))
                             
-                            hurst_window = best_params.get('hurst_window', 48)
-                            hurst_value = get_hurst_exponent(closes[-hurst_window:])
+                            prob_high_vol = get_high_vol_probability(closes)
 
                             print("\n" + "="*60)
                             print(f"🚨 HOURLY REGIME UPDATE 🚨")
                             print(f"   Real-Time Hourly Close: ${current_price:,.2f}")
                             print(f"   LSTM Volatility Forecast (24h): {volatility_forecast:.4%}")
-                            print(f"   Hurst Exponent (48h): {hurst_value:.4f}")
-                            print(f"   Z-Score ({z_window}h): {z_score:.4f}")
+                            print(f"   HMM High-Vol Prob: {prob_high_vol:.4f}")
+                            print(f"   Rolling Max ({breakout_window}h): ${rolling_max:,.2f}")
                             print("="*60 + "\n")
 
                             # Fire the Microservice Handshake to the FastAPI engine
@@ -148,8 +147,9 @@ async def stream_ethereum_data():
                                 payload = {
                                     "current_price": float(current_price),
                                     "forecasted_vol": float(volatility_forecast),
-                                    "z_score": float(z_score),
-                                    "hurst": float(hurst_value)
+                                    "prob_high_vol": float(prob_high_vol),
+                                    "rolling_max": float(rolling_max),
+                                    "closes": [float(c) for c in closes[-24:]]
                                 }
                                 import requests
                                 response = requests.post(api_url, json=payload, timeout=5)

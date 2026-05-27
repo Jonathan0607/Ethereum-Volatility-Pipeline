@@ -171,8 +171,9 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
     conn.close()
 
     size_pct = position_size * 100
-    print(f"   [EXECUTED] {actual_action} | ${price:.2f} | Vol: {pred_vol:.4f} | Hurst: {regime:.4f} | Size: {size_pct:.1f}%")
+    print(f"   [EXECUTED] {actual_action} | ${price:.2f} | Vol: {pred_vol:.4f} | HMM: {regime:.4f} | Size: {size_pct:.1f}%")
 
+    # Set webhook URL
     WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
     if WEBHOOK_URL is None:
         print("[WARN] DISCORD_WEBHOOK_URL not set in environment variables")
@@ -195,7 +196,7 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
     fields = [
         {"name": "Asset", "value": "ETH/USD", "inline": True},
         {"name": "Execution Price", "value": f"${price:.2f}", "inline": True},
-        {"name": "Hurst Exponent", "value": f"{regime:.4f}", "inline": True},
+        {"name": "HMM High-Vol Prob", "value": f"{regime:.4f}", "inline": True},
         {"name": "AI Volatility", "value": f"{pred_vol:.5f}", "inline": True},
         {"name": "Position Size", "value": f"{size_pct:.1f}%", "inline": True},
         {"name": "Target Vol", "value": f"{TARGET_VOLATILITY*100:.1f}%", "inline": True},
@@ -225,8 +226,9 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
 class LiveExecutionPayload(BaseModel):
     current_price: float
     forecasted_vol: float
-    z_score: float
-    hurst: float
+    prob_high_vol: float
+    rolling_max: float
+    closes: list[float]
 
 @app.post("/execution/live-stream")
 def execute_live_stream_trade(payload: LiveExecutionPayload):
@@ -268,15 +270,8 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         else:
             best_params = {}
             
-        z_buy = best_params.get('z_buy', -2.0)
-        z_sell = best_params.get('z_sell', 0.5)
-        hurst_threshold = best_params.get('hurst_threshold', 0.45)
-        sl_mult = best_params.get('sl_mult', 1.5)
+        hmm_threshold = best_params.get('hmm_threshold', 0.85)
         cooldown_hours = best_params.get('cooldown_hours', 3)
-        vol_mult = best_params.get('vol_mult', 1.8)
-        use_partial_sell = best_params.get('use_partial_sell', True)
-        partial_sell_ratio = best_params.get('partial_sell_ratio', 0.5)
-        use_ema_exit = best_params.get('use_ema_exit', False)
 
         # Get current position and size from database
         db_path = get_db_path()
@@ -288,51 +283,21 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         current_position = "LONG" if open_trade is not None else "FLAT"
         current_size = open_trade[1] if open_trade is not None else 0.0
         
-        has_partial_sold = False
-        if open_trade is not None:
-            previous_buy_price, _, entry_timestamp = open_trade
-            cursor.execute("SELECT COUNT(*) FROM paper_trades WHERE timestamp >= ? AND action = 'PARTIAL_SELL'", (entry_timestamp,))
-            has_partial_sold = cursor.fetchone()[0] > 0
-            
         conn.close()
 
-        # Gate 1 & 2: Risk Filters
-        vol_threshold = rolling_vol_mean * vol_mult
-        is_safe_vol = payload.forecasted_vol < vol_threshold
-        is_mean_reverting = payload.hurst < hurst_threshold
-        is_macro_uptrend = close_price > ema_200
-
         # Gate 3: Execution Logic
-        is_stop_loss_hit = False
-        if current_position == "LONG" and open_trade is not None:
-            stop_loss_pct = forecasted_vol * sl_mult
-            if close_price < previous_buy_price * (1.0 - stop_loss_pct):
-                is_stop_loss_hit = True
-                action = "CASH"
-                print(f"   [STOP LOSS BREACHED] Price dropped below threshold (${close_price:.2f} < ${previous_buy_price * (1.0 - stop_loss_pct):.2f}). Forcing full liquidation.")
-            elif use_ema_exit and close_price < ema_200:
-                is_stop_loss_hit = True
-                action = "CASH"
-                print(f"   [EMA COOLDOWN VETO] Price dropped below EMA-200 (${close_price:.2f} < ${ema_200:.2f}). Forcing full liquidation.")
+        rolling_mean = sum(payload.closes[-24:]) / 24
 
-        if not is_stop_loss_hit:
-            # Scale z_buy dynamically based on forecasted volatility
-            dynamic_z_buy = z_buy - (forecasted_vol * 10)
-            
-            if is_mean_reverting and is_safe_vol and is_macro_uptrend and payload.z_score <= dynamic_z_buy:
-                action = "BUY"
-            elif payload.z_score >= z_sell or not is_safe_vol:
-                action = "CASH" # 100% Exit
-            elif use_partial_sell and payload.z_score >= 0.0 and current_position == "LONG" and not has_partial_sold:
-                action = "PARTIAL_SELL"
-            else:
-                action = "HOLDING" if current_position == "LONG" else "FLAT"
+        if payload.current_price > payload.rolling_max and payload.prob_high_vol > hmm_threshold:
+            action = "BUY"
+        elif payload.prob_high_vol < 0.40 or payload.current_price < rolling_mean:
+            action = "CASH"
+        else:
+            action = "HOLDING" if current_position == "LONG" else "FLAT"
 
         daily_forecasted_vol = forecasted_vol * np.sqrt(24)
         if action in ["BUY", "HOLDING"]:
             position_size = min(TARGET_VOLATILITY / (daily_forecasted_vol + 1e-8), 1.0)
-        elif action == "PARTIAL_SELL":
-            position_size = current_size * partial_sell_ratio
         else:
             position_size = 0.0
 
@@ -349,8 +314,8 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
             num_sims=10000, steps=24
         )
         
-        # 4. Write to DB and push Discord notification (logging hurst in regime column)
-        log_trade(action, close_price, float(forecasted_vol), float(payload.hurst),
+        # 4. Write to DB and push Discord notification (logging regime prob in regime column)
+        log_trade(action, close_price, float(forecasted_vol), float(payload.prob_high_vol),
                   mc_results['lower_bound'], mc_results['upper_bound'], position_size)
                   
         return {"status": "Success", "action": action, "position_size": position_size}
