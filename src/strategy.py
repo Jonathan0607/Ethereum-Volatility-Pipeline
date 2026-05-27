@@ -116,12 +116,17 @@ def create_sequences(features: np.ndarray, targets: np.ndarray, seq_length: int)
     return np.array(xs), np.array(ys)
 
 def load_best_params():
+    import json
     current_dir = os.path.dirname(os.path.abspath(__file__))
     params_path = os.path.join(current_dir, '..', 'best_params.txt')
     if not os.path.exists(params_path):
         return {'hidden_dim': 64, 'lr': 0.001, 'dropout': 0.2, 'input_dim': len(FEATURE_COLS)}
     with open(params_path, 'r') as f:
-        params = ast.literal_eval(f.read())
+        content = f.read()
+        try:
+            params = json.loads(content)
+        except Exception:
+            params = ast.literal_eval(content)
     # Ensure input_dim is always present
     params['input_dim'] = len(FEATURE_COLS)
     return params

@@ -100,7 +100,11 @@ def load_artifacts():
     # 3. Load ProgressiveModel
     params_path = os.path.join(current_dir, '..', 'best_params.txt')
     with open(params_path, 'r') as f:
-        params = ast.literal_eval(f.read())
+        content = f.read()
+        try:
+            params = json.loads(content)
+        except Exception:
+            params = ast.literal_eval(content)
 
     input_dim = params.get('input_dim', len(FEATURE_COLS))
     model = ProgressiveModel(
@@ -238,8 +242,8 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         close_price = payload.current_price
         forecasted_vol = max(payload.forecasted_vol, 1e-8)
         
-        # 1. Fetch historical data for Monte Carlo predicted GARCH volatility
-        raw_df = yf.download("ETH-USD", period="5d", interval="1h", progress=False, auto_adjust=True)
+        # 1. Fetch historical data for Monte Carlo predicted GARCH volatility and EMA-200
+        raw_df = yf.download("ETH-USD", period="15d", interval="1h", progress=False, auto_adjust=True)
         if isinstance(raw_df.columns, pd.MultiIndex):
             raw_df.columns = [col[0] for col in raw_df.columns]
         raw_df.rename(columns={"Open":"open","High":"high","Low":"low","Close":"close","Volume":"volume"}, inplace=True)
@@ -248,51 +252,87 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         garch = arch_model(returns, vol='Garch', p=1, q=1, dist='Normal')
         garch_fit = garch.fit(update_freq=0, disp='off')
         live_garch_vol = float(garch_fit.conditional_volatility.iloc[-1] / 100)
+        rolling_vol_mean = float(garch_fit.conditional_volatility.tail(24).mean() / 100)
+        ema_200 = float(raw_df['close'].ewm(span=200, adjust=False).mean().iloc[-1])
 
         # Load best_params config
         current_dir = os.path.dirname(os.path.abspath(__file__))
         params_path = os.path.join(current_dir, '..', 'best_params.txt')
         if os.path.exists(params_path):
             with open(params_path, 'r') as f:
-                best_params = ast.literal_eval(f.read())
+                content = f.read()
+                try:
+                    best_params = json.loads(content)
+                except Exception:
+                    best_params = ast.literal_eval(content)
         else:
             best_params = {}
             
         z_buy = best_params.get('z_buy', -2.0)
         z_sell = best_params.get('z_sell', 0.5)
         hurst_threshold = best_params.get('hurst_threshold', 0.45)
+        sl_mult = best_params.get('sl_mult', 1.5)
+        cooldown_hours = best_params.get('cooldown_hours', 3)
+        vol_mult = best_params.get('vol_mult', 1.8)
+        use_partial_sell = best_params.get('use_partial_sell', True)
+        partial_sell_ratio = best_params.get('partial_sell_ratio', 0.5)
+        use_ema_exit = best_params.get('use_ema_exit', False)
 
         # Get current position and size from database
         db_path = get_db_path()
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        cursor.execute("SELECT execution_price, position_size FROM paper_trades WHERE status = 'OPEN' ORDER BY timestamp ASC LIMIT 1")
+        cursor.execute("SELECT execution_price, position_size, timestamp FROM paper_trades WHERE status = 'OPEN' ORDER BY timestamp ASC LIMIT 1")
         open_trade = cursor.fetchone()
-        conn.close()
+        
         current_position = "LONG" if open_trade is not None else "FLAT"
         current_size = open_trade[1] if open_trade is not None else 0.0
+        
+        has_partial_sold = False
+        if open_trade is not None:
+            previous_buy_price, _, entry_timestamp = open_trade
+            cursor.execute("SELECT COUNT(*) FROM paper_trades WHERE timestamp >= ? AND action = 'PARTIAL_SELL'", (entry_timestamp,))
+            has_partial_sold = cursor.fetchone()[0] > 0
+            
+        conn.close()
 
         # Gate 1 & 2: Risk Filters
-        vol_threshold = TARGET_VOLATILITY * 1.8 
+        vol_threshold = rolling_vol_mean * vol_mult
         is_safe_vol = payload.forecasted_vol < vol_threshold
         is_mean_reverting = payload.hurst < hurst_threshold
+        is_macro_uptrend = close_price > ema_200
 
         # Gate 3: Execution Logic
-        # Soft Exit: Sell 50% at Z-Score 0.0 (the mean), Sell 100% at Z-Score 1.0
-        if is_mean_reverting and is_safe_vol and payload.z_score <= z_buy:
-            action = "BUY"
-        elif payload.z_score >= z_sell or not is_safe_vol:
-            action = "CASH" # 100% Exit
-        elif payload.z_score >= 0.0 and current_position == "LONG":
-            action = "PARTIAL_SELL" # New state to reduce size by 50%
-        else:
-            action = "HOLDING" if current_position == "LONG" else "FLAT"
+        is_stop_loss_hit = False
+        if current_position == "LONG" and open_trade is not None:
+            stop_loss_pct = forecasted_vol * sl_mult
+            if close_price < previous_buy_price * (1.0 - stop_loss_pct):
+                is_stop_loss_hit = True
+                action = "CASH"
+                print(f"   [STOP LOSS BREACHED] Price dropped below threshold (${close_price:.2f} < ${previous_buy_price * (1.0 - stop_loss_pct):.2f}). Forcing full liquidation.")
+            elif use_ema_exit and close_price < ema_200:
+                is_stop_loss_hit = True
+                action = "CASH"
+                print(f"   [EMA COOLDOWN VETO] Price dropped below EMA-200 (${close_price:.2f} < ${ema_200:.2f}). Forcing full liquidation.")
+
+        if not is_stop_loss_hit:
+            # Scale z_buy dynamically based on forecasted volatility
+            dynamic_z_buy = z_buy - (forecasted_vol * 10)
+            
+            if is_mean_reverting and is_safe_vol and is_macro_uptrend and payload.z_score <= dynamic_z_buy:
+                action = "BUY"
+            elif payload.z_score >= z_sell or not is_safe_vol:
+                action = "CASH" # 100% Exit
+            elif use_partial_sell and payload.z_score >= 0.0 and current_position == "LONG" and not has_partial_sold:
+                action = "PARTIAL_SELL"
+            else:
+                action = "HOLDING" if current_position == "LONG" else "FLAT"
 
         daily_forecasted_vol = forecasted_vol * np.sqrt(24)
         if action in ["BUY", "HOLDING"]:
             position_size = min(TARGET_VOLATILITY / (daily_forecasted_vol + 1e-8), 1.0)
         elif action == "PARTIAL_SELL":
-            position_size = current_size * 0.5
+            position_size = current_size * partial_sell_ratio
         else:
             position_size = 0.0
 
@@ -300,8 +340,8 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         if action == "CASH" and open_trade is not None:
             previous_buy_price = open_trade[0]
             if close_price < previous_buy_price:
-                current_state.cooldown_until = datetime.now() + timedelta(hours=3)
-                print(f"   [COOLDOWN TRIGGERED] Exited trade at a loss (${close_price:.2f} < ${previous_buy_price:.2f}). Cooldown active for 3 hours until {current_state.cooldown_until}")
+                current_state.cooldown_until = datetime.now() + timedelta(hours=cooldown_hours)
+                print(f"   [COOLDOWN TRIGGERED] Exited trade at a loss (${close_price:.2f} < ${previous_buy_price:.2f}). Cooldown active for {cooldown_hours} hours until {current_state.cooldown_until}")
 
         # 3. Fire custom C++ Monte Carlo
         mc_results = monte_carlo.simulate_gbm(

@@ -45,7 +45,11 @@ def get_lstm_predictions(df):
 
     if os.path.exists(params_path):
         with open(params_path, 'r') as f:
-            params = ast.literal_eval(f.read())
+            content = f.read()
+            try:
+                params = json.loads(content)
+            except Exception:
+                params = ast.literal_eval(content)
             hidden_dim = params.get('hidden_dim', 64)
             dropout = params.get('dropout', 0.2)
             input_dim = params.get('input_dim', len(FEATURE_COLS))
@@ -116,9 +120,35 @@ def get_lstm_predictions(df):
 def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     print("Running Backtest with Volatility-Scaled Sizing...")
     
-    # Calculate Hurst Exponent on full df before splitting to prevent lookback cold-start NaNs
+    # Load parameters
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    params_path = os.path.join(current_dir, '..', 'best_params.txt')
+    if os.path.exists(params_path):
+        with open(params_path, 'r') as f:
+            content = f.read()
+            try:
+                best_params = json.loads(content)
+            except Exception:
+                best_params = ast.literal_eval(content)
+    else:
+        best_params = {}
+        
+    z_window        = best_params.get('z_window', 20)
+    z_buy           = best_params.get('z_buy', -2.0)
+    z_sell          = best_params.get('z_sell', 0.5)
+    hurst_threshold = best_params.get('hurst_threshold', 0.45)
+    hurst_window    = best_params.get('hurst_window', 48)
+    sl_mult         = best_params.get('sl_mult', 1.5)
+    cooldown_hours  = best_params.get('cooldown_hours', 3)
+    vol_mult        = best_params.get('vol_mult', 1.8)
+    use_partial_sell = best_params.get('use_partial_sell', True)
+    partial_sell_ratio = best_params.get('partial_sell_ratio', 0.5)
+    use_ema_exit    = best_params.get('use_ema_exit', False)
+
+    # Calculate Hurst Exponent and EMA-200 on full df before splitting to prevent lookback cold-start NaNs
     df = df.copy()
-    df['hurst'] = df['close'].rolling(window=48).apply(lambda x: get_hurst_exponent(x), raw=True)
+    df['hurst'] = df['close'].rolling(window=hurst_window).apply(lambda x: get_hurst_exponent(x), raw=True)
+    df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
     
     train_raw, test_raw = split_data(df, verbose=False)
 
@@ -132,45 +162,103 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     test_df['forecasted_vol'] = get_lstm_predictions(test_df)
     test_df['market_returns'] = test_df['close'].pct_change()
 
-    # Load parameters
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    params_path = os.path.join(current_dir, '..', 'best_params.txt')
-    if os.path.exists(params_path):
-        with open(params_path, 'r') as f:
-            best_params = ast.literal_eval(f.read())
-    else:
-        best_params = {}
-        
-    z_window        = best_params.get('z_window', 20)
-    z_buy           = best_params.get('z_buy', -2.0)
-    z_sell          = best_params.get('z_sell', 0.5)
-    hurst_threshold = best_params.get('hurst_threshold', 0.45)
-
     # Calculate rolling Z-Score
     roll_mean = test_df['close'].rolling(window=z_window).mean()
     roll_std  = test_df['close'].rolling(window=z_window).std()
     test_df['z_score'] = (test_df['close'] - roll_mean) / (roll_std + 1e-8)
 
-    # Risk Filters
-    vol_threshold = test_df['volatility'].rolling(24).mean() * 1.8
-    is_safe_vol = test_df['forecasted_vol'] < vol_threshold
-    is_mean_reverting = test_df['hurst'] < hurst_threshold
+    # Volatility threshold
+    vol_thresholds = test_df['volatility'].rolling(24).mean() * vol_mult
 
-    # Execution State Machine
-    buy_cond  = is_mean_reverting & is_safe_vol & (test_df['z_score'] <= z_buy)
-    sell_cond = (test_df['z_score'] >= z_sell) | ~is_safe_vol
+    # Execution Loop (Stop Loss, Cooldown, Soft Exit, Macro EMA-200 Filter)
+    signals = []
+    position_multipliers = []
+    position = 0  # 0: FLAT, 1: LONG
+    entry_price = 0.0
+    current_mult = 0.0
+    cooldown_until_idx = -1
+    has_partial_sold = False
 
-    # Forward fill signals: 1 when holding, 0 when flat
-    test_df['signal'] = np.where(buy_cond, 1, np.where(sell_cond, 0, np.nan))
-    test_df['signal'] = test_df['signal'].ffill().fillna(0)
+    for i in range(len(test_df)):
+        row = test_df.iloc[i]
+        price = row['close']
+        forecasted_vol = row['forecasted_vol']
+        z_score = row['z_score']
+        hurst = row['hurst']
+        vol_threshold = vol_thresholds.iloc[i]
+        
+        is_safe_vol = forecasted_vol < vol_threshold
+        is_mean_reverting = hurst < hurst_threshold
+        is_macro_uptrend = price > row['ema_200']
+        
+        # Dynamic Z-Score Band
+        dynamic_z_buy = z_buy - (forecasted_vol * 10)
+        
+        # Check cooldown
+        in_cooldown = i < cooldown_until_idx
+        
+        action = "HOLDING" if position == 1 else "FLAT"
+        
+        # Stop Loss Check (Gate 4)
+        if position == 1:
+            stop_loss_pct = forecasted_vol * sl_mult
+            if price < entry_price * (1.0 - stop_loss_pct):
+                action = "CASH"
+                cooldown_until_idx = i + cooldown_hours
+            elif use_ema_exit and price < row['ema_200']:
+                action = "CASH"
+                cooldown_until_idx = i + cooldown_hours
+                
+        # If not stopped out and not in cooldown
+        if action not in ["CASH"] and not in_cooldown:
+            if is_mean_reverting and is_safe_vol and is_macro_uptrend and z_score <= dynamic_z_buy:
+                action = "BUY"
+            elif z_score >= z_sell or not is_safe_vol:
+                action = "CASH"
+            elif use_partial_sell and z_score >= 0.0 and position == 1 and not has_partial_sold:
+                action = "PARTIAL_SELL"
+                
+        # State machine updates
+        if action == "BUY":
+            if position == 0:
+                entry_price = price
+                current_mult = 1.0
+                has_partial_sold = False
+            position = 1
+            signals.append(1)
+        elif action == "PARTIAL_SELL":
+            current_mult = current_mult * partial_sell_ratio
+            position = 1
+            has_partial_sold = True
+            signals.append(1)
+        elif action == "CASH":
+            if position == 1 and price < entry_price:
+                cooldown_until_idx = i + cooldown_hours
+            position = 0
+            entry_price = 0.0
+            current_mult = 0.0
+            has_partial_sold = False
+            signals.append(0)
+        elif action == "HOLDING":
+            signals.append(1)
+        else:  # FLAT
+            position = 0
+            entry_price = 0.0
+            current_mult = 0.0
+            has_partial_sold = False
+            signals.append(0)
+            
+        position_multipliers.append(current_mult)
+
+    test_df['signal'] = signals
 
     # Convert forecasted hourly volatility to daily volatility (since TARGET is likely daily risk)
     daily_forecasted_vol = test_df['forecasted_vol'] * np.sqrt(24)
 
     # Volatility-Scaled Position Sizing
     uncapped_size = target_volatility / (daily_forecasted_vol + 1e-8)
-    test_df['position_size'] = uncapped_size.clip(upper=1.0)
-    test_df.loc[test_df['signal'] == 0, 'position_size'] = 0.0
+    base_position_size = uncapped_size.clip(upper=1.0)
+    test_df['position_size'] = base_position_size * position_multipliers
     
     print(f"   [Debug] Avg Uncapped Position Size: {uncapped_size.mean():.4f}")
 
@@ -266,7 +354,11 @@ def plot_dashboard(df):
     if os.path.exists(params_path):
         try:
             with open(params_path, 'r') as f:
-                best_params = ast.literal_eval(f.read())
+                content = f.read()
+                try:
+                    best_params = json.loads(content)
+                except Exception:
+                    best_params = ast.literal_eval(content)
                 hurst_threshold = best_params.get('hurst_threshold', 0.45)
         except Exception:
             pass
@@ -315,7 +407,23 @@ def plot_dashboard(df):
 
 def run_visualizer():
     df = load_data()
-    df['hurst'] = df['close'].rolling(window=48).apply(lambda x: get_hurst_exponent(x.values), raw=True)
+    
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    params_path = os.path.join(current_dir, '..', 'best_params.txt')
+    hurst_window = 48
+    if os.path.exists(params_path):
+        try:
+            with open(params_path, 'r') as f:
+                content = f.read()
+                try:
+                    best_params = json.loads(content)
+                except Exception:
+                    best_params = ast.literal_eval(content)
+                hurst_window = best_params.get('hurst_window', 48)
+        except:
+            pass
+            
+    df['hurst'] = df['close'].rolling(window=hurst_window).apply(lambda x: get_hurst_exponent(x), raw=True)
     df = calculate_features(df)
     df['forecasted_vol'] = get_lstm_predictions(df)
     df['lstm_pred_vol'] = df['forecasted_vol']

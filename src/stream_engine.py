@@ -35,7 +35,11 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 params_path = os.path.join(current_dir, '..', 'best_params.txt')
 if os.path.exists(params_path):
     with open(params_path, 'r') as f:
-        best_params = ast.literal_eval(f.read())
+        content = f.read()
+        try:
+            best_params = json.loads(content)
+        except Exception:
+            best_params = ast.literal_eval(content)
 else:
     best_params = {'hidden_dim': 64, 'input_dim': 5, 'dropout': 0.2}
 
@@ -127,7 +131,8 @@ async def stream_ethereum_data():
                             window_closes = closes[-z_window:]
                             z_score = (current_price - np.mean(window_closes)) / (np.std(window_closes, ddof=1) + 1e-8)
                             
-                            hurst_value = get_hurst_exponent(closes[-48:])
+                            hurst_window = best_params.get('hurst_window', 48)
+                            hurst_value = get_hurst_exponent(closes[-hurst_window:])
 
                             print("\n" + "="*60)
                             print(f"🚨 HOURLY REGIME UPDATE 🚨")

@@ -1,1 +1,17 @@
-{'hidden_dim': 64, 'lr': 0.003003155263577579, 'dropout': 0.10124230455490923, 'input_dim': 5}
+{
+  "hidden_dim": 64,
+  "lr": 0.003003155263577579,
+  "dropout": 0.10124230455490923,
+  "input_dim": 5,
+  "z_window": 79,
+  "z_buy": -1.1057583195548208,
+  "z_sell": 2.1009590810977086,
+  "hurst_threshold": 0.336930779969317,
+  "hurst_window": 48,
+  "sl_mult": 1.3415202118893166,
+  "cooldown_hours": 22,
+  "vol_mult": 1.0849557914174348,
+  "use_partial_sell": true,
+  "partial_sell_ratio": 0.6098240666077867,
+  "use_ema_exit": false
+}
