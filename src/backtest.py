@@ -222,6 +222,12 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     
     test_df['signal'] = test_df['signal'].ffill().fillna(0)
 
+    # Track Active Regimes in Dataframe
+    test_df['active_agent'] = 'CASH'
+    test_df.loc[trend_active, 'active_agent'] = 'Breakout'
+    test_df.loc[chop_active, 'active_agent'] = 'GMM'
+
+
     # Convert forecasted hourly volatility to daily volatility (since TARGET is likely daily risk)
     daily_forecasted_vol = test_df['forecasted_vol'] * np.sqrt(24)
 
@@ -334,8 +340,47 @@ def plot_results(df):
     plt.figure(figsize=(12, 6))
     plt.plot(df.index, df['cumulative_market'], label='Buy & Hold (ETH)', color='gray', alpha=0.5)
     plt.plot(df.index, df['cumulative_strategy'], label='Vol-Scaled AI (Test Set)', color='blue', linewidth=1.5)
+    
+    # Shade active regimes
+    ax = plt.gca()
+    if len(df) > 0 and 'active_agent' in df.columns:
+        import matplotlib.patches as mpatches
+        
+        # Group contiguous blocks of active_agent to speed up plotting
+        changes = df['active_agent'] != df['active_agent'].shift(1)
+        change_indices = df.index[changes].tolist()
+        
+        # Calculate time diff to extend the last block
+        time_diff = df.index[1] - df.index[0] if len(df) > 1 else pd.Timedelta(hours=1)
+        end_of_df = df.index[-1] + time_diff
+        change_indices.append(end_of_df)
+        
+        for k in range(len(change_indices) - 1):
+            start_time = change_indices[k]
+            end_time = change_indices[k+1]
+            agent = df.loc[start_time, 'active_agent']
+            if isinstance(agent, pd.Series):
+                agent = agent.iloc[0]
+                
+            if agent == 'Breakout':
+                ax.axvspan(start_time, end_time, color='red', alpha=0.08)
+            elif agent == 'GMM':
+                ax.axvspan(start_time, end_time, color='green', alpha=0.08)
+            else:
+                ax.axvspan(start_time, end_time, color='gray', alpha=0.05)
+                
+        # Create custom legend entries for the shaded regions
+        breakout_patch = mpatches.Patch(color='red', alpha=0.08, label='Red Shading = Momentum Breakout Sub-Agent')
+        gmm_patch = mpatches.Patch(color='green', alpha=0.08, label='Green Shading = GMM Mean-Reversion Sub-Agent')
+        cash_patch = mpatches.Patch(color='gray', alpha=0.05, label='Gray Shading = Meta-Controller Transition Zone (CASH)')
+        
+        handles, labels = ax.get_legend_handles_labels()
+        handles.extend([breakout_patch, gmm_patch, cash_patch])
+        ax.legend(handles=handles, loc='upper left')
+    else:
+        plt.legend()
+        
     plt.title('Volatility-Scaled Strategy Performance: Out-of-Sample')
-    plt.legend()
     plt.grid(True, alpha=0.3)
     current_dir = os.path.dirname(os.path.abspath(__file__))
     output_path = os.path.join(current_dir, '..', 'backtest_results.png')
