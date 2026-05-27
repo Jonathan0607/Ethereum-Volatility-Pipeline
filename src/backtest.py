@@ -184,30 +184,42 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
 
     # Compression Breakout Filters
     test_df['rolling_max'] = test_df['close'].rolling(window=breakout_window).max().shift(1)
+    test_df['rolling_min'] = test_df['close'].rolling(window=breakout_window).min().shift(1)
     test_df['rolling_mean'] = test_df['close'].rolling(window=24).mean()
 
-    # The HMM Breakout Logic
-    buy_cond = (test_df['close'] > test_df['rolling_max']) & (test_df['prob_high_vol'] > hmm_threshold)
-    sell_cond = (test_df['prob_high_vol'] < 0.40) | (test_df['close'] < test_df['rolling_mean'])
+    # Bi-directional HMM Breakout Logic
+    long_cond = (test_df['close'] > test_df['rolling_max']) & (test_df['prob_high_vol'] > hmm_threshold)
+    short_cond = (test_df['close'] < test_df['rolling_min']) & (test_df['prob_high_vol'] > hmm_threshold)
 
-    test_df['signal'] = np.where(buy_cond, 1, np.where(sell_cond, 0, np.nan))
+    exit_long = (test_df['prob_high_vol'] < 0.40) | (test_df['close'] < test_df['rolling_mean'])
+    exit_short = (test_df['prob_high_vol'] < 0.40) | (test_df['close'] > test_df['rolling_mean'])
+
+    # Vectorized state evaluation
+    test_df['signal'] = np.nan
+    test_df.loc[long_cond, 'signal'] = 1
+    test_df.loc[short_cond, 'signal'] = -1
+
+    # Forward fill the active signal, then apply exits based on current position
+    test_df['signal'] = test_df['signal'].ffill()
+    test_df.loc[(test_df['signal'] == 1) & exit_long, 'signal'] = 0
+    test_df.loc[(test_df['signal'] == -1) & exit_short, 'signal'] = 0
     test_df['signal'] = test_df['signal'].ffill().fillna(0)
 
     # Convert forecasted hourly volatility to daily volatility (since TARGET is likely daily risk)
     daily_forecasted_vol = test_df['forecasted_vol'] * np.sqrt(24)
 
-    # Volatility-Scaled Position Sizing
+    # Volatility-Scaled Position Sizing (signed: +1 long, -1 short)
     uncapped_size = target_volatility / (daily_forecasted_vol + 1e-8)
     base_position_size = uncapped_size.clip(upper=1.0)
     test_df['position_size'] = base_position_size * test_df['signal']
     
-    print(f"   [Debug] Avg Uncapped Position Size: {uncapped_size.mean():.4f}")
+    n_long = (test_df['signal'] == 1).sum()
+    n_short = (test_df['signal'] == -1).sum()
+    n_flat = (test_df['signal'] == 0).sum()
+    print(f"   [Debug] Signals: LONG={n_long} | SHORT={n_short} | FLAT={n_flat}")
 
-    # Weighted strategy returns
-    test_df['strategy_returns'] = (
-        test_df['market_returns'] *
-        test_df['position_size'].shift(1)
-    )
+    # Strategy returns: signal * market_returns handles short P&L correctly
+    test_df['strategy_returns'] = test_df['market_returns'] * test_df['signal'].shift(1)
     test_df['cumulative_market'] = (1 + test_df['market_returns']).cumprod()
     test_df['cumulative_strategy'] = (1 + test_df['strategy_returns']).cumprod()
 

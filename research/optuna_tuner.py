@@ -153,28 +153,40 @@ def load_hmm_features(df):
     return df
 
 def simulate_sharpe(test_df: pd.DataFrame, breakout_window: int, hmm_threshold: float) -> float:
-    """Ultra-fast strategy simulation on pre-computed volatility forecasts."""
+    """Ultra-fast bi-directional strategy simulation on pre-computed volatility forecasts."""
     bt = test_df.copy()
     bt['market_returns'] = bt['close'].pct_change()
 
     # Compression Breakout Filters
     bt['rolling_max'] = bt['close'].rolling(window=breakout_window).max().shift(1)
+    bt['rolling_min'] = bt['close'].rolling(window=breakout_window).min().shift(1)
     bt['rolling_mean'] = bt['close'].rolling(window=24).mean()
 
-    # The HMM Breakout Logic
-    buy_cond = (bt['close'] > bt['rolling_max']) & (bt['prob_high_vol'] > hmm_threshold)
-    sell_cond = (bt['prob_high_vol'] < 0.40) | (bt['close'] < bt['rolling_mean'])
+    # Bi-directional HMM Breakout Logic
+    long_cond = (bt['close'] > bt['rolling_max']) & (bt['prob_high_vol'] > hmm_threshold)
+    short_cond = (bt['close'] < bt['rolling_min']) & (bt['prob_high_vol'] > hmm_threshold)
 
-    bt['signal'] = np.where(buy_cond, 1, np.where(sell_cond, 0, np.nan))
+    exit_long = (bt['prob_high_vol'] < 0.40) | (bt['close'] < bt['rolling_mean'])
+    exit_short = (bt['prob_high_vol'] < 0.40) | (bt['close'] > bt['rolling_mean'])
+
+    # Vectorized state evaluation
+    bt['signal'] = np.nan
+    bt.loc[long_cond, 'signal'] = 1
+    bt.loc[short_cond, 'signal'] = -1
+
+    # Forward fill the active signal, then apply exits based on current position
+    bt['signal'] = bt['signal'].ffill()
+    bt.loc[(bt['signal'] == 1) & exit_long, 'signal'] = 0
+    bt.loc[(bt['signal'] == -1) & exit_short, 'signal'] = 0
     bt['signal'] = bt['signal'].ffill().fillna(0)
 
-    # Volatility-Scaled Sizing
+    # Volatility-Scaled Sizing (abs signal for sizing, sign for direction)
     daily_forecasted_vol = bt['forecasted_vol'] * np.sqrt(24)
-    bt['position_size'] = (0.06 / (daily_forecasted_vol + 1e-8)).clip(upper=1.0) * bt['signal']
+    base_size = (0.06 / (daily_forecasted_vol + 1e-8)).clip(upper=1.0)
+    bt['position_size'] = base_size * bt['signal']  # Signed: +1 long, -1 short
 
-    bt['strategy_returns'] = (
-        bt['market_returns'] * bt['position_size'].shift(1)
-    )
+    # Strategy returns: signal * market_returns handles short P&L correctly
+    bt['strategy_returns'] = bt['market_returns'] * bt['signal'].shift(1)
     bt.dropna(subset=['strategy_returns'], inplace=True)
 
     if len(bt) < 100 or bt['strategy_returns'].std() < 1e-10:
@@ -187,7 +199,7 @@ def simulate_sharpe(test_df: pd.DataFrame, breakout_window: int, hmm_threshold: 
     return float(sharpe)
 
 def objective(trial, test_df):
-    breakout_window = trial.suggest_int('breakout_window', 12, 168)
+    breakout_window = trial.suggest_int('breakout_window', 12, 48)  # Micro-breakouts
     hmm_threshold   = trial.suggest_float('hmm_threshold', 0.50, 0.95)
 
     sharpe = simulate_sharpe(test_df, breakout_window, hmm_threshold)

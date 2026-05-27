@@ -130,6 +130,7 @@ async def stream_ethereum_data():
                             
                             breakout_window = best_params.get('breakout_window', 48)
                             rolling_max = float(max(closes[-breakout_window-1:-1]))
+                            rolling_min = float(min(closes[-breakout_window-1:-1]))
                             
                             prob_high_vol = get_high_vol_probability(closes)
 
@@ -139,6 +140,7 @@ async def stream_ethereum_data():
                             print(f"   LSTM Volatility Forecast (24h): {volatility_forecast:.4%}")
                             print(f"   HMM High-Vol Prob: {prob_high_vol:.4f}")
                             print(f"   Rolling Max ({breakout_window}h): ${rolling_max:,.2f}")
+                            print(f"   Rolling Min ({breakout_window}h): ${rolling_min:,.2f}")
                             print("="*60 + "\n")
 
                             # Fire the Microservice Handshake to the FastAPI engine
@@ -149,6 +151,7 @@ async def stream_ethereum_data():
                                     "forecasted_vol": float(volatility_forecast),
                                     "prob_high_vol": float(prob_high_vol),
                                     "rolling_max": float(rolling_max),
+                                    "rolling_min": float(rolling_min),
                                     "closes": [float(c) for c in closes[-24:]]
                                 }
                                 import requests

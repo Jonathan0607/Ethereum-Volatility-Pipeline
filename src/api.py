@@ -127,7 +127,7 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    cursor.execute("SELECT execution_price FROM paper_trades WHERE status = 'OPEN' ORDER BY timestamp ASC LIMIT 1")
+    cursor.execute("SELECT execution_price, action FROM paper_trades WHERE status = 'OPEN' ORDER BY timestamp ASC LIMIT 1")
     open_trade = cursor.fetchone()
 
     actual_action = action
@@ -135,25 +135,35 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
     realized_pnl = 0.0
 
     if action == "BUY":
-        if open_trade is None:
-            status = 'OPEN'
-        else:
+        # Close any existing SHORT position first
+        if open_trade is not None and open_trade[1] == 'SELL_SHORT':
+            entry_price = open_trade[0]
+            realized_pnl = ((entry_price - price) / entry_price) * 100  # Short PnL: entry - exit
+            cursor.execute("UPDATE paper_trades SET status = 'CLOSED', realized_pnl_pct = ? WHERE status = 'OPEN'", (realized_pnl,))
+        elif open_trade is not None:
             actual_action = 'HOLDING'
+            status = 'OPEN'
+        if actual_action == 'BUY':
+            status = 'OPEN'
+    elif action == "SELL_SHORT":
+        # Close any existing LONG position first
+        if open_trade is not None and open_trade[1] == 'BUY':
+            entry_price = open_trade[0]
+            realized_pnl = ((price - entry_price) / entry_price) * 100  # Long PnL: exit - entry
+            cursor.execute("UPDATE paper_trades SET status = 'CLOSED', realized_pnl_pct = ? WHERE status = 'OPEN'", (realized_pnl,))
+        elif open_trade is not None:
+            actual_action = 'HOLDING'
+            status = 'OPEN'
+        if actual_action == 'SELL_SHORT':
             status = 'OPEN'
     elif action == "CASH":
         if open_trade is not None:
             entry_price = open_trade[0]
-            realized_pnl = ((price - entry_price) / entry_price) * 100
+            if open_trade[1] == 'SELL_SHORT':
+                realized_pnl = ((entry_price - price) / entry_price) * 100  # Short PnL
+            else:
+                realized_pnl = ((price - entry_price) / entry_price) * 100  # Long PnL
             cursor.execute("UPDATE paper_trades SET status = 'CLOSED', realized_pnl_pct = ? WHERE status = 'OPEN'", (realized_pnl,))
-            status = 'CLOSED'
-        else:
-            actual_action = 'FLAT'
-            status = 'CLOSED'
-    elif action == "PARTIAL_SELL":
-        if open_trade is not None:
-            entry_price = open_trade[0]
-            realized_pnl = ((price - entry_price) / entry_price) * 100
-            cursor.execute("UPDATE paper_trades SET position_size = position_size * 0.5 WHERE status = 'OPEN'")
             status = 'CLOSED'
         else:
             actual_action = 'FLAT'
@@ -170,7 +180,7 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
     conn.commit()
     conn.close()
 
-    size_pct = position_size * 100
+    size_pct = abs(position_size) * 100
     print(f"   [EXECUTED] {actual_action} | ${price:.2f} | Vol: {pred_vol:.4f} | HMM: {regime:.4f} | Size: {size_pct:.1f}%")
 
     # Set webhook URL
@@ -181,11 +191,11 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
 
     # Update Discord notification colors and titles
     if actual_action == "BUY":
-        title = "🚨 TRADE EXECUTED: BUY"
+        title = "🟢 LONG ENTRY: BUY"
         embed_color = 5763719  # Green
-    elif actual_action == "PARTIAL_SELL":
-        title = "⚖️ PARTIAL PROFIT TAKE: PARTIAL_SELL"
-        embed_color = 16753920  # Orange/Gold
+    elif actual_action == "SELL_SHORT":
+        title = "🔴 SHORT ENTRY: SELL_SHORT"
+        embed_color = 10038562  # Purple
     elif actual_action == "CASH":
         title = "🚨 FULL LIQUIDATION: CASH"
         embed_color = 15548997  # Red
@@ -201,7 +211,7 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
         {"name": "Position Size", "value": f"{size_pct:.1f}%", "inline": True},
         {"name": "Target Vol", "value": f"{TARGET_VOLATILITY*100:.1f}%", "inline": True},
     ]
-    if actual_action in ["CASH", "PARTIAL_SELL"] and open_trade is not None:
+    if actual_action in ["CASH", "BUY", "SELL_SHORT"] and open_trade is not None:
         fields.append({"name": "Realized PnL", "value": f"{realized_pnl:+.4f}%", "inline": True})
 
     fields.extend([
@@ -215,7 +225,7 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
             "title": title,
             "color": embed_color,
             "fields": fields,
-            "footer": {"text": "Chronos • Volatility-Scaled Sizing"}
+            "footer": {"text": "Chronos • Bi-Directional Vol-Scaled"}
         }]
     }
     try:
@@ -228,6 +238,7 @@ class LiveExecutionPayload(BaseModel):
     forecasted_vol: float
     prob_high_vol: float
     rolling_max: float
+    rolling_min: float
     closes: list[float]
 
 @app.post("/execution/live-stream")
@@ -277,36 +288,54 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         db_path = get_db_path()
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        cursor.execute("SELECT execution_price, position_size, timestamp FROM paper_trades WHERE status = 'OPEN' ORDER BY timestamp ASC LIMIT 1")
+        cursor.execute("SELECT execution_price, position_size, timestamp, action FROM paper_trades WHERE status = 'OPEN' ORDER BY timestamp ASC LIMIT 1")
         open_trade = cursor.fetchone()
         
-        current_position = "LONG" if open_trade is not None else "FLAT"
-        current_size = open_trade[1] if open_trade is not None else 0.0
+        if open_trade is not None:
+            current_position = "SHORT" if open_trade[3] == 'SELL_SHORT' else "LONG"
+            current_size = open_trade[1]
+        else:
+            current_position = "FLAT"
+            current_size = 0.0
         
         conn.close()
 
-        # Gate 3: Execution Logic
+        # Gate 3: Bi-Directional Execution Logic
         rolling_mean = sum(payload.closes[-24:]) / 24
 
-        if payload.current_price > payload.rolling_max and payload.prob_high_vol > hmm_threshold:
-            action = "BUY"
-        elif payload.prob_high_vol < 0.40 or payload.current_price < rolling_mean:
-            action = "CASH"
+        if payload.prob_high_vol > hmm_threshold:
+            if payload.current_price > payload.rolling_max and current_position != "LONG":
+                action = "BUY"  # Enter Long / Cover Short & Reverse
+            elif payload.current_price < payload.rolling_min and current_position != "SHORT":
+                action = "SELL_SHORT"  # Enter Short / Sell Long & Reverse
+            else:
+                action = "HOLDING" if current_position in ["LONG", "SHORT"] else "FLAT"
+        elif payload.prob_high_vol < 0.40:
+            action = "CASH"  # Volatility crushed, exit everything
         else:
-            action = "HOLDING" if current_position == "LONG" else "FLAT"
+            # Mean Reversion Exits
+            if current_position == "LONG" and payload.current_price < rolling_mean:
+                action = "CASH"
+            elif current_position == "SHORT" and payload.current_price > rolling_mean:
+                action = "CASH"
+            else:
+                action = "HOLDING" if current_position in ["LONG", "SHORT"] else "FLAT"
 
         daily_forecasted_vol = forecasted_vol * np.sqrt(24)
-        if action in ["BUY", "HOLDING"]:
+        if action in ["BUY", "SELL_SHORT", "HOLDING"]:
             position_size = min(TARGET_VOLATILITY / (daily_forecasted_vol + 1e-8), 1.0)
         else:
             position_size = 0.0
 
-        # Check Cooldown condition: if we sell/exit and close_price < previous_buy_price
+        # Check Cooldown condition: if we exit and have a realized loss
         if action == "CASH" and open_trade is not None:
-            previous_buy_price = open_trade[0]
-            if close_price < previous_buy_price:
+            entry_price = open_trade[0]
+            if current_position == "LONG" and close_price < entry_price:
                 current_state.cooldown_until = datetime.now() + timedelta(hours=cooldown_hours)
-                print(f"   [COOLDOWN TRIGGERED] Exited trade at a loss (${close_price:.2f} < ${previous_buy_price:.2f}). Cooldown active for {cooldown_hours} hours until {current_state.cooldown_until}")
+                print(f"   [COOLDOWN TRIGGERED] Exited LONG at a loss. Cooldown for {cooldown_hours}h.")
+            elif current_position == "SHORT" and close_price > entry_price:
+                current_state.cooldown_until = datetime.now() + timedelta(hours=cooldown_hours)
+                print(f"   [COOLDOWN TRIGGERED] Exited SHORT at a loss. Cooldown for {cooldown_hours}h.")
 
         # 3. Fire custom C++ Monte Carlo
         mc_results = monte_carlo.simulate_gbm(
@@ -314,7 +343,7 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
             num_sims=10000, steps=24
         )
         
-        # 4. Write to DB and push Discord notification (logging regime prob in regime column)
+        # 4. Write to DB and push Discord notification
         log_trade(action, close_price, float(forecasted_vol), float(payload.prob_high_vol),
                   mc_results['lower_bound'], mc_results['upper_bound'], position_size)
                   
