@@ -302,6 +302,7 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         gmm_z_buy       = best_params.get('gmm_z_buy', -1.5)
         gmm_z_sell      = best_params.get('gmm_z_sell', 0.5)
         cooldown_hours  = best_params.get('cooldown_hours', 3)
+        gmm_max_vol     = best_params.get('gmm_max_vol', 0.02)
 
         # Get current position and size from database
         db_path = get_db_path()
@@ -335,8 +336,8 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
                 action = "HOLDING" if current_position == "SHORT" else "CASH" if current_position == "LONG" else "FLAT"
                 
         elif payload.prob_high_vol < hmm_chop_max and not vol_shock:
-            # Route to GMM (Long Only)
-            if payload.gmm_z_score < gmm_z_buy or payload.gmm_cluster == 0: 
+            # Route to GMM (Long Only + Volatility Gate)
+            if (payload.gmm_z_score < gmm_z_buy or payload.gmm_cluster == 0) and (payload.vol_24h < gmm_max_vol): 
                 action = "BUY"
             elif payload.gmm_z_score > gmm_z_sell or payload.gmm_cluster == 2: 
                 action = "CASH" # Take profit on the long

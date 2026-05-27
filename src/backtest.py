@@ -142,6 +142,7 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     gmm_z_sell      = best_params.get('gmm_z_sell', 0.5)
     vol_shock_mult  = best_params.get('vol_shock_mult', 1.5)
     rebalance_threshold = best_params.get('rebalance_threshold', 0.15)
+    gmm_max_vol     = best_params.get('gmm_max_vol', 0.020)
 
     # Calculate HMM Probability on full df before splitting to prevent NaNs
     df = df.copy()
@@ -211,9 +212,11 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     trend_active = (test_df['prob_high_vol'] > hmm_trend_min) | vol_shock
     test_df.loc[trend_active & (test_df['close'] < test_df['rolling_min']), 'signal'] = -1
     
-    # AGENT 2: GMM Mean-Reversion (LONG ONLY)
+    # AGENT 2: GMM Mean-Reversion (LONG ONLY + Low Volatility Gate)
     chop_active = (test_df['prob_high_vol'] < hmm_chop_max) & ~vol_shock
-    test_df.loc[chop_active & (test_df['z_score'] < gmm_z_buy), 'signal'] = 1
+    
+    # The GMM can only enter if the current 24h volatility is below the threshold
+    test_df.loc[chop_active & (test_df['z_score'] < gmm_z_buy) & (test_df['vol_24h'] < gmm_max_vol), 'signal'] = 1
     
     # 3. Master Exits
     # Exit Longs when overbought, Exit Shorts when trend breaks upward
@@ -280,6 +283,19 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
 
     # Backward compat alias
     test_df['lstm_pred_vol'] = test_df['forecasted_vol']
+
+    # Calculate PNL Attribution
+    # We attribute the strategy return of each hour to the agent that was active at the START of the position
+    # Forward-fill the active_agent to track who "owns" the current trade
+    test_df['trade_owner'] = test_df['active_agent'].replace('CASH', np.nan).ffill()
+    
+    # Sum the returns based on the trade owner
+    gmm_returns = test_df.loc[test_df['trade_owner'] == 'GMM', 'strategy_returns'].sum()
+    breakout_returns = test_df.loc[test_df['trade_owner'] == 'Breakout', 'strategy_returns'].sum()
+    
+    print("\n=== AGENT PNL ATTRIBUTION ===")
+    print(f"GMM Sub-Agent Contribution:      {gmm_returns * 100:.2f}%")
+    print(f"Breakout Sub-Agent Contribution: {breakout_returns * 100:.2f}%\n")
 
     return test_df
 

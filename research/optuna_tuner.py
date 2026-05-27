@@ -180,9 +180,11 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     trend_active = (bt['prob_high_vol'] > params['hmm_trend_min']) | vol_shock
     bt.loc[trend_active & (bt['close'] < bt['rolling_min']), 'signal'] = -1
     
-    # AGENT 2: GMM Mean-Reversion (LONG ONLY)
+    # AGENT 2: GMM Mean-Reversion (LONG ONLY + Low Volatility Gate)
     chop_active = (bt['prob_high_vol'] < params['hmm_chop_max']) & ~vol_shock
-    bt.loc[chop_active & (bt['z_score'] < params['gmm_z_buy']), 'signal'] = 1
+    
+    # The GMM can only enter if the current 24h volatility is below the threshold
+    bt.loc[chop_active & (bt['z_score'] < params['gmm_z_buy']) & (bt['vol_24h'] < params.get('gmm_max_vol', 0.020)), 'signal'] = 1
     
     # 3. Master Exits
     # Exit Longs when overbought, Exit Shorts when trend breaks upward
@@ -272,10 +274,12 @@ def objective(trial, test_df):
     params = {
         'hmm_chop_max': trial.suggest_float('hmm_chop_max', 0.30, 0.45),
         'hmm_trend_min': trial.suggest_float('hmm_trend_min', 0.55, 0.70),
-        # Force strict extreme oversold entries (2 to 4 standard deviations)
-        'gmm_z_buy': trial.suggest_float('gmm_z_buy', -4.0, -2.0),
+        # Allow standard dip buying
+        'gmm_z_buy': trial.suggest_float('gmm_z_buy', -3.0, -1.5),
         # Take profit aggressively on the reversion to the mean
         'gmm_z_sell': trial.suggest_float('gmm_z_sell', -0.5, 1.0),
+        # New parameter: Maximum allowed volatility for GMM to fire
+        'gmm_max_vol': trial.suggest_float('gmm_max_vol', 0.005, 0.020),
         'breakout_window': trial.suggest_int('breakout_window', 12, 48),
         'vol_shock_mult': trial.suggest_float('vol_shock_mult', 1.3, 2.0),
         # Allow the rebalance threshold to scale up to 50% to force long-term holds
@@ -293,6 +297,7 @@ def write_best_params(study, current_params):
     current_params['hmm_trend_min']   = float(best['hmm_trend_min'])
     current_params['gmm_z_buy']       = float(best['gmm_z_buy'])
     current_params['gmm_z_sell']      = float(best['gmm_z_sell'])
+    current_params['gmm_max_vol']     = float(best['gmm_max_vol'])
     current_params['vol_shock_mult']      = float(best['vol_shock_mult'])
     current_params['rebalance_threshold'] = float(best['rebalance_threshold'])
 
