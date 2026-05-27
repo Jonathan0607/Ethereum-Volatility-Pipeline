@@ -319,6 +319,11 @@ def calculate_metrics(df, verbose=True):
         print(f"Strategy Return: {strat_ret:.2f}%")
         print(f"Sharpe Ratio:    {sharpe:.2f}")
         print(f"Max Drawdown:    {max_drawdown * 100:.2f}%")
+        if 'trade_owner' in df.columns:
+            gmm_contrib = df.loc[df['trade_owner'] == 'GMM', 'strategy_returns'].sum() * 100
+            breakout_contrib = df.loc[df['trade_owner'] == 'Breakout', 'strategy_returns'].sum() * 100
+            print(f"GMM Sub-Agent Contribution:      {gmm_contrib:.2f}%")
+            print(f"Breakout Sub-Agent Contribution: {breakout_contrib:.2f}%")
         try:
             target_vol_val = df['position_size'].iloc[-1] # Approximation just for printing if available
             print(f"Sizing Mode:     Volatility-Scaled")
