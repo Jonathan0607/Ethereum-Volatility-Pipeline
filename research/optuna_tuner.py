@@ -242,14 +242,27 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     mean_ret = bt['strategy_returns'].mean() * 24 * 365
     std_ret  = bt['strategy_returns'].std() * np.sqrt(24 * 365)
     sharpe   = mean_ret / (std_ret + 1e-9)
-
-    # If the model is hyperactive, destroy its Sharpe score so Optuna discards the parameters
-    # We normalize the trade count to a 150-day equivalent to align with the '150 trades' target
-    dataset_days = (bt.index[-1] - bt.index[0]).days if len(bt) > 0 else 178
-    normalized_trades = int(total_trades * (150.0 / dataset_days)) if dataset_days > 0 else total_trades
+    
+    # Calculate Maximum Drawdown
+    cumulative_returns = (1 + bt['strategy_returns']).cumprod()
+    peak = cumulative_returns.cummax()
+    drawdown = (cumulative_returns - peak) / peak
+    max_dd = drawdown.min()
+    
+    # Normalize trade count (adjusting for ~519 days of training data)
+    dataset_days = len(bt) / 24
+    normalized_trades = total_trades * (150 / dataset_days)
+    
+    # PENALTY 1: Hyper-activity
     if normalized_trades > 220:
         return -5.0
-
+        
+    # PENALTY 2: Drawdown Violation (Strict Capital Preservation)
+    if max_dd < -0.12:
+        # Subtract the magnitude of the violation from the Sharpe score
+        penalty = abs(max_dd + 0.12) * 10 
+        return sharpe - penalty
+        
     return float(sharpe)
 
 def objective(trial, test_df):
@@ -259,8 +272,10 @@ def objective(trial, test_df):
     params = {
         'hmm_chop_max': trial.suggest_float('hmm_chop_max', 0.30, 0.45),
         'hmm_trend_min': trial.suggest_float('hmm_trend_min', 0.55, 0.70),
-        'gmm_z_buy': trial.suggest_float('gmm_z_buy', -2.5, -1.0),
-        'gmm_z_sell': trial.suggest_float('gmm_z_sell', 0.0, 1.5),
+        # Force strict extreme oversold entries (2 to 4 standard deviations)
+        'gmm_z_buy': trial.suggest_float('gmm_z_buy', -4.0, -2.0),
+        # Take profit aggressively on the reversion to the mean
+        'gmm_z_sell': trial.suggest_float('gmm_z_sell', -0.5, 1.0),
         'breakout_window': trial.suggest_int('breakout_window', 12, 48),
         'vol_shock_mult': trial.suggest_float('vol_shock_mult', 1.3, 2.0),
         # Allow the rebalance threshold to scale up to 50% to force long-term holds
