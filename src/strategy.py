@@ -8,7 +8,6 @@ import numpy as np
 import pickle
 import os
 import ast
-from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 from data import calculate_features, split_data, FEATURE_COLS
 
@@ -91,60 +90,6 @@ class ProgressiveModel(nn.Module):
 LSTMModel = ProgressiveModel
 
 
-# =====================================================================
-# 2. REGIME DETECTION
-# =====================================================================
-
-def fit_and_save_regimes(train_df: pd.DataFrame, vol_col: str = 'volatility', n_components: int = 2) -> pd.DataFrame:
-    """Fits GMM on TRAINING DATA ONLY and saves it."""
-    train_df = train_df.copy()
-    if vol_col not in train_df.columns:
-        raise ValueError(f"Column '{vol_col}' not found.")
-
-    X = train_df[vol_col].values.reshape(-1, 1)
-
-    low_seed  = np.percentile(X, 10)
-    high_seed = np.percentile(X, 90)
-    means_init = np.array([[low_seed], [high_seed]])
-    
-    gmm = GaussianMixture(n_components=n_components, means_init=means_init, random_state=42)
-    gmm.fit(X)
-    gmm = _enforce_label_order_gmm(gmm)
-
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    with open(os.path.join(current_dir, '..', 'gmm_model.pkl'), 'wb') as f:
-        pickle.dump(gmm, f)
-        
-    print("[Regimes] Fitted GMM saved successfully.")
-
-    train_df['regime_gmm'] = gmm.predict(X)
-    train_df['regime'] = train_df['regime_gmm'] 
-
-    return train_df
-
-def predict_regimes(df: pd.DataFrame, vol_col: str = 'volatility') -> pd.DataFrame:
-    """Loads saved models and predicts regimes on new data."""
-    df = df.copy()
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    gmm_path = os.path.join(current_dir, '..', 'gmm_model.pkl')
-
-    with open(gmm_path, 'rb') as f: gmm = pickle.load(f)
-
-    X = df[vol_col].values.reshape(-1, 1)
-    df['regime_gmm'] = gmm.predict(X)
-    df['regime'] = df['regime_gmm']
-
-    return df
-
-def _enforce_label_order_gmm(gmm: GaussianMixture) -> GaussianMixture:
-    means = gmm.means_.flatten()
-    if means[0] <= means[1]: return gmm
-    gmm.means_ = gmm.means_[[1, 0]]
-    gmm.covariances_ = gmm.covariances_[[1, 0]]
-    gmm.weights_ = gmm.weights_[[1, 0]]
-    gmm.precisions_ = gmm.precisions_[[1, 0]]
-    gmm.precisions_cholesky_ = gmm.precisions_cholesky_[[1, 0]]
-    return gmm
 
 
 # =====================================================================
@@ -193,8 +138,6 @@ def train_model(hyperparams=None):
 
     if len(train_df) < SEQ_LENGTH:
         raise ValueError("Training data is too small for the sequence length!")
-
-    train_df = fit_and_save_regimes(train_df)
 
     # ── Multi-feature extraction ──
     feature_data = train_df[FEATURE_COLS].values.astype(np.float32)
@@ -270,4 +213,3 @@ def train_model(hyperparams=None):
     print("  lstm_model.pth       — ProgressiveModel weights (RNN→GRU→LSTM)")
     print("  scaler.pkl           — Feature StandardScaler (5 features)")
     print("  target_scaler.pkl    — Target StandardScaler (fwd_vol_24h)")
-    print("  gmm_model.pkl        — Fitted GMM regime detector")

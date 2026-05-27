@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from data import calculate_features_test, FEATURE_COLS
-from strategy import predict_regimes, ProgressiveModel
+from strategy import ProgressiveModel
 import monte_carlo
 
 app = FastAPI(title="Ethereum Quant Execution Engine")
@@ -138,6 +138,10 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
         else:
             actual_action = 'FLAT'
             status = 'CLOSED'
+    elif action == "HOLDING":
+        status = 'OPEN'
+    elif action == "FLAT":
+        status = 'CLOSED'
 
     cursor.execute('''
     INSERT INTO paper_trades (asset, action, execution_price, predicted_volatility, regime, status, position_size)
@@ -147,7 +151,7 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
     conn.close()
 
     size_pct = position_size * 100
-    print(f"   [EXECUTED] {actual_action} | ${price:.2f} | Vol: {pred_vol:.4f} | Regime: {regime} | Size: {size_pct:.1f}%")
+    print(f"   [EXECUTED] {actual_action} | ${price:.2f} | Vol: {pred_vol:.4f} | Hurst: {regime:.4f} | Size: {size_pct:.1f}%")
 
     WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
     if WEBHOOK_URL is None:
@@ -162,7 +166,7 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
             "fields": [
                 {"name": "Asset", "value": "ETH/USD", "inline": True},
                 {"name": "Execution Price", "value": f"${price:.2f}", "inline": True},
-                {"name": "GMM Regime", "value": "SAFE (0)" if regime == 0 else "DANGER (1)", "inline": True},
+                {"name": "Hurst Exponent", "value": f"{regime:.4f}", "inline": True},
                 {"name": "AI Volatility", "value": f"{pred_vol:.5f}", "inline": True},
                 {"name": "Position Size", "value": f"{size_pct:.1f}%", "inline": True},
                 {"name": "Target Vol", "value": f"{TARGET_VOLATILITY*100:.1f}%", "inline": True},
@@ -180,6 +184,8 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
 class LiveExecutionPayload(BaseModel):
     current_price: float
     forecasted_vol: float
+    z_score: float
+    hurst: float
 
 @app.post("/execution/live-stream")
 def execute_live_stream_trade(payload: LiveExecutionPayload):
@@ -189,7 +195,7 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         close_price = payload.current_price
         forecasted_vol = max(payload.forecasted_vol, 1e-8)
         
-        # 1. Fetch historical data for volume/trend indicators
+        # 1. Fetch historical data for Monte Carlo predicted GARCH volatility
         raw_df = yf.download("ETH-USD", period="5d", interval="1h", progress=False, auto_adjust=True)
         if isinstance(raw_df.columns, pd.MultiIndex):
             raw_df.columns = [col[0] for col in raw_df.columns]
@@ -200,38 +206,55 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         garch_fit = garch.fit(update_freq=0, disp='off')
         live_garch_vol = float(garch_fit.conditional_volatility.iloc[-1] / 100)
 
-        df = raw_df.copy()
-        df = calculate_features_test(df)
-        df = predict_regimes(df)
-        
-        current_row = df.iloc[-1]
-        fast_trend = df['close'].ewm(span=20, adjust=False).mean().iloc[-1]
-        slow_trend = df['close'].ewm(span=50, adjust=False).mean().iloc[-1]
-        vol_ma = df['volume'].rolling(window=12).mean().iloc[-1]
-        regime_gmm = current_row['regime_gmm']
-        
-        # 2. Logic using LIVE streamed price and AI volatility
-        base_signal = (regime_gmm == 0) and (close_price > fast_trend) and (current_row['volume'] > vol_ma)
-        vol_threshold = df['volatility'].rolling(24).mean().iloc[-1] * 1.8
-        lstm_risk_on = forecasted_vol > vol_threshold
-        parabolic_move = close_price > (slow_trend * 1.02)
-        
-        action = "CASH"
-        position_size = 0.0
-        daily_forecasted_vol = forecasted_vol * np.sqrt(24)
-        
-        if base_signal and (not lstm_risk_on or parabolic_move):
-            action = "BUY"
-            position_size = min(TARGET_VOLATILITY / (daily_forecasted_vol + 1e-8), 1.0)
+        # Load best_params config
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        params_path = os.path.join(current_dir, '..', 'best_params.txt')
+        if os.path.exists(params_path):
+            with open(params_path, 'r') as f:
+                best_params = ast.literal_eval(f.read())
+        else:
+            best_params = {}
             
+        z_buy = best_params.get('z_buy', -2.0)
+        z_sell = best_params.get('z_sell', 0.5)
+        hurst_threshold = best_params.get('hurst_threshold', 0.45)
+
+        # Get current position from database
+        db_path = get_db_path()
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT execution_price FROM paper_trades WHERE status = 'OPEN' ORDER BY timestamp ASC LIMIT 1")
+        open_trade = cursor.fetchone()
+        conn.close()
+        current_position = "LONG" if open_trade is not None else "FLAT"
+
+        # Gate 1 & 2: Risk Filters
+        vol_threshold = TARGET_VOLATILITY * 1.8 
+        is_safe_vol = payload.forecasted_vol < vol_threshold
+        is_mean_reverting = payload.hurst < hurst_threshold
+
+        # Gate 3: Execution Logic
+        if is_mean_reverting and is_safe_vol and payload.z_score <= z_buy:
+            action = "BUY"
+        elif payload.z_score >= z_sell or not is_safe_vol:
+            action = "CASH"
+        else:
+            action = "HOLDING" if current_position == "LONG" else "FLAT"
+
+        daily_forecasted_vol = forecasted_vol * np.sqrt(24)
+        if action in ["BUY", "HOLDING"]:
+            position_size = min(TARGET_VOLATILITY / (daily_forecasted_vol + 1e-8), 1.0)
+        else:
+            position_size = 0.0
+
         # 3. Fire custom C++ Monte Carlo
         mc_results = monte_carlo.simulate_gbm(
             current_price=close_price, predicted_vol=live_garch_vol,
             num_sims=10000, steps=24
         )
         
-        # 4. Write to DB and push Discord notification
-        log_trade(action, close_price, float(forecasted_vol), int(regime_gmm),
+        # 4. Write to DB and push Discord notification (logging hurst in regime column)
+        log_trade(action, close_price, float(forecasted_vol), float(payload.hurst),
                   mc_results['lower_bound'], mc_results['upper_bound'], position_size)
                   
         return {"status": "Success", "action": action, "position_size": position_size}

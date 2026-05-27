@@ -16,7 +16,7 @@ from strategy import ProgressiveModel
 
 # --- 1. The Cold Start (REST API Seed) ---
 print("=== FETCHING HOURLY MACRO-CONTEXT ===")
-rest_url = "https://api.binance.us/api/v3/klines?symbol=ETHUSDT&interval=1h&limit=50"
+rest_url = "https://api.binance.us/api/v3/klines?symbol=ETHUSDT&interval=1h&limit=100"
 req = urllib.request.Request(rest_url, headers={'User-Agent': 'Mozilla/5.0'})
 try:
     with urllib.request.urlopen(req) as response:
@@ -59,6 +59,12 @@ with open(target_scaler_path, 'rb') as f:
     target_scaler = pickle.load(f)
 
 
+def get_hurst_exponent(ts, max_lag=20):
+    lags = range(2, max_lag)
+    tau = [np.sqrt(np.std(np.subtract(ts[lag:], ts[:-lag]))) for lag in lags]
+    poly = np.polyfit(np.log(lags), np.log(tau), 1)
+    return poly[0] * 2.0
+
 # --- 3. The Live WebSocket Stream ---
 async def stream_ethereum_data():
     socket_url = "wss://stream.binance.us:9443/ws/ethusdt@kline_1m"
@@ -89,10 +95,10 @@ async def stream_ethereum_data():
                     if timestamp_dt.minute == 0:
                         hourly_price_buffer.append(current_price)
                         
-                        if len(hourly_price_buffer) > 60:
+                        if len(hourly_price_buffer) > 100:
                             hourly_price_buffer.pop(0)
                             
-                        if len(hourly_price_buffer) >= 51:
+                        if len(hourly_price_buffer) >= 90:
                             closes = np.array(hourly_price_buffer)
                             
                             log_return = np.log(closes[-1] / closes[-2])
@@ -117,10 +123,18 @@ async def stream_ethereum_data():
                                 
                             volatility_forecast = target_scaler.inverse_transform(output_scaled.cpu().numpy())[0][0]
                             
+                            z_window = best_params.get('z_window', 20)
+                            window_closes = closes[-z_window:]
+                            z_score = (current_price - np.mean(window_closes)) / (np.std(window_closes, ddof=1) + 1e-8)
+                            
+                            hurst_value = get_hurst_exponent(closes[-48:])
+
                             print("\n" + "="*60)
                             print(f"🚨 HOURLY REGIME UPDATE 🚨")
                             print(f"   Real-Time Hourly Close: ${current_price:,.2f}")
                             print(f"   LSTM Volatility Forecast (24h): {volatility_forecast:.4%}")
+                            print(f"   Hurst Exponent (48h): {hurst_value:.4f}")
+                            print(f"   Z-Score ({z_window}h): {z_score:.4f}")
                             print("="*60 + "\n")
 
                             # Fire the Microservice Handshake to the FastAPI engine
@@ -128,7 +142,9 @@ async def stream_ethereum_data():
                                 api_url = "http://api:8000/execution/live-stream"
                                 payload = {
                                     "current_price": float(current_price),
-                                    "forecasted_vol": float(volatility_forecast)
+                                    "forecasted_vol": float(volatility_forecast),
+                                    "z_score": float(z_score),
+                                    "hurst": float(hurst_value)
                                 }
                                 import requests
                                 response = requests.post(api_url, json=payload, timeout=5)

@@ -11,9 +11,15 @@ import pickle
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from data import calculate_features, calculate_features_test, split_data, FEATURE_COLS
-from strategy import predict_regimes, ProgressiveModel
+from strategy import ProgressiveModel
 
 SEQ_LENGTH = 60
+
+def get_hurst_exponent(ts, max_lag=20):
+    lags = range(2, max_lag)
+    tau = [np.sqrt(np.std(np.subtract(ts[lag:], ts[:-lag]))) for lag in lags]
+    poly = np.polyfit(np.log(lags), np.log(tau), 1)
+    return poly[0] * 2.0
 TARGET_VOLATILITY = 0.06  # Must match api.py
 
 def load_data():
@@ -109,6 +115,11 @@ def get_lstm_predictions(df):
 
 def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     print("Running Backtest with Volatility-Scaled Sizing...")
+    
+    # Calculate Hurst Exponent on full df before splitting to prevent lookback cold-start NaNs
+    df = df.copy()
+    df['hurst'] = df['close'].rolling(window=48).apply(lambda x: get_hurst_exponent(x), raw=True)
+    
     train_raw, test_raw = split_data(df, verbose=False)
 
     if test_raw.empty:
@@ -118,24 +129,40 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     test_df = calculate_features_test(test_raw)
 
     print(f"--- BACKTEST STARTING ON {test_df.index[0]} ---")
-    test_df = predict_regimes(test_df)
     test_df['forecasted_vol'] = get_lstm_predictions(test_df)
     test_df['market_returns'] = test_df['close'].pct_change()
-    test_df['fast_trend'] = test_df['close'].ewm(span=20, adjust=False).mean()
-    test_df['slow_trend'] = test_df['close'].ewm(span=50, adjust=False).mean()
-    test_df['vol_ma'] = test_df['volume'].rolling(window=12).mean()
 
-    base_signal = (
-        (test_df['regime_gmm'] == 0) &
-        (test_df['close'] > test_df['fast_trend']) &
-        (test_df['volume'] > test_df['vol_ma'])
-    )
+    # Load parameters
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    params_path = os.path.join(current_dir, '..', 'best_params.txt')
+    if os.path.exists(params_path):
+        with open(params_path, 'r') as f:
+            best_params = ast.literal_eval(f.read())
+    else:
+        best_params = {}
+        
+    z_window        = best_params.get('z_window', 20)
+    z_buy           = best_params.get('z_buy', -2.0)
+    z_sell          = best_params.get('z_sell', 0.5)
+    hurst_threshold = best_params.get('hurst_threshold', 0.45)
+
+    # Calculate rolling Z-Score
+    roll_mean = test_df['close'].rolling(window=z_window).mean()
+    roll_std  = test_df['close'].rolling(window=z_window).std()
+    test_df['z_score'] = (test_df['close'] - roll_mean) / (roll_std + 1e-8)
+
+    # Risk Filters
     vol_threshold = test_df['volatility'].rolling(24).mean() * 1.8
-    lstm_risk_on = test_df['forecasted_vol'] > vol_threshold
-    parabolic_move = test_df['close'] > (test_df['slow_trend'] * 1.02)
+    is_safe_vol = test_df['forecasted_vol'] < vol_threshold
+    is_mean_reverting = test_df['hurst'] < hurst_threshold
 
-    long_condition = base_signal & (~lstm_risk_on | parabolic_move)
-    test_df['signal'] = np.where(long_condition, 1, 0)
+    # Execution State Machine
+    buy_cond  = is_mean_reverting & is_safe_vol & (test_df['z_score'] <= z_buy)
+    sell_cond = (test_df['z_score'] >= z_sell) | ~is_safe_vol
+
+    # Forward fill signals: 1 when holding, 0 when flat
+    test_df['signal'] = np.where(buy_cond, 1, np.where(sell_cond, 0, np.nan))
+    test_df['signal'] = test_df['signal'].ffill().fillna(0)
 
     # Convert forecasted hourly volatility to daily volatility (since TARGET is likely daily risk)
     daily_forecasted_vol = test_df['forecasted_vol'] * np.sqrt(24)
@@ -231,15 +258,30 @@ def plot_results(df):
 
 def plot_dashboard(df):
     print("   [Visual] Rendering Final Portfolio Dashboard...")
+    
+    # Load parameters to get hurst_threshold
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    params_path = os.path.join(current_dir, '..', 'best_params.txt')
+    hurst_threshold = 0.45
+    if os.path.exists(params_path):
+        try:
+            with open(params_path, 'r') as f:
+                best_params = ast.literal_eval(f.read())
+                hurst_threshold = best_params.get('hurst_threshold', 0.45)
+        except Exception:
+            pass
+
     subset = df.tail(2000)
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
 
     ax1.plot(subset.index, subset['close'], color='gray', alpha=0.3, label='Price')
-    safe = subset[subset['regime'] == 0]
-    risk = subset[subset['regime'] == 1]
+    
+    # Color coding based on Hurst regime filter
+    mean_revert = subset[subset['hurst'] < hurst_threshold]
+    trending = subset[subset['hurst'] >= hurst_threshold]
 
-    ax1.scatter(safe.index, safe['close'], color='green', s=10, alpha=0.6, label='Safe Regime')
-    ax1.scatter(risk.index, risk['close'], color='red', s=10, alpha=0.6, label='Risk Regime')
+    ax1.scatter(mean_revert.index, mean_revert['close'], color='green', s=10, alpha=0.6, label=f'Mean-Reverting (Hurst < {hurst_threshold})')
+    ax1.scatter(trending.index, trending['close'], color='red', s=10, alpha=0.6, label=f'Trending (Hurst >= {hurst_threshold})')
 
     ax1.set_title('Market Regimes & Vol-Scaled AI Strategy', fontsize=14, fontweight='bold')
     ax1.set_ylabel('Price (USD)')
@@ -273,8 +315,8 @@ def plot_dashboard(df):
 
 def run_visualizer():
     df = load_data()
+    df['hurst'] = df['close'].rolling(window=48).apply(lambda x: get_hurst_exponent(x.values), raw=True)
     df = calculate_features(df)
-    df = predict_regimes(df)
     df['forecasted_vol'] = get_lstm_predictions(df)
     df['lstm_pred_vol'] = df['forecasted_vol']
     plot_dashboard(df)

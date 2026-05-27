@@ -22,7 +22,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from sklearn.preprocessing import StandardScaler
-from sklearn.mixture import GaussianMixture
 from arch import arch_model
 
 import optuna
@@ -72,6 +71,12 @@ def load_eth_data() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Feature engineering — mirrors src/data.py exactly
 # ---------------------------------------------------------------------------
+def get_hurst_exponent(ts, max_lag=20):
+    lags = range(2, max_lag)
+    tau = [np.sqrt(np.std(np.subtract(ts[lag:], ts[:-lag]))) for lag in lags]
+    poly = np.polyfit(np.log(lags), np.log(tau), 1)
+    return poly[0] * 2.0
+
 def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     """Compute GARCH volatility + stationary features + forward target."""
     df = df.copy()
@@ -96,6 +101,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Forward target
     df['fwd_vol_24h'] = df['log_return'].rolling(window=24).std().shift(-24)
+    df['hurst'] = df['close'].rolling(window=48).apply(lambda x: get_hurst_exponent(x), raw=True)
     df.dropna(inplace=True)
     return df
 
@@ -151,9 +157,10 @@ def simulate_sharpe(df: pd.DataFrame, params: dict) -> float:
     lr           = params['learning_rate']
     batch_size   = params['batch_size']
     epochs       = params['epochs']
-    gmm_n        = params['gmm_components']
-    fast_span    = params['fast_ema_span']
-    slow_span    = params['slow_ema_span']
+    z_window        = params['z_window']
+    z_buy           = params['z_buy']
+    z_sell          = params['z_sell']
+    hurst_threshold = params['hurst_threshold']
 
     # ── Split ──
     split_idx = int(len(df) * 0.75)
@@ -163,20 +170,7 @@ def simulate_sharpe(df: pd.DataFrame, params: dict) -> float:
     if len(train_df) < n_lags + 100 or len(test_df) < n_lags + 100:
         return -999.0
 
-    # ── GMM regime detection (train only) ──
-    X_vol = train_df['volatility'].values.reshape(-1, 1)
-    low_seed  = np.percentile(X_vol, 10)
-    high_seed = np.percentile(X_vol, 90)
-    means_init = np.array([[low_seed]] + [[high_seed]] +
-                          [[np.percentile(X_vol, 50)]] * (gmm_n - 2)) if gmm_n > 2 \
-                 else np.array([[low_seed], [high_seed]])
-    gmm = GaussianMixture(n_components=gmm_n, means_init=means_init[:gmm_n],
-                          random_state=42)
-    gmm.fit(X_vol)
 
-    # Predict regimes
-    train_df['regime_gmm'] = gmm.predict(X_vol)
-    test_df['regime_gmm']  = gmm.predict(test_df['volatility'].values.reshape(-1, 1))
 
     # ── Scale features ──
     feat_scaler = StandardScaler()
@@ -246,26 +240,23 @@ def simulate_sharpe(df: pd.DataFrame, params: dict) -> float:
     bt['forecasted_vol'] = preds_arr
     bt['market_returns']  = bt['close'].pct_change()
 
-    bt['fast_trend'] = bt['close'].ewm(span=fast_span, adjust=False).mean()
-    bt['slow_trend'] = bt['close'].ewm(span=slow_span, adjust=False).mean()
-    bt['vol_ma']     = bt['volume'].rolling(window=12).mean()
+    # Calculate rolling Z-Score
+    roll_mean = bt['close'].rolling(window=z_window).mean()
+    roll_std  = bt['close'].rolling(window=z_window).std()
+    bt['z_score'] = (bt['close'] - roll_mean) / (roll_std + 1e-8)
 
-    # Find the lowest regime label as "safe"
-    regime_means = {}
-    for r in bt['regime_gmm'].unique():
-        regime_means[r] = bt.loc[bt['regime_gmm'] == r, 'volatility'].mean()
-    safe_regime = min(regime_means, key=regime_means.get) if regime_means else 0
-
-    base_signal = (
-        (bt['regime_gmm'] == safe_regime) &
-        (bt['close'] > bt['fast_trend']) &
-        (bt['volume'] > bt['vol_ma'])
-    )
+    # Risk Filters
     vol_threshold = bt['volatility'].rolling(24).mean() * 1.8
-    lstm_risk_on  = bt['forecasted_vol'] > vol_threshold
-    parabolic     = bt['close'] > (bt['slow_trend'] * 1.02)
+    is_safe_vol = bt['forecasted_vol'] < vol_threshold
+    is_mean_reverting = bt['hurst'] < hurst_threshold
 
-    bt['signal'] = np.where(base_signal & (~lstm_risk_on | parabolic), 1, 0)
+    # Execution State Machine
+    buy_cond  = is_mean_reverting & is_safe_vol & (bt['z_score'] <= z_buy)
+    sell_cond = (bt['z_score'] >= z_sell) | ~is_safe_vol
+
+    # Forward fill signals: 1 when holding, 0 when flat
+    bt['signal'] = np.where(buy_cond, 1, np.where(sell_cond, 0, np.nan))
+    bt['signal'] = bt['signal'].ffill().fillna(0)
 
     daily_vol = bt['forecasted_vol'] * np.sqrt(24)
     bt['position_size'] = (0.06 / (daily_vol + 1e-8)).clip(upper=1.0)
@@ -297,9 +288,10 @@ def objective(trial, df):
         'learning_rate':    trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True),
         'batch_size':       trial.suggest_categorical('batch_size', [32, 64]),
         'epochs':           trial.suggest_int('epochs', 30, 100),
-        'gmm_components':   trial.suggest_int('gmm_components', 2, 4),
-        'fast_ema_span':    trial.suggest_int('fast_ema_span', 10, 30),
-        'slow_ema_span':    trial.suggest_int('slow_ema_span', 40, 100),
+        'z_window':         trial.suggest_int('z_window', 10, 50),
+        'z_buy':            trial.suggest_float('z_buy', -3.5, -1.5),
+        'z_sell':           trial.suggest_float('z_sell', 0.0, 1.5),
+        'hurst_threshold':  trial.suggest_float('hurst_threshold', 0.40, 0.55),
     }
 
     sharpe = simulate_sharpe(df, params)
@@ -332,9 +324,10 @@ def write_best_params(study):
         'n_lags':           best['n_lags'],
         'batch_size':       best['batch_size'],
         'epochs':           best['epochs'],
-        'gmm_components':   best['gmm_components'],
-        'fast_ema_span':    best['fast_ema_span'],
-        'slow_ema_span':    best['slow_ema_span'],
+        'z_window':         best['z_window'],
+        'z_buy':            best['z_buy'],
+        'z_sell':           best['z_sell'],
+        'hurst_threshold':  best['hurst_threshold'],
     }
 
     with open(PARAMS_PATH, 'w') as f:
