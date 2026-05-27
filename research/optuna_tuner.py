@@ -43,6 +43,7 @@ PARAMS_PATH = os.path.join(PROJECT_ROOT, 'best_params.txt')
 STUDY_DB    = f"sqlite:///{os.path.join(PROJECT_ROOT, 'research', 'optuna_study.db')}"
 N_TRIALS    = 150
 SEQ_LENGTH  = 60
+FEE_PCT     = 0.0010  # 10 bps (0.10%) per trade
 
 def load_eth_data() -> pd.DataFrame:
     """Load ETH-USD hourly data from static CSV."""
@@ -161,6 +162,12 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     bt['rolling_max'] = bt['close'].rolling(window=params['breakout_window']).max().shift(1)
     bt['rolling_min'] = bt['close'].rolling(window=params['breakout_window']).min().shift(1)
     
+    # Realized Volatility Overlay (Circuit Breaker)
+    bt['log_ret'] = np.log(bt['close'] / bt['close'].shift(1))
+    bt['vol_24h'] = bt['log_ret'].rolling(24).std()
+    bt['vol_168h'] = bt['log_ret'].rolling(168).std()
+    vol_shock = (bt['vol_24h'] > (bt['vol_168h'] * params['vol_shock_mult'])).fillna(False)
+
     # Fast Z-Score for the vectorized backtester
     roll_mean = bt['close'].rolling(window=20).mean()
     roll_std = bt['close'].rolling(window=20).std()
@@ -169,28 +176,55 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     # 2. Hierarchical Routing
     bt['signal'] = np.nan
     
-    # AGENT 1: Momentum Breakout (Activated when HMM > trend_min)
-    trend_active = bt['prob_high_vol'] > params['hmm_trend_min']
+    # AGENT 1: Momentum Breakout (Activated when HMM > trend_min OR vol_shock)
+    trend_active = (bt['prob_high_vol'] > params['hmm_trend_min']) | vol_shock
     bt.loc[trend_active & (bt['close'] > bt['rolling_max']), 'signal'] = 1
     bt.loc[trend_active & (bt['close'] < bt['rolling_min']), 'signal'] = -1
     
-    # AGENT 2: GMM Mean-Reversion (Activated when HMM < chop_max)
-    chop_active = bt['prob_high_vol'] < params['hmm_chop_max']
+    # AGENT 2: GMM Mean-Reversion (Activated when HMM < chop_max AND NOT vol_shock)
+    chop_active = (bt['prob_high_vol'] < params['hmm_chop_max']) & ~vol_shock
     bt.loc[chop_active & (bt['z_score'] < params['gmm_z_buy']), 'signal'] = 1
     bt.loc[chop_active & (bt['z_score'] > params['gmm_z_sell']), 'signal'] = 0
     
     # 3. Master Exits
-    bt.loc[(bt['prob_high_vol'] >= params['hmm_chop_max']) & (bt['prob_high_vol'] <= params['hmm_trend_min']), 'signal'] = 0
+    bt.loc[(bt['prob_high_vol'] >= params['hmm_chop_max']) & (bt['prob_high_vol'] <= params['hmm_trend_min']) & ~vol_shock, 'signal'] = 0
     
     bt['signal'] = bt['signal'].ffill().fillna(0)
 
     # Volatility-Scaled Sizing (abs signal for sizing, sign for direction)
     daily_forecasted_vol = bt['forecasted_vol'] * np.sqrt(24)
     base_size = (0.06 / (daily_forecasted_vol + 1e-8)).clip(upper=1.0)
-    bt['position_size'] = base_size * bt['signal']  # Signed: +1 long, -1 short
+    bt['target_size'] = base_size * bt['signal']
 
-    # Strategy returns: signal * market_returns handles short P&L correctly
-    bt['strategy_returns'] = bt['market_returns'] * bt['signal'].shift(1)
+    # 4. Friction Filter (Rebalance Threshold Loop)
+    raw_targets = bt['target_size'].values
+    active_positions = np.zeros(len(raw_targets))
+    current_pos = 0.0
+    rebalance_thresh = params['rebalance_threshold']
+    
+    for i in range(len(raw_targets)):
+        target = raw_targets[i]
+        if np.isnan(target):
+            active_positions[i] = current_pos
+            continue
+        if target == 0.0 or abs(target - current_pos) > rebalance_thresh:
+            current_pos = target
+        active_positions[i] = current_pos
+        
+    bt['position_size'] = active_positions
+
+    # 5. Shift the position size (because we enter the position at the CLOSE of the signal candle)
+    bt['active_position'] = bt['position_size'].shift(1).fillna(0)
+
+    # 6. Calculate Gross Return based on the scaled position
+    bt['gross_strategy_returns'] = bt['market_returns'] * bt['active_position']
+
+    # 7. Calculate Transaction Friction (Fees)
+    bt['position_change'] = bt['active_position'].diff().abs().fillna(0)
+    bt['transaction_costs'] = bt['position_change'] * FEE_PCT
+
+    # 8. Calculate Net Strategy Return
+    bt['strategy_returns'] = bt['gross_strategy_returns'] - bt['transaction_costs']
     bt.dropna(subset=['strategy_returns'], inplace=True)
 
     if len(bt) < 100 or bt['strategy_returns'].std() < 1e-10:
@@ -209,6 +243,8 @@ def objective(trial, test_df):
         'gmm_z_buy': trial.suggest_float('gmm_z_buy', -2.5, -1.0),
         'gmm_z_sell': trial.suggest_float('gmm_z_sell', 0.0, 1.5),
         'breakout_window': trial.suggest_int('breakout_window', 12, 48),
+        'vol_shock_mult': trial.suggest_float('vol_shock_mult', 1.3, 2.0),
+        'rebalance_threshold': trial.suggest_float('rebalance_threshold', 0.10, 0.25),
     }
 
     sharpe = simulate_sharpe(test_df, params)
@@ -221,6 +257,8 @@ def write_best_params(study, current_params):
     current_params['hmm_trend_min']   = float(best['hmm_trend_min'])
     current_params['gmm_z_buy']       = float(best['gmm_z_buy'])
     current_params['gmm_z_sell']      = float(best['gmm_z_sell'])
+    current_params['vol_shock_mult']      = float(best['vol_shock_mult'])
+    current_params['rebalance_threshold'] = float(best['rebalance_threshold'])
 
     with open(PARAMS_PATH, 'w') as f:
         json.dump(current_params, f, indent=2)

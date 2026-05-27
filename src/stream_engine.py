@@ -111,6 +111,9 @@ async def stream_ethereum_data():
                             log_returns = np.log(closes[1:] / closes[:-1])
                             rolling_vol_24h = np.std(log_returns[-24:], ddof=1)
                             
+                            vol_24h = float(np.std(log_returns[-24:], ddof=1))
+                            vol_168h = float(np.std(log_returns[-168:], ddof=1))
+                            
                             ma_20 = np.mean(closes[-20:])
                             ma_20_dist = (closes[-1] - ma_20) / ma_20
                             
@@ -141,6 +144,7 @@ async def stream_ethereum_data():
                             print(f"   LSTM Volatility Forecast (24h): {volatility_forecast:.4%}")
                             print(f"   HMM High-Vol Prob: {prob_high_vol:.4f}")
                             print(f"   GMM Z-Score: {gmm_z_score:.4f} | Cluster: {gmm_cluster}")
+                            print(f"   Vol 24h: {vol_24h:.6f} | Vol 168h: {vol_168h:.6f}")
                             print(f"   Rolling Max ({breakout_window}h): ${rolling_max:,.2f}")
                             print(f"   Rolling Min ({breakout_window}h): ${rolling_min:,.2f}")
                             print("="*60 + "\n")
@@ -156,6 +160,8 @@ async def stream_ethereum_data():
                                     "rolling_min": float(rolling_min),
                                     "gmm_z_score": float(gmm_z_score),
                                     "gmm_cluster": int(gmm_cluster),
+                                    "vol_24h": float(vol_24h),
+                                    "vol_168h": float(vol_168h),
                                     "closes": [float(c) for c in closes[-24:]]
                                 }
                                 import requests

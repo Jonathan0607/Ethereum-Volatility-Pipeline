@@ -16,8 +16,10 @@
   "use_ema_exit": false,
   "breakout_window": 47,
   "hmm_threshold": 0.6594155980615416,
-  "hmm_chop_max": 0.4288629247614499,
-  "hmm_trend_min": 0.6695950462318774,
-  "gmm_z_buy": -1.9141050941474147,
-  "gmm_z_sell": 0.18094788308464496
+  "hmm_chop_max": 0.41819523100872985,
+  "hmm_trend_min": 0.6728139709976863,
+  "gmm_z_buy": -1.9654876141414437,
+  "gmm_z_sell": 0.833607663934452,
+  "vol_shock_mult": 1.3245535707519815,
+  "rebalance_threshold": 0.24044981897652473
 }

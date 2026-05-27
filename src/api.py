@@ -253,6 +253,8 @@ class LiveExecutionPayload(BaseModel):
     rolling_min: float
     gmm_z_score: float
     gmm_cluster: int
+    vol_24h: float
+    vol_168h: float
     closes: list[float]
 
 @app.post("/execution/live-stream")
@@ -319,8 +321,11 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
 
         # Gate 3: Hierarchical Execution Routing Logic
         rolling_mean = sum(payload.closes[-24:]) / 24
+        
+        # Volatility Shock Meta-Controller Bypass
+        vol_shock = payload.vol_24h > (payload.vol_168h * best_params.get('vol_shock_mult', 1.5))
 
-        if payload.prob_high_vol > hmm_trend_min:
+        if payload.prob_high_vol > hmm_trend_min or vol_shock:
             # Route to Breakout Agent
             if payload.current_price > payload.rolling_max:
                 action = "BUY"
@@ -328,7 +333,7 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
                 action = "SELL_SHORT"
             else:
                 action = "HOLDING" if current_position in ["LONG", "SHORT"] else "FLAT"
-        elif payload.prob_high_vol < hmm_chop_max:
+        elif payload.prob_high_vol < hmm_chop_max and not vol_shock:
             # Route to GMM Agent
             if payload.gmm_z_score < gmm_z_buy or payload.gmm_cluster == 0:
                 action = "BUY"
@@ -345,9 +350,36 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
             # Transition Zone - Force Cash
             action = "CASH"
 
+        # Sizing and Rebalance Threshold (Friction Filter)
         daily_forecasted_vol = forecasted_vol * np.sqrt(24)
+        ideal_size = min(TARGET_VOLATILITY / (daily_forecasted_vol + 1e-8), 1.0)
+        
+        # Define current signed position size
+        if current_position == "LONG":
+            current_position_size = current_size
+        elif current_position == "SHORT":
+            current_position_size = -current_size
+        else:
+            current_position_size = 0.0
+
+        # Define target signed position size based on action
+        if action == "BUY":
+            target_position_size = ideal_size
+        elif action == "SELL_SHORT":
+            target_position_size = -ideal_size
+        elif action in ["CASH", "FLAT"]:
+            target_position_size = 0.0
+        else: # HOLDING
+            target_position_size = current_position_size
+
+        # Apply Friction Filter (Rebalance Threshold)
+        rebalance_threshold = best_params.get('rebalance_threshold', 0.15)
+        if action != "CASH" and abs(target_position_size - current_position_size) < rebalance_threshold:
+            action = "HOLDING" if current_position in ["LONG", "SHORT"] else "FLAT"
+
+        # Now set actual position_size for DB and return
         if action in ["BUY", "SELL_SHORT", "HOLDING"]:
-            position_size = min(TARGET_VOLATILITY / (daily_forecasted_vol + 1e-8), 1.0)
+            position_size = ideal_size
         else:
             position_size = 0.0
 

@@ -140,6 +140,8 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     hmm_trend_min   = best_params.get('hmm_trend_min', 0.60)
     gmm_z_buy       = best_params.get('gmm_z_buy', -1.5)
     gmm_z_sell      = best_params.get('gmm_z_sell', 0.5)
+    vol_shock_mult  = best_params.get('vol_shock_mult', 1.5)
+    rebalance_threshold = best_params.get('rebalance_threshold', 0.15)
 
     # Calculate HMM Probability on full df before splitting to prevent NaNs
     df = df.copy()
@@ -191,6 +193,12 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     test_df['rolling_min'] = test_df['close'].rolling(window=breakout_window).min().shift(1)
     test_df['rolling_mean'] = test_df['close'].rolling(window=24).mean()
     
+    # Realized Volatility Overlay (Circuit Breaker)
+    test_df['log_ret'] = np.log(test_df['close'] / test_df['close'].shift(1))
+    test_df['vol_24h'] = test_df['log_ret'].rolling(24).std()
+    test_df['vol_168h'] = test_df['log_ret'].rolling(168).std()
+    vol_shock = (test_df['vol_24h'] > (test_df['vol_168h'] * vol_shock_mult)).fillna(False)
+
     # Fast Z-Score
     roll_mean = test_df['close'].rolling(window=20).mean()
     roll_std = test_df['close'].rolling(window=20).std()
@@ -199,18 +207,18 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     # Bi-directional HMM/GMM Hierarchical Logic
     test_df['signal'] = np.nan
     
-    # AGENT 1: Momentum Breakout (Activated when HMM > trend_min)
-    trend_active = test_df['prob_high_vol'] > hmm_trend_min
+    # AGENT 1: Momentum Breakout (Activated when HMM > trend_min OR vol_shock)
+    trend_active = (test_df['prob_high_vol'] > hmm_trend_min) | vol_shock
     test_df.loc[trend_active & (test_df['close'] > test_df['rolling_max']), 'signal'] = 1
     test_df.loc[trend_active & (test_df['close'] < test_df['rolling_min']), 'signal'] = -1
     
-    # AGENT 2: GMM Mean-Reversion (Activated when HMM < chop_max)
-    chop_active = test_df['prob_high_vol'] < hmm_chop_max
+    # AGENT 2: GMM Mean-Reversion (Activated when HMM < chop_max AND NOT vol_shock)
+    chop_active = (test_df['prob_high_vol'] < hmm_chop_max) & ~vol_shock
     test_df.loc[chop_active & (test_df['z_score'] < gmm_z_buy), 'signal'] = 1
     test_df.loc[chop_active & (test_df['z_score'] > gmm_z_sell), 'signal'] = 0
     
     # 3. Master Exits
-    test_df.loc[(test_df['prob_high_vol'] >= hmm_chop_max) & (test_df['prob_high_vol'] <= hmm_trend_min), 'signal'] = 0
+    test_df.loc[(test_df['prob_high_vol'] >= hmm_chop_max) & (test_df['prob_high_vol'] <= hmm_trend_min) & ~vol_shock, 'signal'] = 0
     
     test_df['signal'] = test_df['signal'].ffill().fillna(0)
 
@@ -220,12 +228,28 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     # Volatility-Scaled Position Sizing (signed: +1 long, -1 short)
     uncapped_size = target_volatility / (daily_forecasted_vol + 1e-8)
     base_position_size = uncapped_size.clip(upper=1.0)
-    test_df['position_size'] = base_position_size * test_df['signal']
+    test_df['target_size'] = base_position_size * test_df['signal']
+
+    # 4. Friction Filter (Rebalance Threshold Loop)
+    raw_targets = test_df['target_size'].values
+    active_positions = np.zeros(len(raw_targets))
+    current_pos = 0.0
     
-    n_long = (test_df['signal'] == 1).sum()
-    n_short = (test_df['signal'] == -1).sum()
-    n_flat = (test_df['signal'] == 0).sum()
-    print(f"   [Debug] Signals: LONG={n_long} | SHORT={n_short} | FLAT={n_flat}")
+    for i in range(len(raw_targets)):
+        target = raw_targets[i]
+        if np.isnan(target):
+            active_positions[i] = current_pos
+            continue
+        if target == 0.0 or abs(target - current_pos) > rebalance_threshold:
+            current_pos = target
+        active_positions[i] = current_pos
+        
+    test_df['position_size'] = active_positions
+    
+    n_long = (test_df['position_size'] > 0).sum()
+    n_short = (test_df['position_size'] < 0).sum()
+    n_flat = (test_df['position_size'] == 0).sum()
+    print(f"   [Debug] Sized Positions: LONG={n_long} | SHORT={n_short} | FLAT={n_flat}")
 
     # 1. Shift the position size (because we enter the position at the CLOSE of the signal candle)
     # The 'position_size' column is directional (positive for Long, negative for Short, 0 for Flat)
