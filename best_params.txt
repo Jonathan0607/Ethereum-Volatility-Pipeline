@@ -14,12 +14,12 @@
   "use_partial_sell": true,
   "partial_sell_ratio": 0.22268405731261148,
   "use_ema_exit": false,
-  "breakout_window": 47,
+  "breakout_window": 12,
   "hmm_threshold": 0.6594155980615416,
-  "hmm_chop_max": 0.41819523100872985,
-  "hmm_trend_min": 0.6728139709976863,
-  "gmm_z_buy": -1.9654876141414437,
-  "gmm_z_sell": 0.833607663934452,
-  "vol_shock_mult": 1.3245535707519815,
-  "rebalance_threshold": 0.24044981897652473
+  "hmm_chop_max": 0.4410978945454171,
+  "hmm_trend_min": 0.6700780732992713,
+  "gmm_z_buy": -1.959680901801929,
+  "gmm_z_sell": 0.616570756387101,
+  "vol_shock_mult": 1.3772569314999321,
+  "rebalance_threshold": 0.16045648777029503
 }

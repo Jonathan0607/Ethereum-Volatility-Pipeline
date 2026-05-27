@@ -43,7 +43,7 @@ PARAMS_PATH = os.path.join(PROJECT_ROOT, 'best_params.txt')
 STUDY_DB    = f"sqlite:///{os.path.join(PROJECT_ROOT, 'research', 'optuna_study.db')}"
 N_TRIALS    = 150
 SEQ_LENGTH  = 60
-FEE_PCT     = 0.0010  # 10 bps (0.10%) per trade
+FEE_PCT     = 0.0  # Fees disabled for backtesting
 
 def load_eth_data() -> pd.DataFrame:
     """Load ETH-USD hourly data from static CSV."""
