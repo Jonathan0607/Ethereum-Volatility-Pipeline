@@ -22,6 +22,7 @@ def get_hurst_exponent(ts, max_lag=20):
     poly = np.polyfit(np.log(lags), np.log(tau), 1)
     return poly[0] * 2.0
 TARGET_VOLATILITY = 0.06  # Must match api.py
+FEE_PCT = 0.0010  # 10 bps (0.10%) per trade (Binance Spot fee tier)
 
 def load_data():
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -226,8 +227,21 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     n_flat = (test_df['signal'] == 0).sum()
     print(f"   [Debug] Signals: LONG={n_long} | SHORT={n_short} | FLAT={n_flat}")
 
-    # Strategy returns: signal * market_returns handles short P&L correctly
-    test_df['strategy_returns'] = test_df['market_returns'] * test_df['signal'].shift(1)
+    # 1. Shift the position size (because we enter the position at the CLOSE of the signal candle)
+    # The 'position_size' column is directional (positive for Long, negative for Short, 0 for Flat)
+    test_df['active_position'] = test_df['position_size'].shift(1).fillna(0)
+
+    # 2. Calculate Gross Return based on the scaled position
+    test_df['gross_strategy_returns'] = test_df['market_returns'] * test_df['active_position']
+
+    # 3. Calculate Transaction Friction (Fees)
+    # We pay a fee every time the position size changes.
+    test_df['position_change'] = test_df['active_position'].diff().abs().fillna(0)
+    test_df['transaction_costs'] = test_df['position_change'] * FEE_PCT
+
+    # 4. Calculate Net Strategy Return
+    test_df['strategy_returns'] = test_df['gross_strategy_returns'] - test_df['transaction_costs']
+
     test_df['cumulative_market'] = (1 + test_df['market_returns']).cumprod()
     test_df['cumulative_strategy'] = (1 + test_df['strategy_returns']).cumprod()
 
