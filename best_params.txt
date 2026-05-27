@@ -14,6 +14,10 @@
   "use_partial_sell": true,
   "partial_sell_ratio": 0.22268405731261148,
   "use_ema_exit": false,
-  "breakout_window": 147,
-  "hmm_threshold": 0.6594155980615416
+  "breakout_window": 19,
+  "hmm_threshold": 0.6594155980615416,
+  "hmm_chop_max": 0.44521340641458557,
+  "hmm_trend_min": 0.5615778179052131,
+  "gmm_z_buy": -2.160397559453338,
+  "gmm_z_sell": 0.224204130759979
 }

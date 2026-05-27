@@ -47,11 +47,21 @@ def initialize_database():
         regime INTEGER NOT NULL,
         status TEXT NOT NULL,
         realized_pnl_pct REAL DEFAULT 0.0,
-        position_size REAL DEFAULT 1.0
+        position_size REAL DEFAULT 1.0,
+        gmm_z_score REAL DEFAULT 0.0,
+        gmm_cluster INTEGER DEFAULT 1
     )
     ''')
     try:
         cursor.execute("ALTER TABLE paper_trades ADD COLUMN position_size REAL DEFAULT 1.0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE paper_trades ADD COLUMN gmm_z_score REAL DEFAULT 0.0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE paper_trades ADD COLUMN gmm_cluster INTEGER DEFAULT 1")
     except sqlite3.OperationalError:
         pass
     conn.commit()
@@ -121,7 +131,7 @@ def load_artifacts():
 
     print("[API] Shadow Mode Daemon active.")
 
-def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0, position_size=0.0):
+def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0, position_size=0.0, gmm_z_score=0.0, gmm_cluster=1):
     """Writes execution state to DB and fires Discord alert."""
     db_path = get_db_path()
     conn = sqlite3.connect(db_path)
@@ -174,14 +184,14 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
         status = 'CLOSED'
 
     cursor.execute('''
-    INSERT INTO paper_trades (asset, action, execution_price, predicted_volatility, regime, status, position_size, realized_pnl_pct)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', ('ETH/USDT', actual_action, price, pred_vol, regime, status, position_size, realized_pnl))
+    INSERT INTO paper_trades (asset, action, execution_price, predicted_volatility, regime, status, position_size, realized_pnl_pct, gmm_z_score, gmm_cluster)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', ('ETH/USDT', actual_action, price, pred_vol, regime, status, position_size, realized_pnl, gmm_z_score, gmm_cluster))
     conn.commit()
     conn.close()
 
     size_pct = abs(position_size) * 100
-    print(f"   [EXECUTED] {actual_action} | ${price:.2f} | Vol: {pred_vol:.4f} | HMM: {regime:.4f} | Size: {size_pct:.1f}%")
+    print(f"   [EXECUTED] {actual_action} | ${price:.2f} | Vol: {pred_vol:.4f} | HMM: {regime:.4f} | GMM Z: {gmm_z_score:.4f} (C:{gmm_cluster}) | Size: {size_pct:.1f}%")
 
     # Set webhook URL
     WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
@@ -207,6 +217,8 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
         {"name": "Asset", "value": "ETH/USD", "inline": True},
         {"name": "Execution Price", "value": f"${price:.2f}", "inline": True},
         {"name": "HMM High-Vol Prob", "value": f"{regime:.4f}", "inline": True},
+        {"name": "GMM Z-Score", "value": f"{gmm_z_score:.4f}", "inline": True},
+        {"name": "GMM Cluster", "value": str(gmm_cluster), "inline": True},
         {"name": "AI Volatility", "value": f"{pred_vol:.5f}", "inline": True},
         {"name": "Position Size", "value": f"{size_pct:.1f}%", "inline": True},
         {"name": "Target Vol", "value": f"{TARGET_VOLATILITY*100:.1f}%", "inline": True},
@@ -239,6 +251,8 @@ class LiveExecutionPayload(BaseModel):
     prob_high_vol: float
     rolling_max: float
     rolling_min: float
+    gmm_z_score: float
+    gmm_cluster: int
     closes: list[float]
 
 @app.post("/execution/live-stream")
@@ -281,8 +295,11 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         else:
             best_params = {}
             
-        hmm_threshold = best_params.get('hmm_threshold', 0.85)
-        cooldown_hours = best_params.get('cooldown_hours', 3)
+        hmm_chop_max    = best_params.get('hmm_chop_max', 0.40)
+        hmm_trend_min   = best_params.get('hmm_trend_min', 0.60)
+        gmm_z_buy       = best_params.get('gmm_z_buy', -1.5)
+        gmm_z_sell      = best_params.get('gmm_z_sell', 0.5)
+        cooldown_hours  = best_params.get('cooldown_hours', 3)
 
         # Get current position and size from database
         db_path = get_db_path()
@@ -300,26 +317,33 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         
         conn.close()
 
-        # Gate 3: Bi-Directional Execution Logic
+        # Gate 3: Hierarchical Execution Routing Logic
         rolling_mean = sum(payload.closes[-24:]) / 24
 
-        if payload.prob_high_vol > hmm_threshold:
-            if payload.current_price > payload.rolling_max and current_position != "LONG":
-                action = "BUY"  # Enter Long / Cover Short & Reverse
-            elif payload.current_price < payload.rolling_min and current_position != "SHORT":
-                action = "SELL_SHORT"  # Enter Short / Sell Long & Reverse
+        if payload.prob_high_vol > hmm_trend_min:
+            # Route to Breakout Agent
+            if payload.current_price > payload.rolling_max:
+                action = "BUY"
+            elif payload.current_price < payload.rolling_min:
+                action = "SELL_SHORT"
             else:
                 action = "HOLDING" if current_position in ["LONG", "SHORT"] else "FLAT"
-        elif payload.prob_high_vol < 0.40:
-            action = "CASH"  # Volatility crushed, exit everything
+        elif payload.prob_high_vol < hmm_chop_max:
+            # Route to GMM Agent
+            if payload.gmm_z_score < gmm_z_buy or payload.gmm_cluster == 0:
+                action = "BUY"
+            elif payload.gmm_z_score > gmm_z_sell or payload.gmm_cluster == 2:
+                action = "CASH"
+            else:
+                if current_position == "LONG":
+                    action = "HOLDING"
+                elif current_position == "SHORT":
+                    action = "CASH"  # Cover short in mean reversion mode
+                else:
+                    action = "FLAT"
         else:
-            # Mean Reversion Exits
-            if current_position == "LONG" and payload.current_price < rolling_mean:
-                action = "CASH"
-            elif current_position == "SHORT" and payload.current_price > rolling_mean:
-                action = "CASH"
-            else:
-                action = "HOLDING" if current_position in ["LONG", "SHORT"] else "FLAT"
+            # Transition Zone - Force Cash
+            action = "CASH"
 
         daily_forecasted_vol = forecasted_vol * np.sqrt(24)
         if action in ["BUY", "SELL_SHORT", "HOLDING"]:
@@ -345,7 +369,8 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         
         # 4. Write to DB and push Discord notification
         log_trade(action, close_price, float(forecasted_vol), float(payload.prob_high_vol),
-                  mc_results['lower_bound'], mc_results['upper_bound'], position_size)
+                  mc_results['lower_bound'], mc_results['upper_bound'], position_size,
+                  payload.gmm_z_score, payload.gmm_cluster)
                   
         return {"status": "Success", "action": action, "position_size": position_size}
     except Exception as e:

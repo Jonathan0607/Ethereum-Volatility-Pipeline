@@ -36,7 +36,7 @@ sys.path.insert(0, SRC_DIR)
 sys.path.insert(0, PROJECT_ROOT)
 
 from data import FEATURE_COLS, split_data, calculate_features, calculate_features_test
-from strategy import ProgressiveModel
+from strategy import ProgressiveModel, get_gmm_state
 from hmm_engine import get_high_vol_probability
 
 PARAMS_PATH = os.path.join(PROJECT_ROOT, 'best_params.txt')
@@ -152,32 +152,36 @@ def load_hmm_features(df):
             print(f"[Cache] Save error: {e}")
     return df
 
-def simulate_sharpe(test_df: pd.DataFrame, breakout_window: int, hmm_threshold: float) -> float:
-    """Ultra-fast bi-directional strategy simulation on pre-computed volatility forecasts."""
+def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
+    """Ultra-fast hierarchical strategy simulation on pre-computed volatility forecasts."""
     bt = test_df.copy()
     bt['market_returns'] = bt['close'].pct_change()
 
-    # Compression Breakout Filters
-    bt['rolling_max'] = bt['close'].rolling(window=breakout_window).max().shift(1)
-    bt['rolling_min'] = bt['close'].rolling(window=breakout_window).min().shift(1)
-    bt['rolling_mean'] = bt['close'].rolling(window=24).mean()
+    # 1. Pre-calculate metrics
+    bt['rolling_max'] = bt['close'].rolling(window=params['breakout_window']).max().shift(1)
+    bt['rolling_min'] = bt['close'].rolling(window=params['breakout_window']).min().shift(1)
+    
+    # Fast Z-Score for the vectorized backtester
+    roll_mean = bt['close'].rolling(window=20).mean()
+    roll_std = bt['close'].rolling(window=20).std()
+    bt['z_score'] = (bt['close'] - roll_mean) / (roll_std + 1e-8)
 
-    # Bi-directional HMM Breakout Logic
-    long_cond = (bt['close'] > bt['rolling_max']) & (bt['prob_high_vol'] > hmm_threshold)
-    short_cond = (bt['close'] < bt['rolling_min']) & (bt['prob_high_vol'] > hmm_threshold)
-
-    exit_long = (bt['prob_high_vol'] < 0.40) | (bt['close'] < bt['rolling_mean'])
-    exit_short = (bt['prob_high_vol'] < 0.40) | (bt['close'] > bt['rolling_mean'])
-
-    # Vectorized state evaluation
+    # 2. Hierarchical Routing
     bt['signal'] = np.nan
-    bt.loc[long_cond, 'signal'] = 1
-    bt.loc[short_cond, 'signal'] = -1
-
-    # Forward fill the active signal, then apply exits based on current position
-    bt['signal'] = bt['signal'].ffill()
-    bt.loc[(bt['signal'] == 1) & exit_long, 'signal'] = 0
-    bt.loc[(bt['signal'] == -1) & exit_short, 'signal'] = 0
+    
+    # AGENT 1: Momentum Breakout (Activated when HMM > trend_min)
+    trend_active = bt['prob_high_vol'] > params['hmm_trend_min']
+    bt.loc[trend_active & (bt['close'] > bt['rolling_max']), 'signal'] = 1
+    bt.loc[trend_active & (bt['close'] < bt['rolling_min']), 'signal'] = -1
+    
+    # AGENT 2: GMM Mean-Reversion (Activated when HMM < chop_max)
+    chop_active = bt['prob_high_vol'] < params['hmm_chop_max']
+    bt.loc[chop_active & (bt['z_score'] < params['gmm_z_buy']), 'signal'] = 1
+    bt.loc[chop_active & (bt['z_score'] > params['gmm_z_sell']), 'signal'] = 0
+    
+    # 3. Master Exits
+    bt.loc[(bt['prob_high_vol'] >= params['hmm_chop_max']) & (bt['prob_high_vol'] <= params['hmm_trend_min']), 'signal'] = 0
+    
     bt['signal'] = bt['signal'].ffill().fillna(0)
 
     # Volatility-Scaled Sizing (abs signal for sizing, sign for direction)
@@ -199,16 +203,24 @@ def simulate_sharpe(test_df: pd.DataFrame, breakout_window: int, hmm_threshold: 
     return float(sharpe)
 
 def objective(trial, test_df):
-    breakout_window = trial.suggest_int('breakout_window', 12, 48)  # Micro-breakouts
-    hmm_threshold   = trial.suggest_float('hmm_threshold', 0.50, 0.95)
+    params = {
+        'hmm_chop_max': trial.suggest_float('hmm_chop_max', 0.30, 0.45),
+        'hmm_trend_min': trial.suggest_float('hmm_trend_min', 0.55, 0.70),
+        'gmm_z_buy': trial.suggest_float('gmm_z_buy', -2.5, -1.0),
+        'gmm_z_sell': trial.suggest_float('gmm_z_sell', 0.0, 1.5),
+        'breakout_window': trial.suggest_int('breakout_window', 12, 48),
+    }
 
-    sharpe = simulate_sharpe(test_df, breakout_window, hmm_threshold)
+    sharpe = simulate_sharpe(test_df, params)
     return sharpe
 
 def write_best_params(study, current_params):
     best = study.best_trial.params
     current_params['breakout_window'] = int(best['breakout_window'])
-    current_params['hmm_threshold']   = float(best['hmm_threshold'])
+    current_params['hmm_chop_max']    = float(best['hmm_chop_max'])
+    current_params['hmm_trend_min']   = float(best['hmm_trend_min'])
+    current_params['gmm_z_buy']       = float(best['gmm_z_buy'])
+    current_params['gmm_z_sell']      = float(best['gmm_z_sell'])
 
     with open(PARAMS_PATH, 'w') as f:
         json.dump(current_params, f, indent=2)

@@ -11,7 +11,7 @@ import pickle
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from data import calculate_features, calculate_features_test, split_data, FEATURE_COLS
-from strategy import ProgressiveModel
+from strategy import ProgressiveModel, get_gmm_state
 from hmm_engine import get_high_vol_probability
 
 SEQ_LENGTH = 60
@@ -135,7 +135,10 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
         best_params = {}
         
     breakout_window = best_params.get('breakout_window', 48)
-    hmm_threshold   = best_params.get('hmm_threshold', 0.85)
+    hmm_chop_max    = best_params.get('hmm_chop_max', 0.40)
+    hmm_trend_min   = best_params.get('hmm_trend_min', 0.60)
+    gmm_z_buy       = best_params.get('gmm_z_buy', -1.5)
+    gmm_z_sell      = best_params.get('gmm_z_sell', 0.5)
 
     # Calculate HMM Probability on full df before splitting to prevent NaNs
     df = df.copy()
@@ -186,23 +189,28 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     test_df['rolling_max'] = test_df['close'].rolling(window=breakout_window).max().shift(1)
     test_df['rolling_min'] = test_df['close'].rolling(window=breakout_window).min().shift(1)
     test_df['rolling_mean'] = test_df['close'].rolling(window=24).mean()
+    
+    # Fast Z-Score
+    roll_mean = test_df['close'].rolling(window=20).mean()
+    roll_std = test_df['close'].rolling(window=20).std()
+    test_df['z_score'] = (test_df['close'] - roll_mean) / (roll_std + 1e-8)
 
-    # Bi-directional HMM Breakout Logic
-    long_cond = (test_df['close'] > test_df['rolling_max']) & (test_df['prob_high_vol'] > hmm_threshold)
-    short_cond = (test_df['close'] < test_df['rolling_min']) & (test_df['prob_high_vol'] > hmm_threshold)
-
-    exit_long = (test_df['prob_high_vol'] < 0.40) | (test_df['close'] < test_df['rolling_mean'])
-    exit_short = (test_df['prob_high_vol'] < 0.40) | (test_df['close'] > test_df['rolling_mean'])
-
-    # Vectorized state evaluation
+    # Bi-directional HMM/GMM Hierarchical Logic
     test_df['signal'] = np.nan
-    test_df.loc[long_cond, 'signal'] = 1
-    test_df.loc[short_cond, 'signal'] = -1
-
-    # Forward fill the active signal, then apply exits based on current position
-    test_df['signal'] = test_df['signal'].ffill()
-    test_df.loc[(test_df['signal'] == 1) & exit_long, 'signal'] = 0
-    test_df.loc[(test_df['signal'] == -1) & exit_short, 'signal'] = 0
+    
+    # AGENT 1: Momentum Breakout (Activated when HMM > trend_min)
+    trend_active = test_df['prob_high_vol'] > hmm_trend_min
+    test_df.loc[trend_active & (test_df['close'] > test_df['rolling_max']), 'signal'] = 1
+    test_df.loc[trend_active & (test_df['close'] < test_df['rolling_min']), 'signal'] = -1
+    
+    # AGENT 2: GMM Mean-Reversion (Activated when HMM < chop_max)
+    chop_active = test_df['prob_high_vol'] < hmm_chop_max
+    test_df.loc[chop_active & (test_df['z_score'] < gmm_z_buy), 'signal'] = 1
+    test_df.loc[chop_active & (test_df['z_score'] > gmm_z_sell), 'signal'] = 0
+    
+    # 3. Master Exits
+    test_df.loc[(test_df['prob_high_vol'] >= hmm_chop_max) & (test_df['prob_high_vol'] <= hmm_trend_min), 'signal'] = 0
+    
     test_df['signal'] = test_df['signal'].ffill().fillna(0)
 
     # Convert forecasted hourly volatility to daily volatility (since TARGET is likely daily risk)
