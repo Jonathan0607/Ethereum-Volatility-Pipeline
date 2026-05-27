@@ -12,7 +12,7 @@ import json
 from arch import arch_model
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime
+from datetime import datetime, timedelta
 from pydantic import BaseModel
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -64,6 +64,12 @@ app.add_middleware(
 )
 
 MODEL_STATE = {'model': None, 'feat_scaler': None, 'tgt_scaler': None, 'device': None}
+
+class TradingState:
+    def __init__(self):
+        self.cooldown_until = datetime.min
+
+current_state = TradingState()
 
 @app.on_event("startup")
 def load_artifacts():
@@ -122,6 +128,7 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
 
     actual_action = action
     status = 'CLOSED'
+    realized_pnl = 0.0
 
     if action == "BUY":
         if open_trade is None:
@@ -138,15 +145,24 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
         else:
             actual_action = 'FLAT'
             status = 'CLOSED'
+    elif action == "PARTIAL_SELL":
+        if open_trade is not None:
+            entry_price = open_trade[0]
+            realized_pnl = ((price - entry_price) / entry_price) * 100
+            cursor.execute("UPDATE paper_trades SET position_size = position_size * 0.5 WHERE status = 'OPEN'")
+            status = 'CLOSED'
+        else:
+            actual_action = 'FLAT'
+            status = 'CLOSED'
     elif action == "HOLDING":
         status = 'OPEN'
     elif action == "FLAT":
         status = 'CLOSED'
 
     cursor.execute('''
-    INSERT INTO paper_trades (asset, action, execution_price, predicted_volatility, regime, status, position_size)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', ('ETH/USDT', actual_action, price, pred_vol, regime, status, position_size))
+    INSERT INTO paper_trades (asset, action, execution_price, predicted_volatility, regime, status, position_size, realized_pnl_pct)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', ('ETH/USDT', actual_action, price, pred_vol, regime, status, position_size, realized_pnl))
     conn.commit()
     conn.close()
 
@@ -157,22 +173,43 @@ def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0,
     if WEBHOOK_URL is None:
         print("[WARN] DISCORD_WEBHOOK_URL not set in environment variables")
         return
-    embed_color = 5763719 if actual_action == "BUY" else (15548997 if actual_action == "CASH" else 9807270)
+
+    # Update Discord notification colors and titles
+    if actual_action == "BUY":
+        title = "🚨 TRADE EXECUTED: BUY"
+        embed_color = 5763719  # Green
+    elif actual_action == "PARTIAL_SELL":
+        title = "⚖️ PARTIAL PROFIT TAKE: PARTIAL_SELL"
+        embed_color = 16753920  # Orange/Gold
+    elif actual_action == "CASH":
+        title = "🚨 FULL LIQUIDATION: CASH"
+        embed_color = 15548997  # Red
+    else:
+        title = f"⚙️ SYSTEM STATE: {actual_action}"
+        embed_color = 9807270  # Gray
+
+    fields = [
+        {"name": "Asset", "value": "ETH/USD", "inline": True},
+        {"name": "Execution Price", "value": f"${price:.2f}", "inline": True},
+        {"name": "Hurst Exponent", "value": f"{regime:.4f}", "inline": True},
+        {"name": "AI Volatility", "value": f"{pred_vol:.5f}", "inline": True},
+        {"name": "Position Size", "value": f"{size_pct:.1f}%", "inline": True},
+        {"name": "Target Vol", "value": f"{TARGET_VOLATILITY*100:.1f}%", "inline": True},
+    ]
+    if actual_action in ["CASH", "PARTIAL_SELL"] and open_trade is not None:
+        fields.append({"name": "Realized PnL", "value": f"{realized_pnl:+.4f}%", "inline": True})
+
+    fields.extend([
+        {"name": "24h Risk Bottom", "value": f"${lower_bound:.2f}", "inline": True},
+        {"name": "24h Risk Top", "value": f"${upper_bound:.2f}", "inline": True}
+    ])
+
     payload = {
         "username": "Execution Engine",
         "embeds": [{
-            "title": f"\U0001f6a8 TRADE EXECUTED: {actual_action}",
+            "title": title,
             "color": embed_color,
-            "fields": [
-                {"name": "Asset", "value": "ETH/USD", "inline": True},
-                {"name": "Execution Price", "value": f"${price:.2f}", "inline": True},
-                {"name": "Hurst Exponent", "value": f"{regime:.4f}", "inline": True},
-                {"name": "AI Volatility", "value": f"{pred_vol:.5f}", "inline": True},
-                {"name": "Position Size", "value": f"{size_pct:.1f}%", "inline": True},
-                {"name": "Target Vol", "value": f"{TARGET_VOLATILITY*100:.1f}%", "inline": True},
-                {"name": "24h Risk Bottom", "value": f"${lower_bound:.2f}", "inline": True},
-                {"name": "24h Risk Top", "value": f"${upper_bound:.2f}", "inline": True}
-            ],
+            "fields": fields,
             "footer": {"text": "Chronos • Volatility-Scaled Sizing"}
         }]
     }
@@ -191,6 +228,12 @@ class LiveExecutionPayload(BaseModel):
 def execute_live_stream_trade(payload: LiveExecutionPayload):
     """Real-Time Gateway: Triggered instantly by the WebSocket stream aggregator"""
     print(f"\n[{datetime.now()}] Live WebSocket signal received...")
+    
+    # Check Cooldown (if we just exited a trade with a loss, wait 3 hours)
+    if datetime.now() < current_state.cooldown_until:
+        print(f"   [COOLDOWN VETO] Strategy is in cooldown state until {current_state.cooldown_until}. Skipping execution.")
+        return {"status": "Success", "action": "FLAT", "position_size": 0.0, "reason": "cooldown"}
+
     try:
         close_price = payload.current_price
         forecasted_vol = max(payload.forecasted_vol, 1e-8)
@@ -219,14 +262,15 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         z_sell = best_params.get('z_sell', 0.5)
         hurst_threshold = best_params.get('hurst_threshold', 0.45)
 
-        # Get current position from database
+        # Get current position and size from database
         db_path = get_db_path()
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        cursor.execute("SELECT execution_price FROM paper_trades WHERE status = 'OPEN' ORDER BY timestamp ASC LIMIT 1")
+        cursor.execute("SELECT execution_price, position_size FROM paper_trades WHERE status = 'OPEN' ORDER BY timestamp ASC LIMIT 1")
         open_trade = cursor.fetchone()
         conn.close()
         current_position = "LONG" if open_trade is not None else "FLAT"
+        current_size = open_trade[1] if open_trade is not None else 0.0
 
         # Gate 1 & 2: Risk Filters
         vol_threshold = TARGET_VOLATILITY * 1.8 
@@ -234,18 +278,30 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         is_mean_reverting = payload.hurst < hurst_threshold
 
         # Gate 3: Execution Logic
+        # Soft Exit: Sell 50% at Z-Score 0.0 (the mean), Sell 100% at Z-Score 1.0
         if is_mean_reverting and is_safe_vol and payload.z_score <= z_buy:
             action = "BUY"
         elif payload.z_score >= z_sell or not is_safe_vol:
-            action = "CASH"
+            action = "CASH" # 100% Exit
+        elif payload.z_score >= 0.0 and current_position == "LONG":
+            action = "PARTIAL_SELL" # New state to reduce size by 50%
         else:
             action = "HOLDING" if current_position == "LONG" else "FLAT"
 
         daily_forecasted_vol = forecasted_vol * np.sqrt(24)
         if action in ["BUY", "HOLDING"]:
             position_size = min(TARGET_VOLATILITY / (daily_forecasted_vol + 1e-8), 1.0)
+        elif action == "PARTIAL_SELL":
+            position_size = current_size * 0.5
         else:
             position_size = 0.0
+
+        # Check Cooldown condition: if we sell/exit and close_price < previous_buy_price
+        if action == "CASH" and open_trade is not None:
+            previous_buy_price = open_trade[0]
+            if close_price < previous_buy_price:
+                current_state.cooldown_until = datetime.now() + timedelta(hours=3)
+                print(f"   [COOLDOWN TRIGGERED] Exited trade at a loss (${close_price:.2f} < ${previous_buy_price:.2f}). Cooldown active for 3 hours until {current_state.cooldown_until}")
 
         # 3. Fire custom C++ Monte Carlo
         mc_results = monte_carlo.simulate_gbm(

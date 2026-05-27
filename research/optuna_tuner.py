@@ -289,9 +289,9 @@ def objective(trial, df):
         'batch_size':       trial.suggest_categorical('batch_size', [32, 64]),
         'epochs':           trial.suggest_int('epochs', 30, 100),
         'z_window':         trial.suggest_int('z_window', 10, 50),
-        'z_buy':            trial.suggest_float('z_buy', -3.5, -1.5),
-        'z_sell':           trial.suggest_float('z_sell', 0.0, 1.5),
-        'hurst_threshold':  trial.suggest_float('hurst_threshold', 0.40, 0.55),
+        'z_buy':            trial.suggest_float('z_buy', -3.0, -2.5),
+        'z_sell':           trial.suggest_float('z_sell', 0.5, 1.0),
+        'hurst_threshold':  trial.suggest_float('hurst_threshold', 0.35, 0.45),
     }
 
     sharpe = simulate_sharpe(df, params)
