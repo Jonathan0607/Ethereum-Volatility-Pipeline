@@ -43,7 +43,7 @@ PARAMS_PATH = os.path.join(PROJECT_ROOT, 'best_params.txt')
 STUDY_DB    = f"sqlite:///{os.path.join(PROJECT_ROOT, 'research', 'optuna_study.db')}"
 N_TRIALS    = 150
 SEQ_LENGTH  = 60
-FEE_PCT     = 0.0  # Fees disabled for backtesting
+FEE_PCT     = 0.0010  # Fees enabled for backtesting
 
 def load_eth_data() -> pd.DataFrame:
     """Load ETH-USD hourly data from static CSV."""
@@ -221,7 +221,10 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
 
     # 7. Calculate Transaction Friction (Fees)
     bt['position_change'] = bt['active_position'].diff().abs().fillna(0)
-    bt['transaction_costs'] = bt['position_change'] * FEE_PCT
+    
+    OPTIMIZER_FEE_PCT = params.get('optimizer_fee_pct', 0.0030)
+    # Calculate transaction costs with the artificial heavy penalty
+    bt['transaction_costs'] = bt['position_change'] * OPTIMIZER_FEE_PCT
 
     # 8. Calculate Net Strategy Return
     bt['strategy_returns'] = bt['gross_strategy_returns'] - bt['transaction_costs']
@@ -230,13 +233,26 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     if len(bt) < 100 or bt['strategy_returns'].std() < 1e-10:
         return -999.0
 
+    total_trades = (bt['active_position'].diff().abs() > 0).sum()
+    
     # Annualized Sharpe
     mean_ret = bt['strategy_returns'].mean() * 24 * 365
     std_ret  = bt['strategy_returns'].std() * np.sqrt(24 * 365)
     sharpe   = mean_ret / (std_ret + 1e-9)
+
+    # If the model is hyperactive, destroy its Sharpe score so Optuna discards the parameters
+    # We normalize the trade count to a 150-day equivalent to align with the '150 trades' target
+    dataset_days = (bt.index[-1] - bt.index[0]).days if len(bt) > 0 else 178
+    normalized_trades = int(total_trades * (150.0 / dataset_days)) if dataset_days > 0 else total_trades
+    if normalized_trades > 220:
+        return -5.0
+
     return float(sharpe)
 
 def objective(trial, test_df):
+    # Use a 30 bps artificial fee to terrify the optimizer into avoiding high-frequency whipsaws
+    OPTIMIZER_FEE_PCT = 0.0030 
+
     params = {
         'hmm_chop_max': trial.suggest_float('hmm_chop_max', 0.30, 0.45),
         'hmm_trend_min': trial.suggest_float('hmm_trend_min', 0.55, 0.70),
@@ -244,7 +260,9 @@ def objective(trial, test_df):
         'gmm_z_sell': trial.suggest_float('gmm_z_sell', 0.0, 1.5),
         'breakout_window': trial.suggest_int('breakout_window', 12, 48),
         'vol_shock_mult': trial.suggest_float('vol_shock_mult', 1.3, 2.0),
-        'rebalance_threshold': trial.suggest_float('rebalance_threshold', 0.10, 0.25),
+        # Allow the rebalance threshold to scale up to 50% to force long-term holds
+        'rebalance_threshold': trial.suggest_float('rebalance_threshold', 0.15, 0.50),
+        'optimizer_fee_pct': OPTIMIZER_FEE_PCT,
     }
 
     sharpe = simulate_sharpe(test_df, params)
