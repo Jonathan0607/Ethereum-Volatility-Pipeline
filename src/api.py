@@ -310,7 +310,8 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         gmm_z_sell      = best_params.get('gmm_z_sell', 0.5)
         cooldown_hours  = best_params.get('cooldown_hours', 3)
         hurst_threshold = best_params.get('hurst_threshold', 0.45)
-        atr_sl_mult     = best_params.get('atr_sl_mult', 2.5)
+        gmm_atr_mult      = best_params.get('gmm_atr_mult', 2.5)
+        breakout_atr_mult = best_params.get('breakout_atr_mult', 3.5)
 
         # Get current position and size from database
         db_path = get_db_path()
@@ -335,17 +336,19 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
                 current_state.extreme_price = payload.current_price
                 current_state.entry_atr = payload.atr
             current_state.extreme_price = max(current_state.extreme_price, payload.high)
-            if payload.current_price < (current_state.extreme_price - (current_state.entry_atr * atr_sl_mult)):
+            stop_price = current_state.extreme_price - (current_state.entry_atr * gmm_atr_mult)
+            if payload.low < stop_price:
                 trailing_stop_hit = True
-                print(f"   [ATR TRAILING STOP TRIGGERED] Price {payload.current_price} < {current_state.extreme_price} - {current_state.entry_atr} * {atr_sl_mult}")
+                print(f"   [ATR TRAILING STOP TRIGGERED] Low {payload.low} < {current_state.extreme_price} - {current_state.entry_atr} * {gmm_atr_mult}")
         elif current_position == "SHORT":
             if current_state.extreme_price == 0.0:
                 current_state.extreme_price = payload.current_price
                 current_state.entry_atr = payload.atr
             current_state.extreme_price = min(current_state.extreme_price, payload.low)
-            if payload.current_price > (current_state.extreme_price + (current_state.entry_atr * atr_sl_mult)):
+            stop_price = current_state.extreme_price + (current_state.entry_atr * breakout_atr_mult)
+            if payload.high > stop_price:
                 trailing_stop_hit = True
-                print(f"   [ATR TRAILING STOP TRIGGERED] Price {payload.current_price} > {current_state.extreme_price} + {current_state.entry_atr} * {atr_sl_mult}")
+                print(f"   [ATR TRAILING STOP TRIGGERED] High {payload.high} > {current_state.extreme_price} + {current_state.entry_atr} * {breakout_atr_mult}")
 
         if trailing_stop_hit:
             print("   [TRAILING STOP VETO] Forcing CASH action and resetting stop tracking.")

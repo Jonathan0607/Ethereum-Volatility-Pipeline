@@ -36,7 +36,7 @@ def get_hurst_exponent(ts):
     poly = np.polyfit(np.log(valid_lags), np.log(tau), 1)
     return poly[0] * 2.0
 TARGET_VOLATILITY = 0.06  # Must match api.py
-FEE_PCT = 0.0  # Fees disabled for backtesting
+FEE_PCT = 0.0010  # 10 bps standard fee
 
 def load_data():
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -159,7 +159,8 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     hurst_threshold = best_params.get('hurst_threshold', 0.45)
     hurst_window    = best_params.get('hurst_window', 48)
     cooldown_hours  = best_params.get('cooldown_hours', 11)
-    atr_sl_mult     = best_params.get('atr_sl_mult', 2.5)
+    gmm_atr_mult      = best_params.get('gmm_atr_mult', 2.5)
+    breakout_atr_mult = best_params.get('breakout_atr_mult', 3.5)
 
     # Calculate HMM Probability on full df before splitting to prevent NaNs
     df = df.copy()
@@ -298,11 +299,15 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
         # Trailing stop-loss logic
         if current_pos > 0:
             extreme_price = max(extreme_price, current_high)
-            if current_close < (extreme_price - (entry_atr * atr_sl_mult)):
+            # Check if the intra-hour LOW breached the stop-loss
+            stop_price = extreme_price - (entry_atr * gmm_atr_mult)
+            if current_low < stop_price:
                 target = 0.0
         elif current_pos < 0:
             extreme_price = min(extreme_price, current_low)
-            if current_close > (extreme_price + (entry_atr * atr_sl_mult)):
+            # Check if the intra-hour HIGH breached the stop-loss
+            stop_price = extreme_price + (entry_atr * breakout_atr_mult)
+            if current_high > stop_price:
                 target = 0.0
         
         # Breakout Short-Exit Logic (Time-Based / New Low Exit)
@@ -364,10 +369,20 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     # 2. Calculate Gross Return based on the scaled position
     test_df['gross_strategy_returns'] = test_df['market_returns'] * test_df['active_position']
 
-    # 3. Calculate Transaction Friction (Fees)
+    # 3. Calculate Transaction Friction (Fees & Slippage)
     # We pay a fee every time the position size changes.
     test_df['position_change'] = test_df['active_position'].diff().abs().fillna(0)
-    test_df['transaction_costs'] = test_df['position_change'] * FEE_PCT
+    
+    # Create an array for dynamic fees
+    dynamic_fees = np.full(len(test_df), FEE_PCT)
+    
+    # Identify stop-loss/exit rows (where active position drops to 0 from a non-zero state)
+    exits = (test_df['active_position'] == 0) & (test_df['active_position'].shift(1).fillna(0) != 0)
+    
+    # Apply a 20 bps penalty (double fee) to exits to account for slippage during volatility
+    dynamic_fees[exits] = FEE_PCT * 2.0 
+    
+    test_df['transaction_costs'] = test_df['position_change'] * dynamic_fees
 
     # 4. Calculate Net Strategy Return
     test_df['strategy_returns'] = test_df['gross_strategy_returns'] - test_df['transaction_costs']

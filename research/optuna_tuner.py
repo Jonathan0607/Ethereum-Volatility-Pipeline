@@ -251,7 +251,8 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     lowest_short_price = float('inf')
     hours_since_new_low = 0
     
-    atr_mult = params.get('atr_sl_mult', 2.5)
+    gmm_atr_mult = params.get('gmm_atr_mult', 2.5)
+    breakout_atr_mult = params.get('breakout_atr_mult', 3.5)
     extreme_price = 0.0
     entry_atr = 0.0
     
@@ -265,11 +266,15 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
         # Trailing stop-loss logic
         if current_pos > 0:
             extreme_price = max(extreme_price, current_high)
-            if current_close < (extreme_price - (entry_atr * atr_mult)):
+            # Check if the intra-hour LOW breached the stop-loss
+            stop_price = extreme_price - (entry_atr * gmm_atr_mult)
+            if current_low < stop_price:
                 target = 0.0
         elif current_pos < 0:
             extreme_price = min(extreme_price, current_low)
-            if current_close > (extreme_price + (entry_atr * atr_mult)):
+            # Check if the intra-hour HIGH breached the stop-loss
+            stop_price = extreme_price + (entry_atr * breakout_atr_mult)
+            if current_high > stop_price:
                 target = 0.0
         
         # Breakout Short-Exit Logic (Time-Based / New Low Exit)
@@ -325,12 +330,21 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     # 6. Calculate Gross Return based on the scaled position
     bt['gross_strategy_returns'] = bt['market_returns'] * bt['active_position']
 
-    # 7. Calculate Transaction Friction (Fees)
+    # 7. Calculate Transaction Friction (Fees & Slippage)
     bt['position_change'] = bt['active_position'].diff().abs().fillna(0)
     
     OPTIMIZER_FEE_PCT = params.get('optimizer_fee_pct', 0.0030)
-    # Calculate transaction costs with the artificial heavy penalty
-    bt['transaction_costs'] = bt['position_change'] * OPTIMIZER_FEE_PCT
+    
+    # Create an array for dynamic fees
+    dynamic_fees = np.full(len(bt), OPTIMIZER_FEE_PCT)
+    
+    # Identify stop-loss/exit rows (where active position drops to 0 from a non-zero state)
+    exits = (bt['active_position'] == 0) & (bt['active_position'].shift(1).fillna(0) != 0)
+    
+    # Apply a double fee penalty to exits to account for slippage during volatility
+    dynamic_fees[exits] = OPTIMIZER_FEE_PCT * 2.0 
+    
+    bt['transaction_costs'] = bt['position_change'] * dynamic_fees
 
     # 8. Calculate Net Strategy Return
     bt['strategy_returns'] = bt['gross_strategy_returns'] - bt['transaction_costs']
@@ -358,7 +372,7 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     
     # PENALTY 1: Hyper-activity
     if normalized_trades > 220:
-        return -5.0
+        return -100.0
         
     # PENALTY 2: Drawdown Violation (Strict Capital Preservation)
     if max_dd < -0.12:
@@ -386,7 +400,8 @@ def objective(trial, test_df):
         'hurst_threshold': trial.suggest_float('hurst_threshold', 0.35, 0.55),
         'hurst_window': trial.suggest_int('hurst_window', 8, 24),
         'cooldown_hours': trial.suggest_int('cooldown_hours', 4, 24),
-        'atr_sl_mult': trial.suggest_float('atr_sl_mult', 1.5, 4.0),
+        'gmm_atr_mult': trial.suggest_float('gmm_atr_mult', 1.5, 4.0),
+        'breakout_atr_mult': trial.suggest_float('breakout_atr_mult', 2.0, 6.0),
         'optimizer_fee_pct': OPTIMIZER_FEE_PCT,
     }
 
@@ -405,7 +420,8 @@ def write_best_params(study, current_params):
     current_params['hurst_threshold']     = float(best['hurst_threshold'])
     current_params['hurst_window']        = int(best['hurst_window'])
     current_params['cooldown_hours']      = int(best['cooldown_hours'])
-    current_params['atr_sl_mult']         = float(best['atr_sl_mult'])
+    current_params['gmm_atr_mult']         = float(best['gmm_atr_mult'])
+    current_params['breakout_atr_mult']    = float(best['breakout_atr_mult'])
 
     with open(PARAMS_PATH, 'w') as f:
         json.dump(current_params, f, indent=2)
