@@ -4,8 +4,6 @@ import sys
 import sqlite3
 import pandas as pd
 import numpy as np
-import torch
-import pickle
 import ast
 import yfinance as yf
 import json
@@ -17,7 +15,6 @@ from pydantic import BaseModel
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from data import calculate_features_test, FEATURE_COLS
-from strategy import ProgressiveModel
 import monte_carlo
 
 app = FastAPI(title="Ethereum Quant Execution Engine")
@@ -73,7 +70,7 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"],
 )
 
-MODEL_STATE = {'model': None, 'feat_scaler': None, 'tgt_scaler': None, 'device': None}
+# Model state variables removed to strip PyTorch memory footprint
 
 class TradingState:
     def __init__(self):
@@ -85,50 +82,7 @@ current_state = TradingState()
 def load_artifacts():
     print("[API] Booting Execution Engine (Volatility-Scaled Sizing)...")
     initialize_database()
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    MODEL_STATE['device'] = device
-
-    # 1. Load Feature Scaler
-    scaler_path = os.path.join(current_dir, '..', 'scaler.pkl')
-    if os.path.exists(scaler_path):
-        with open(scaler_path, 'rb') as f:
-            MODEL_STATE['feat_scaler'] = pickle.load(f)
-    else:
-        mean_path = os.path.join(current_dir, '..', 'scaler_mean.npy')
-        std_path = os.path.join(current_dir, '..', 'scaler_std.npy')
-        if os.path.exists(mean_path) and os.path.exists(std_path):
-            print("   [Scaler] WARNING: Legacy scaler. Retrain to generate scaler.pkl.")
-            MODEL_STATE['feat_scaler'] = {'legacy': True, 'mean': np.load(mean_path), 'std': np.load(std_path)}
-
-    # 2. Load Target Scaler
-    tgt_path = os.path.join(current_dir, '..', 'target_scaler.pkl')
-    if os.path.exists(tgt_path):
-        with open(tgt_path, 'rb') as f:
-            MODEL_STATE['tgt_scaler'] = pickle.load(f)
-
-    # 3. Load ProgressiveModel
-    params_path = os.path.join(current_dir, '..', 'best_params.txt')
-    with open(params_path, 'r') as f:
-        content = f.read()
-        try:
-            params = json.loads(content)
-        except Exception:
-            params = ast.literal_eval(content)
-
-    input_dim = params.get('input_dim', len(FEATURE_COLS))
-    model = ProgressiveModel(
-        input_dim=input_dim, hidden_dim=params.get('hidden_dim', 64),
-        output_dim=1, dropout=params.get('dropout', 0.2)
-    )
-    model.load_state_dict(torch.load(os.path.join(current_dir, '..', 'lstm_model.pth'), map_location=device))
-    model.to(device)
-    model.eval()
-    MODEL_STATE['model'] = model
-
-    print(f"[API] ProgressiveModel loaded (input_dim={input_dim})")
     print(f"[API] TARGET_VOLATILITY = {TARGET_VOLATILITY}")
-
     print("[API] Shadow Mode Daemon active.")
 
 def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0, position_size=0.0, gmm_z_score=0.0, gmm_cluster=1):
