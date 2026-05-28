@@ -7,6 +7,7 @@ import numpy as np
 import ast
 import yfinance as yf
 import json
+import logging
 from arch import arch_model
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,8 +17,13 @@ from pydantic import BaseModel
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from data import calculate_features_test, FEATURE_COLS
 import monte_carlo
+from alpaca_client import AlpacaExecutionClient
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("api")
 
 app = FastAPI(title="Ethereum Quant Execution Engine")
+alpaca_client = AlpacaExecutionClient()
 
 # Volatility-Scaled Sizing
 TARGET_VOLATILITY = 0.06
@@ -354,9 +360,20 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
                   mc_results['lower_bound'], mc_results['upper_bound'], position_size,
                   payload.gmm_z_score, payload.gmm_cluster)
                   
-        return {"status": "Success", "action": action, "position_size": position_size}
+        # Ensure position_size is a safe float between 0 and 1
+        safe_size = max(0.0, min(float(position_size), 1.0))
+        
+        # Fire the live order to Alpaca
+        logger.info(f"ROUTING DECISION: Action={action}, Size={safe_size}")
+        alpaca_client.execute_trade(action=action, target_weight=safe_size, current_price=close_price)
+        
+        return {
+            "status": "success",
+            "action": action,
+            "target_size": safe_size
+        }
     except Exception as e:
-        print(f"[API Webhook Error] Execution failed: {e}")
+        logger.error(f"[API Webhook Error] Execution failed: {e}")
         return {"status": "Error", "message": str(e)}
 
 # --- DASHBOARD ENDPOINTS ---

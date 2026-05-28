@@ -11,4 +11,4 @@ uvicorn
 arch
 optuna
 hmmlearn
-
+alpaca-trade-api
