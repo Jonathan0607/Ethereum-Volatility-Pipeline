@@ -22,7 +22,7 @@ def get_hurst_exponent(ts, max_lag=20):
     poly = np.polyfit(np.log(lags), np.log(tau), 1)
     return poly[0] * 2.0
 TARGET_VOLATILITY = 0.06  # Must match api.py
-FEE_PCT = 0.0  # Fees disabled for backtesting
+FEE_PCT = 0.0010  # Fees enabled for backtesting
 
 def load_data():
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -297,7 +297,10 @@ def calculate_metrics(df, verbose=True):
 
     # Calculate sub-agent contributions and drawdowns
     if 'active_agent' in df.columns:
-        df['trade_owner'] = df['active_agent'].replace('CASH', np.nan).ffill()
+        # Assign ownership strictly when a position is active, then shift and ffill to capture the exit fee
+        df['trade_owner'] = np.nan
+        df.loc[df['position_size'] != 0, 'trade_owner'] = df['active_agent']
+        df['trade_owner'] = df['trade_owner'].shift(1).ffill()
         
         gmm_returns = df.loc[df['trade_owner'] == 'GMM', 'strategy_returns'].sum()
         breakout_returns = df.loc[df['trade_owner'] == 'Breakout', 'strategy_returns'].sum()
