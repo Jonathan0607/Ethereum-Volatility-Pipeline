@@ -163,7 +163,7 @@ def calculate_features(df, train_df=None):
     df = df.copy()
     df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
     df.dropna(inplace=True)
-    print("Fitting Dynamic GARCH(1,1) Model on TRAINING DATA...")
+    # print("Fitting Dynamic GARCH(1,1) Model on TRAINING DATA...")
 
     garch_model = arch_model(df['log_ret'] * 100, vol='Garch', p=1, q=1, mean='Constant', dist='Normal')
     res = garch_model.fit(update_freq=0, disp='off')
@@ -182,10 +182,10 @@ def calculate_features(df, train_df=None):
     # Drop all NaN rows from rolling windows and forward target
     df.dropna(inplace=True)
 
-    print(f"Feature Engineering Complete. Columns: {list(df.columns)}")
-    print(f"   Stationary features: {FEATURE_COLS}")
-    print(f"   Forward target:      fwd_vol_24h")
-    print(f"   Rows after dropna:   {len(df)}")
+    # print(f"Feature Engineering Complete. Columns: {list(df.columns)}")
+    # print(f"   Stationary features: {FEATURE_COLS}")
+    # print(f"   Forward target:      fwd_vol_24h")
+    # print(f"   Rows after dropna:   {len(df)}")
     return df
 
 def calculate_features_test(df):
@@ -211,9 +211,9 @@ def calculate_features_test(df):
     # Drop all NaN rows from rolling windows
     df.dropna(inplace=True)
 
-    print(f"Test Feature Engineering Complete (no GARCH refit).")
-    print(f"   Stationary features: {FEATURE_COLS}")
-    print(f"   Rows after dropna:   {len(df)}")
+    # print(f"Test Feature Engineering Complete (no GARCH refit).")
+    # print(f"   Stationary features: {FEATURE_COLS}")
+    # print(f"   Rows after dropna:   {len(df)}")
     return df
 
 

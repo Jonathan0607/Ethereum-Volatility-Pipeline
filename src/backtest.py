@@ -37,7 +37,7 @@ def get_lstm_predictions(df):
     Generates forward 24h volatility forecasts using the ProgressiveModel
     with 5-feature input and StandardScaler.
     """
-    print("Generating Volatility Forecasts (ProgressiveModel, 5-feature)...")
+    # print("Generating Volatility Forecasts (ProgressiveModel, 5-feature)...")
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -120,7 +120,7 @@ def get_lstm_predictions(df):
     return pd.Series(predictions, index=df.index)
 
 def run_backtest(df, target_volatility=TARGET_VOLATILITY):
-    print("Running Backtest with Volatility-Scaled Sizing...")
+    # print("Running Backtest with Volatility-Scaled Sizing...")
     
     # Load parameters
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -156,13 +156,13 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
                 cached_df = pickle.load(f)
             if cached_df.index[-1] == df.index[-1] and len(cached_df) == len(df):
                 df['prob_high_vol'] = cached_df['prob_high_vol']
-                print("[Cache] Loaded HMM prob_high_vol from cache.")
+                # print("[Cache] Loaded HMM prob_high_vol from cache.")
                 hmm_loaded = True
         except Exception as e:
             print(f"[Cache] Cache load error: {e}. Recomputing...")
             
     if not hmm_loaded:
-        print("Computing rolling HMM high-vol probability (this might take a few minutes if not cached)...")
+        # print("Computing rolling HMM high-vol probability (this might take a few minutes if not cached)...")
         df['prob_high_vol'] = df['close'].rolling(window=500).apply(
             lambda x: get_high_vol_probability(x) if not np.isnan(x).any() else 0.0, raw=True
         )
@@ -170,7 +170,7 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
             with open(cache_path, 'wb') as f:
                 pickle.dump(df[['close', 'prob_high_vol']], f)
-            print("[Cache] Saved computed HMM prob_high_vol to cache.")
+            # print("[Cache] Saved computed HMM prob_high_vol to cache.")
         except Exception as e:
             print(f"[Cache] Save error: {e}")
             
@@ -184,7 +184,7 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     train_df = calculate_features(train_raw, train_df=train_raw)
     test_df = calculate_features_test(test_raw)
 
-    print(f"--- BACKTEST STARTING ON {test_df.index[0]} ---")
+    # print(f"--- BACKTEST STARTING ON {test_df.index[0]} ---")
     test_df['forecasted_vol'] = get_lstm_predictions(test_df)
     test_df['market_returns'] = test_df['close'].pct_change()
 
@@ -258,7 +258,7 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     n_long = (test_df['position_size'] > 0).sum()
     n_short = (test_df['position_size'] < 0).sum()
     n_flat = (test_df['position_size'] == 0).sum()
-    print(f"   [Debug] Sized Positions: LONG={n_long} | SHORT={n_short} | FLAT={n_flat}")
+    # print(f"   [Debug] Sized Positions: LONG={n_long} | SHORT={n_short} | FLAT={n_flat}")
 
     # 1. Shift the position size (because we enter the position at the CLOSE of the signal candle)
     # The 'position_size' column is directional (positive for Long, negative for Short, 0 for Flat)
@@ -320,21 +320,31 @@ def calculate_metrics(df, verbose=True):
     strat_ret = (df['cumulative_strategy'].iloc[-1] - 1) * 100
 
     if verbose:
+        market_return = market_ret / 100
+        strategy_return = strat_ret / 100
+        sharpe_ratio = sharpe
+        gmm_max_dd_val = gmm_max_dd / 100 if 'active_agent' in df.columns else 0.0
+        breakout_max_dd_val = breakout_max_dd / 100 if 'active_agent' in df.columns else 0.0
+
         print("\n=== VOLATILITY-SCALED BACKTEST RESULTS (OUT OF SAMPLE) ===")
-        print(f"Market Return:   {market_ret:.2f}%")
-        print(f"Strategy Return: {strat_ret:.2f}%")
-        print(f"Sharpe Ratio:    {sharpe:.2f}")
+        
+        # Calculate sized positions string (adjust variable names to match your existing dataframe columns)
+        longs = (df['position_size'] > 0).sum()
+        shorts = (df['position_size'] < 0).sum()
+        flat = (df['position_size'] == 0).sum()
+        print(f"Sized Positions: LONG={longs} | SHORT={shorts} | FLAT={flat}")
+        
+        print(f"Market Return:   {market_return * 100:.2f}%")
+        print(f"Strategy Return: {strategy_return * 100:.2f}%")
+        print(f"Sharpe Ratio:    {sharpe_ratio:.2f}")
         print(f"Max Drawdown:    {max_drawdown * 100:.2f}%")
+        
         if 'trade_owner' in df.columns:
-            print(f"GMM Sub-Agent Contribution:      {gmm_returns * 100:.2f}%")
-            print(f"GMM Sub-Agent Max Drawdown:      {gmm_max_dd:.2f}%")
-            print(f"Breakout Sub-Agent Contribution: {breakout_returns * 100:.2f}%")
-            print(f"Breakout Sub-Agent Max Drawdown: {breakout_max_dd:.2f}%")
-        try:
-            target_vol_val = df['position_size'].iloc[-1] # Approximation just for printing if available
-            print(f"Sizing Mode:     Volatility-Scaled")
-        except:
-            pass
+            print("\n=====Sub-Agent PNL========")
+            print(f"GMM  Contribution:      {gmm_returns * 100:.2f}%")
+            print(f"GMM  Max Drawdown:      {gmm_max_dd_val * 100:.2f}%")
+            print(f"Breakout  Contribution: {breakout_returns * 100:.2f}%")
+            print(f"Breakout  Max Drawdown: {breakout_max_dd_val * 100:.2f}%")
 
     return {
         'market_return': round(market_ret, 2),
@@ -364,7 +374,7 @@ def export_json(df, metrics):
     out_path = os.path.join(current_dir, '..', 'backtest_results.json')
     with open(out_path, 'w') as f:
         json.dump(payload, f)
-    print(f"Backtest JSON exported → {out_path}")
+    # print(f"Backtest JSON exported → {out_path}")
 
 def plot_results(df):
     plt.figure(figsize=(12, 6))
@@ -415,10 +425,10 @@ def plot_results(df):
     current_dir = os.path.dirname(os.path.abspath(__file__))
     output_path = os.path.join(current_dir, '..', 'backtest_results.png')
     plt.savefig(output_path, bbox_inches='tight')
-    print(f"Chart saved to {output_path}")
+    # print(f"Chart saved to {output_path}")
 
 def plot_dashboard(df):
-    print("   [Visual] Rendering Final Portfolio Dashboard...")
+    # print("   [Visual] Rendering Final Portfolio Dashboard...")
     
     # Load parameters to get hmm_threshold
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -476,7 +486,7 @@ def plot_dashboard(df):
 
     output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'model_dashboard.png')
     plt.savefig(output_path, dpi=300)
-    print(f"   [Success] Dashboard saved to {output_path}")
+    # print(f"   [Success] Dashboard saved to {output_path}")
 
 def run_visualizer():
     df = load_data()
@@ -492,13 +502,13 @@ def run_visualizer():
                 cached_df = pickle.load(f)
             if cached_df.index[-1] == df.index[-1] and len(cached_df) == len(df):
                 df['prob_high_vol'] = cached_df['prob_high_vol']
-                print("[Cache] Loaded HMM prob_high_vol from cache.")
+                # print("[Cache] Loaded HMM prob_high_vol from cache.")
                 hmm_loaded = True
         except Exception as e:
             print(f"[Cache] Cache load error: {e}. Recomputing...")
             
     if not hmm_loaded:
-        print("Computing rolling HMM high-vol probability...")
+        # print("Computing rolling HMM high-vol probability...")
         df['prob_high_vol'] = df['close'].rolling(window=500).apply(
             lambda x: get_high_vol_probability(x.values) if len(x.dropna()) == 500 else 0.0, raw=True
         )
