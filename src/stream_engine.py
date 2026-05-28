@@ -12,7 +12,7 @@ from datetime import datetime
 
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from strategy import ProgressiveModel, get_gmm_state
+from strategy import ProgressiveModel
 from hmm_engine import get_high_vol_probability
 
 # --- 1. The Cold Start (REST API Seed) ---
@@ -136,14 +136,12 @@ async def stream_ethereum_data():
                             rolling_min = float(min(closes[-breakout_window-1:-1]))
                             
                             prob_high_vol = get_high_vol_probability(closes)
-                            gmm_z_score, gmm_cluster = get_gmm_state(closes)
 
                             print("\n" + "="*60)
                             print(f"🚨 HOURLY REGIME UPDATE 🚨")
                             print(f"   Real-Time Hourly Close: ${current_price:,.2f}")
                             print(f"   LSTM Volatility Forecast (24h): {volatility_forecast:.4%}")
                             print(f"   HMM High-Vol Prob: {prob_high_vol:.4f}")
-                            print(f"   GMM Z-Score: {gmm_z_score:.4f} | Cluster: {gmm_cluster}")
                             print(f"   Vol 24h: {vol_24h:.6f} | Vol 168h: {vol_168h:.6f}")
                             print(f"   Rolling Max ({breakout_window}h): ${rolling_max:,.2f}")
                             print(f"   Rolling Min ({breakout_window}h): ${rolling_min:,.2f}")
@@ -158,8 +156,6 @@ async def stream_ethereum_data():
                                     "prob_high_vol": float(prob_high_vol),
                                     "rolling_max": float(rolling_max),
                                     "rolling_min": float(rolling_min),
-                                    "gmm_z_score": float(gmm_z_score),
-                                    "gmm_cluster": int(gmm_cluster),
                                     "vol_24h": float(vol_24h),
                                     "vol_168h": float(vol_168h),
                                     "closes": [float(c) for c in closes[-24:]]

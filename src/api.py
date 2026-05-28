@@ -9,7 +9,7 @@ import yfinance as yf
 import json
 import logging
 from arch import arch_model
-from fastapi import FastAPI
+from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
 from pydantic import BaseModel
@@ -81,6 +81,9 @@ app.add_middleware(
 class TradingState:
     def __init__(self):
         self.cooldown_until = datetime.min
+        self.current_position = "FLAT"
+        self.position_size = 0.0
+        self.entry_price = 0.0
 
 current_state = TradingState()
 
@@ -90,6 +93,63 @@ def load_artifacts():
     initialize_database()
     print(f"[API] TARGET_VOLATILITY = {TARGET_VOLATILITY}")
     print("[API] Shadow Mode Daemon active.")
+    
+    # State reconciliation from database
+    db_path = get_db_path()
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT action, position_size, execution_price FROM paper_trades ORDER BY timestamp DESC LIMIT 1")
+        last_row = cursor.fetchone()
+        conn.close()
+        
+        if last_row:
+            action, size, price = last_row
+            if action == "SELL_SHORT":
+                current_state.current_position = "SHORT"
+                current_state.position_size = size
+                current_state.entry_price = price
+                print(f"[Startup] Reconciled state: System in active SHORT position (size={size}, entry_price={price})")
+            elif action in ["CASH", "FLAT"]:
+                current_state.current_position = "FLAT"
+                current_state.position_size = 0.0
+                current_state.entry_price = 0.0
+                print("[Startup] Reconciled state: System is FLAT")
+            elif action == "BUY":
+                current_state.current_position = "LONG"
+                current_state.position_size = size
+                current_state.entry_price = price
+                print(f"[Startup] Reconciled state: System in active LONG position (size={size}, entry_price={price})")
+            elif action == "HOLDING":
+                # Find the original open entry trade
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT action, position_size, execution_price FROM paper_trades WHERE status = 'OPEN' ORDER BY timestamp ASC LIMIT 1")
+                open_trade = cursor.fetchone()
+                conn.close()
+                if open_trade:
+                    o_action, o_size, o_price = open_trade
+                    current_state.current_position = "SHORT" if o_action == "SELL_SHORT" else "LONG"
+                    current_state.position_size = o_size
+                    current_state.entry_price = o_price
+                    print(f"[Startup] Reconciled state: System in active {current_state.current_position} (holding, size={o_size}, entry_price={o_price})")
+                else:
+                    current_state.current_position = "FLAT"
+                    current_state.position_size = 0.0
+                    current_state.entry_price = 0.0
+                    print("[Startup] Reconciled state: System is FLAT (no open trade found for HOLDING status)")
+            else:
+                current_state.current_position = "FLAT"
+                current_state.position_size = 0.0
+                current_state.entry_price = 0.0
+                print(f"[Startup] Reconciled state: Unknown/FLAT last action {action}. Defaulting to FLAT")
+        else:
+            current_state.current_position = "FLAT"
+            current_state.position_size = 0.0
+            current_state.entry_price = 0.0
+            print("[Startup] Reconciled state: No prior trades found. System is FLAT")
+    except Exception as e:
+        print(f"[Startup Error] State reconciliation failed: {e}")
 
 def log_trade(action, price, pred_vol, regime, lower_bound=0.0, upper_bound=0.0, position_size=0.0, gmm_z_score=0.0, gmm_cluster=1):
     """Writes execution state to DB and fires Discord alert."""
@@ -211,14 +271,12 @@ class LiveExecutionPayload(BaseModel):
     prob_high_vol: float
     rolling_max: float
     rolling_min: float
-    gmm_z_score: float
-    gmm_cluster: int
     vol_24h: float
     vol_168h: float
     closes: list[float]
 
 @app.post("/execution/live-stream")
-def execute_live_stream_trade(payload: LiveExecutionPayload):
+def execute_live_stream_trade(payload: LiveExecutionPayload, background_tasks: BackgroundTasks):
     """Real-Time Gateway: Triggered instantly by the WebSocket stream aggregator"""
     print(f"\n[{datetime.now()}] Live WebSocket signal received...")
     
@@ -259,25 +317,12 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
             
         hmm_chop_max    = best_params.get('hmm_chop_max', 0.40)
         hmm_trend_min   = best_params.get('hmm_trend_min', 0.60)
-        gmm_z_buy       = best_params.get('gmm_z_buy', -1.5)
-        gmm_z_sell      = best_params.get('gmm_z_sell', 0.5)
         cooldown_hours  = best_params.get('cooldown_hours', 3)
 
-        # Get current position and size from database
-        db_path = get_db_path()
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT execution_price, position_size, timestamp, action FROM paper_trades WHERE status = 'OPEN' ORDER BY timestamp ASC LIMIT 1")
-        open_trade = cursor.fetchone()
-        
-        if open_trade is not None:
-            current_position = "SHORT" if open_trade[3] == 'SELL_SHORT' else "LONG"
-            current_size = open_trade[1]
-        else:
-            current_position = "FLAT"
-            current_size = 0.0
-        
-        conn.close()
+        # Reconcile position and size from in-memory state to avoid DB latency and desync
+        current_position = current_state.current_position
+        current_size = current_state.position_size
+        entry_price = current_state.entry_price
 
         # Gate 3: Hierarchical Execution Routing Logic
         rolling_mean = sum(payload.closes[-24:]) / 24
@@ -293,18 +338,9 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
                 action = "CASH" # Stop out the short
             else: 
                 action = "HOLDING" if current_position == "SHORT" else "CASH" if current_position == "LONG" else "FLAT"
-                
-        elif payload.prob_high_vol < hmm_chop_max and not vol_shock:
-            # Route to GMM (Long Only)
-            if payload.gmm_z_score < gmm_z_buy or payload.gmm_cluster == 0: 
-                action = "BUY"
-            elif payload.gmm_z_score > gmm_z_sell or payload.gmm_cluster == 2: 
-                action = "CASH" # Take profit on the long
-            else: 
-                action = "HOLDING" if current_position == "LONG" else "CASH" if current_position == "SHORT" else "FLAT"
         else:
-            # Transition Zone - Force Cash
-            action = "CASH"
+            # Transition / Chop Zone - Force Cash
+            action = "CASH" if current_position in ["LONG", "SHORT"] else "FLAT"
 
         # Sizing and Rebalance Threshold (Friction Filter)
         daily_forecasted_vol = forecasted_vol * np.sqrt(24)
@@ -339,9 +375,22 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         else:
             position_size = 0.0
 
+        # Update in-memory state based on routing decision
+        if action == "BUY":
+            current_state.current_position = "LONG"
+            current_state.position_size = position_size
+            current_state.entry_price = close_price
+        elif action == "SELL_SHORT":
+            current_state.current_position = "SHORT"
+            current_state.position_size = position_size
+            current_state.entry_price = close_price
+        elif action in ["CASH", "FLAT"]:
+            current_state.current_position = "FLAT"
+            current_state.position_size = 0.0
+            current_state.entry_price = 0.0
+
         # Check Cooldown condition: if we exit and have a realized loss
-        if action == "CASH" and open_trade is not None:
-            entry_price = open_trade[0]
+        if action == "CASH" and current_position != "FLAT":
             if current_position == "LONG" and close_price < entry_price:
                 current_state.cooldown_until = datetime.now() + timedelta(hours=cooldown_hours)
                 print(f"   [COOLDOWN TRIGGERED] Exited LONG at a loss. Cooldown for {cooldown_hours}h.")
@@ -355,17 +404,24 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
             num_sims=10000, steps=24
         )
         
-        # 4. Write to DB and push Discord notification
-        log_trade(action, close_price, float(forecasted_vol), float(payload.prob_high_vol),
-                  mc_results['lower_bound'], mc_results['upper_bound'], position_size,
-                  payload.gmm_z_score, payload.gmm_cluster)
-                  
         # Ensure position_size is a safe float between 0 and 1
         safe_size = max(0.0, min(float(position_size), 1.0))
         
-        # Fire the live order to Alpaca
+        # Fire the live order to Alpaca (Happens first to minimize execution latency)
         logger.info(f"ROUTING DECISION: Action={action}, Size={safe_size}")
         alpaca_client.execute_trade(action=action, target_weight=safe_size, current_price=close_price)
+        
+        # Defer DB write and Discord webhook alerts to a background task
+        background_tasks.add_task(
+            log_trade,
+            action,
+            close_price,
+            float(forecasted_vol),
+            float(payload.prob_high_vol),
+            mc_results['lower_bound'],
+            mc_results['upper_bound'],
+            position_size
+        )
         
         return {
             "status": "success",
