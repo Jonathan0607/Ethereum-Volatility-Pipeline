@@ -180,13 +180,14 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     trend_active = (bt['prob_high_vol'] > params['hmm_trend_min']) | vol_shock
     bt.loc[trend_active & (bt['close'] < bt['rolling_min']), 'signal'] = -1
     
-    # AGENT 2: GMM Mean-Reversion (LONG ONLY)
+    # CHOP REGIME: Force CASH (Avoid negative expectancy friction)
     chop_active = (bt['prob_high_vol'] < params['hmm_chop_max']) & ~vol_shock
-    bt.loc[chop_active & (bt['z_score'] < params['gmm_z_buy']), 'signal'] = 1
+    
+    # Override any GMM signals with 0 (CASH)
+    bt.loc[chop_active, 'signal'] = 0 
     
     # 3. Master Exits
-    # Exit Longs when overbought, Exit Shorts when trend breaks upward
-    bt.loc[chop_active & (bt['z_score'] > params['gmm_z_sell']), 'signal'] = 0
+    # Exit Shorts when trend breaks upward
     bt.loc[trend_active & (bt['close'] > bt['rolling_max']), 'signal'] = 0
     
     # Force Cash in the Transition Zone

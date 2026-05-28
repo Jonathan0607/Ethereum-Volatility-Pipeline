@@ -335,13 +335,8 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
                 action = "HOLDING" if current_position == "SHORT" else "CASH" if current_position == "LONG" else "FLAT"
                 
         elif payload.prob_high_vol < hmm_chop_max and not vol_shock:
-            # Route to GMM (Long Only)
-            if payload.gmm_z_score < gmm_z_buy or payload.gmm_cluster == 0: 
-                action = "BUY"
-            elif payload.gmm_z_score > gmm_z_sell or payload.gmm_cluster == 2: 
-                action = "CASH" # Take profit on the long
-            else: 
-                action = "HOLDING" if current_position == "LONG" else "CASH" if current_position == "SHORT" else "FLAT"
+            # Chop Regime detected. Force CASH to avoid fee bleed.
+            action = "CASH" if current_position != "FLAT" else "FLAT"
         else:
             # Transition Zone - Force Cash
             action = "CASH"

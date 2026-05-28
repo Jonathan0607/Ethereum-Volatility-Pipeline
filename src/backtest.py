@@ -211,13 +211,14 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     trend_active = (test_df['prob_high_vol'] > hmm_trend_min) | vol_shock
     test_df.loc[trend_active & (test_df['close'] < test_df['rolling_min']), 'signal'] = -1
     
-    # AGENT 2: GMM Mean-Reversion (LONG ONLY)
+    # CHOP REGIME: Force CASH (Avoid negative expectancy friction)
     chop_active = (test_df['prob_high_vol'] < hmm_chop_max) & ~vol_shock
-    test_df.loc[chop_active & (test_df['z_score'] < gmm_z_buy), 'signal'] = 1
+    
+    # Override any GMM signals with 0 (CASH)
+    test_df.loc[chop_active, 'signal'] = 0 
     
     # 3. Master Exits
-    # Exit Longs when overbought, Exit Shorts when trend breaks upward
-    test_df.loc[chop_active & (test_df['z_score'] > gmm_z_sell), 'signal'] = 0
+    # Exit Shorts when trend breaks upward
     test_df.loc[trend_active & (test_df['close'] > test_df['rolling_max']), 'signal'] = 0
     
     # Force Cash in the Transition Zone
