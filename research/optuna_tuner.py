@@ -273,10 +273,6 @@ def objective(trial, test_df):
     params = {
         'hmm_chop_max': trial.suggest_float('hmm_chop_max', 0.30, 0.45),
         'hmm_trend_min': trial.suggest_float('hmm_trend_min', 0.55, 0.70),
-        # Force strict extreme oversold entries (2 to 4 standard deviations)
-        'gmm_z_buy': trial.suggest_float('gmm_z_buy', -4.0, -2.0),
-        # Take profit aggressively on the reversion to the mean
-        'gmm_z_sell': trial.suggest_float('gmm_z_sell', -0.5, 1.0),
         'breakout_window': trial.suggest_int('breakout_window', 12, 48),
         'vol_shock_mult': trial.suggest_float('vol_shock_mult', 1.3, 2.0),
         # Allow the rebalance threshold to scale up to 50% to force long-term holds
@@ -292,8 +288,6 @@ def write_best_params(study, current_params):
     current_params['breakout_window'] = int(best['breakout_window'])
     current_params['hmm_chop_max']    = float(best['hmm_chop_max'])
     current_params['hmm_trend_min']   = float(best['hmm_trend_min'])
-    current_params['gmm_z_buy']       = float(best['gmm_z_buy'])
-    current_params['gmm_z_sell']      = float(best['gmm_z_sell'])
     current_params['vol_shock_mult']      = float(best['vol_shock_mult'])
     current_params['rebalance_threshold'] = float(best['rebalance_threshold'])
 
