@@ -398,7 +398,13 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
                     action = "CASH"
 
         # Update extreme price and entry atr state upon transition to non-flat trade or exit
-        if action in ["BUY", "SELL_SHORT"]:
+        is_new_direction = False
+        if action == "BUY" and current_position != "LONG":
+            is_new_direction = True
+        elif action == "SELL_SHORT" and current_position != "SHORT":
+            is_new_direction = True
+
+        if is_new_direction:
             current_state.extreme_price = payload.current_price
             current_state.entry_atr = payload.atr
             print(f"   [STOP STATE INITIALIZED] {action} entry price = {current_state.extreme_price}, ATR = {current_state.entry_atr}")

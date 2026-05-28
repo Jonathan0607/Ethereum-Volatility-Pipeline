@@ -296,10 +296,7 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
         current_atr = atrs[i]
         
         # Trailing stop-loss logic
-        if current_pos == 0 and target != 0:
-            extreme_price = current_close
-            entry_atr = current_atr
-        elif current_pos > 0:
+        if current_pos > 0:
             extreme_price = max(extreme_price, current_high)
             if current_close < (extreme_price - (entry_atr * atr_sl_mult)):
                 target = 0.0
@@ -338,8 +335,19 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
         if np.isnan(target):
             active_positions[i] = current_pos
             continue
+            
+        previous_pos = current_pos
         if target == 0.0 or abs(target - current_pos) > rebalance_threshold:
             current_pos = target
+            
+        # Clean state updates upon entry or regime shifts
+        if current_pos == 0.0:
+            extreme_price = 0.0
+            entry_atr = 0.0
+        elif previous_pos == 0.0 or np.sign(current_pos) != np.sign(previous_pos):
+            extreme_price = current_close
+            entry_atr = current_atr
+            
         active_positions[i] = current_pos
         
     test_df['position_size'] = active_positions
