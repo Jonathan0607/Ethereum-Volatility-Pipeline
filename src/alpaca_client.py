@@ -1,6 +1,6 @@
 import os
 import logging
-from alpaca_trade_api.rest import REST, TimeFrame
+from alpaca_trade_api.rest import REST
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("AlpacaClient")
