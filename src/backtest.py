@@ -22,7 +22,7 @@ def get_hurst_exponent(ts, max_lag=20):
     poly = np.polyfit(np.log(lags), np.log(tau), 1)
     return poly[0] * 2.0
 TARGET_VOLATILITY = 0.06  # Must match api.py
-FEE_PCT = 0.0  # Fees disabled for backtesting
+FEE_PCT = 0.0010  # Fees disabled for backtesting
 
 def load_data():
     current_dir = os.path.dirname(os.path.abspath(__file__))
