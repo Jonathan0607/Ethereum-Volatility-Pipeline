@@ -294,6 +294,28 @@ def calculate_metrics(df, verbose=True):
     drawdown = (cumulative - peak) / peak
     max_drawdown = drawdown.min()
 
+    # Calculate sub-agent contributions and drawdowns
+    if 'active_agent' in df.columns:
+        df['trade_owner'] = df['active_agent'].replace('CASH', np.nan).ffill()
+        
+        gmm_returns = df.loc[df['trade_owner'] == 'GMM', 'strategy_returns'].sum()
+        breakout_returns = df.loc[df['trade_owner'] == 'Breakout', 'strategy_returns'].sum()
+        
+        strat_rets = df['strategy_returns'].fillna(0.0)
+        trade_owners = df['trade_owner'].fillna('CASH')
+        
+        gmm_series = np.where(trade_owners == 'GMM', strat_rets, 0.0)
+        gmm_cum = np.cumprod(1 + gmm_series)
+        gmm_peak = np.maximum.accumulate(gmm_cum)
+        gmm_drawdown = (gmm_cum - gmm_peak) / gmm_peak
+        gmm_max_dd = np.min(gmm_drawdown) * 100
+        
+        breakout_series = np.where(trade_owners == 'Breakout', strat_rets, 0.0)
+        breakout_cum = np.cumprod(1 + breakout_series)
+        breakout_peak = np.maximum.accumulate(breakout_cum)
+        breakout_drawdown = (breakout_cum - breakout_peak) / breakout_peak
+        breakout_max_dd = np.min(breakout_drawdown) * 100
+
     market_ret = (df['cumulative_market'].iloc[-1] - 1) * 100
     strat_ret = (df['cumulative_strategy'].iloc[-1] - 1) * 100
 
@@ -303,6 +325,11 @@ def calculate_metrics(df, verbose=True):
         print(f"Strategy Return: {strat_ret:.2f}%")
         print(f"Sharpe Ratio:    {sharpe:.2f}")
         print(f"Max Drawdown:    {max_drawdown * 100:.2f}%")
+        if 'trade_owner' in df.columns:
+            print(f"GMM Sub-Agent Contribution:      {gmm_returns * 100:.2f}%")
+            print(f"GMM Sub-Agent Max Drawdown:      {gmm_max_dd:.2f}%")
+            print(f"Breakout Sub-Agent Contribution: {breakout_returns * 100:.2f}%")
+            print(f"Breakout Sub-Agent Max Drawdown: {breakout_max_dd:.2f}%")
         try:
             target_vol_val = df['position_size'].iloc[-1] # Approximation just for printing if available
             print(f"Sizing Mode:     Volatility-Scaled")
