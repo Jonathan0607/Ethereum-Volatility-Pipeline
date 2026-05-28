@@ -173,6 +173,29 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     roll_std = bt['close'].rolling(window=20).std()
     bt['z_score'] = (bt['close'] - roll_mean) / (roll_std + 1e-8)
 
+    # Calculate Hurst Exponent (simplified rolling variance ratio or exact calculation)
+    def calculate_hurst(ts):
+        n = len(ts)
+        if n < 6: return 0.5
+        max_lag = min(20, n // 2)
+        if max_lag <= 2:
+            max_lag = 3
+        lags = range(2, max_lag)
+        tau = []
+        valid_lags = []
+        for lag in lags:
+            diff = np.subtract(ts[lag:], ts[:-lag])
+            std = np.std(diff)
+            if std > 0:
+                tau.append(np.sqrt(std))
+                valid_lags.append(lag)
+        if len(valid_lags) < 2:
+            return 0.5
+        poly = np.polyfit(np.log(valid_lags), np.log(tau), 1)
+        return poly[0] * 2.0
+
+    bt['hurst'] = bt['close'].rolling(int(params.get('hurst_window', 48))).apply(calculate_hurst, raw=True)
+
     # 2. Hierarchical Routing
     bt['signal'] = np.nan
     
@@ -180,11 +203,14 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     trend_active = (bt['prob_high_vol'] > params['hmm_trend_min']) | vol_shock
     bt.loc[trend_active & (bt['close'] < bt['rolling_min']), 'signal'] = -1
     
-    # AGENT 2: GMM Mean-Reversion (LONG ONLY + Low Volatility Gate)
+    # AGENT 2: GMM Mean-Reversion (LONG ONLY + Low Vol + Anti-Persistent)
     chop_active = (bt['prob_high_vol'] < params['hmm_chop_max']) & ~vol_shock
     
-    # The GMM can only enter if the current 24h volatility is below the threshold
-    bt.loc[chop_active & (bt['z_score'] < params['gmm_z_buy']) & (bt['vol_24h'] < params.get('gmm_max_vol', 0.020)), 'signal'] = 1
+    # Require Hurst Exponent to be below the anti-persistence threshold
+    gmm_entry_condition = chop_active & (bt['z_score'] < params['gmm_z_buy']) & (bt['hurst'] < params.get('hurst_threshold', 0.45))
+    
+    # Apply conditions to signal array
+    bt.loc[gmm_entry_condition, 'signal'] = 1
     
     # 3. Master Exits
     # Exit Longs when overbought, Exit Shorts when trend breaks upward
@@ -201,14 +227,50 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     base_size = (0.06 / (daily_forecasted_vol + 1e-8)).clip(upper=1.0)
     bt['target_size'] = base_size * bt['signal']
 
-    # 4. Friction Filter (Rebalance Threshold Loop)
+    # 4. Friction Filter & Cooldown Matrix (Rebalance Threshold Loop)
     raw_targets = bt['target_size'].values
+    closes = bt['close'].values
     active_positions = np.zeros(len(raw_targets))
     current_pos = 0.0
     rebalance_thresh = params['rebalance_threshold']
     
+    cooldown_period = int(params.get('cooldown_hours', 11))
+    hours_since_exit = cooldown_period # Start allowed
+    
+    short_duration = 0
+    lowest_short_price = float('inf')
+    hours_since_new_low = 0
+    
     for i in range(len(raw_targets)):
         target = raw_targets[i]
+        
+        # Breakout Short-Exit Logic (Time-Based / New Low Exit)
+        if current_pos < 0:
+            price = closes[i]
+            short_duration += 1
+            if price < lowest_short_price:
+                lowest_short_price = price
+                hours_since_new_low = 0
+            else:
+                hours_since_new_low += 1
+                
+            if hours_since_new_low >= 12:
+                target = 0.0
+        else:
+            short_duration = 0
+            lowest_short_price = float('inf')
+            hours_since_new_low = 0
+            
+        # Cooldown management
+        if current_pos > 0 and target == 0.0:  # Just exited a long
+            hours_since_exit = 0
+        elif current_pos == 0:
+            hours_since_exit += 1
+            
+        # Block GMM entry if in cooldown
+        if target > 0 and hours_since_exit < cooldown_period:
+            target = 0.0
+            
         if np.isnan(target):
             active_positions[i] = current_pos
             continue
@@ -278,12 +340,13 @@ def objective(trial, test_df):
         'gmm_z_buy': trial.suggest_float('gmm_z_buy', -3.0, -1.5),
         # Take profit aggressively on the reversion to the mean
         'gmm_z_sell': trial.suggest_float('gmm_z_sell', -0.5, 1.0),
-        # New parameter: Maximum allowed volatility for GMM to fire
-        'gmm_max_vol': trial.suggest_float('gmm_max_vol', 0.005, 0.020),
         'breakout_window': trial.suggest_int('breakout_window', 12, 48),
         'vol_shock_mult': trial.suggest_float('vol_shock_mult', 1.3, 2.0),
         # Allow the rebalance threshold to scale up to 50% to force long-term holds
         'rebalance_threshold': trial.suggest_float('rebalance_threshold', 0.15, 0.50),
+        'hurst_threshold': trial.suggest_float('hurst_threshold', 0.35, 0.55),
+        'hurst_window': trial.suggest_int('hurst_window', 8, 24),
+        'cooldown_hours': trial.suggest_int('cooldown_hours', 4, 24),
         'optimizer_fee_pct': OPTIMIZER_FEE_PCT,
     }
 
@@ -297,9 +360,11 @@ def write_best_params(study, current_params):
     current_params['hmm_trend_min']   = float(best['hmm_trend_min'])
     current_params['gmm_z_buy']       = float(best['gmm_z_buy'])
     current_params['gmm_z_sell']      = float(best['gmm_z_sell'])
-    current_params['gmm_max_vol']     = float(best['gmm_max_vol'])
     current_params['vol_shock_mult']      = float(best['vol_shock_mult'])
     current_params['rebalance_threshold'] = float(best['rebalance_threshold'])
+    current_params['hurst_threshold']     = float(best['hurst_threshold'])
+    current_params['hurst_window']        = int(best['hurst_window'])
+    current_params['cooldown_hours']      = int(best['cooldown_hours'])
 
     with open(PARAMS_PATH, 'w') as f:
         json.dump(current_params, f, indent=2)

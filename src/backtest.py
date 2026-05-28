@@ -16,10 +16,24 @@ from hmm_engine import get_high_vol_probability
 
 SEQ_LENGTH = 60
 
-def get_hurst_exponent(ts, max_lag=20):
+def get_hurst_exponent(ts):
+    n = len(ts)
+    if n < 6: return 0.5
+    max_lag = min(20, n // 2)
+    if max_lag <= 2:
+        max_lag = 3
     lags = range(2, max_lag)
-    tau = [np.sqrt(np.std(np.subtract(ts[lag:], ts[:-lag]))) for lag in lags]
-    poly = np.polyfit(np.log(lags), np.log(tau), 1)
+    tau = []
+    valid_lags = []
+    for lag in lags:
+        diff = np.subtract(ts[lag:], ts[:-lag])
+        std = np.std(diff)
+        if std > 0:
+            tau.append(np.sqrt(std))
+            valid_lags.append(lag)
+    if len(valid_lags) < 2:
+        return 0.5
+    poly = np.polyfit(np.log(valid_lags), np.log(tau), 1)
     return poly[0] * 2.0
 TARGET_VOLATILITY = 0.06  # Must match api.py
 FEE_PCT = 0.0  # Fees disabled for backtesting
@@ -142,7 +156,9 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     gmm_z_sell      = best_params.get('gmm_z_sell', 0.5)
     vol_shock_mult  = best_params.get('vol_shock_mult', 1.5)
     rebalance_threshold = best_params.get('rebalance_threshold', 0.15)
-    gmm_max_vol     = best_params.get('gmm_max_vol', 0.020)
+    hurst_threshold = best_params.get('hurst_threshold', 0.45)
+    hurst_window    = best_params.get('hurst_window', 48)
+    cooldown_hours  = best_params.get('cooldown_hours', 11)
 
     # Calculate HMM Probability on full df before splitting to prevent NaNs
     df = df.copy()
@@ -205,6 +221,9 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     roll_std = test_df['close'].rolling(window=20).std()
     test_df['z_score'] = (test_df['close'] - roll_mean) / (roll_std + 1e-8)
 
+    # Calculate Hurst Exponent
+    test_df['hurst'] = test_df['close'].rolling(int(hurst_window)).apply(get_hurst_exponent, raw=True)
+
     # Bi-directional HMM/GMM Hierarchical Logic
     test_df['signal'] = np.nan
     
@@ -215,8 +234,8 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     # AGENT 2: GMM Mean-Reversion (LONG ONLY + Low Volatility Gate)
     chop_active = (test_df['prob_high_vol'] < hmm_chop_max) & ~vol_shock
     
-    # The GMM can only enter if the current 24h volatility is below the threshold
-    test_df.loc[chop_active & (test_df['z_score'] < gmm_z_buy) & (test_df['vol_24h'] < gmm_max_vol), 'signal'] = 1
+    # The GMM can only enter if Hurst < hurst_threshold
+    test_df.loc[chop_active & (test_df['z_score'] < gmm_z_buy) & (test_df['hurst'] < hurst_threshold), 'signal'] = 1
     
     # 3. Master Exits
     # Exit Longs when overbought, Exit Shorts when trend breaks upward
@@ -242,13 +261,49 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     base_position_size = uncapped_size.clip(upper=1.0)
     test_df['target_size'] = base_position_size * test_df['signal']
 
-    # 4. Friction Filter (Rebalance Threshold Loop)
+    # 4. Friction Filter & Cooldown Matrix (Rebalance Threshold Loop)
     raw_targets = test_df['target_size'].values
+    closes = test_df['close'].values
     active_positions = np.zeros(len(raw_targets))
     current_pos = 0.0
     
+    cooldown_period = int(cooldown_hours)
+    hours_since_exit = cooldown_period
+    
+    short_duration = 0
+    lowest_short_price = float('inf')
+    hours_since_new_low = 0
+    
     for i in range(len(raw_targets)):
         target = raw_targets[i]
+        
+        # Breakout Short-Exit Logic (Time-Based / New Low Exit)
+        if current_pos < 0:
+            price = closes[i]
+            short_duration += 1
+            if price < lowest_short_price:
+                lowest_short_price = price
+                hours_since_new_low = 0
+            else:
+                hours_since_new_low += 1
+                
+            if hours_since_new_low >= 12:
+                target = 0.0
+        else:
+            short_duration = 0
+            lowest_short_price = float('inf')
+            hours_since_new_low = 0
+            
+        # Cooldown management
+        if current_pos > 0 and target == 0.0:  # Just exited a long GMM position
+            hours_since_exit = 0
+        elif current_pos == 0:
+            hours_since_exit += 1
+            
+        # Block GMM entry if in cooldown
+        if target > 0 and hours_since_exit < cooldown_period:
+            target = 0.0
+            
         if np.isnan(target):
             active_positions[i] = current_pos
             continue

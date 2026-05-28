@@ -64,10 +64,24 @@ with open(target_scaler_path, 'rb') as f:
     target_scaler = pickle.load(f)
 
 
-def get_hurst_exponent(ts, max_lag=20):
+def get_hurst_exponent(ts):
+    n = len(ts)
+    if n < 6: return 0.5
+    max_lag = min(20, n // 2)
+    if max_lag <= 2:
+        max_lag = 3
     lags = range(2, max_lag)
-    tau = [np.sqrt(np.std(np.subtract(ts[lag:], ts[:-lag]))) for lag in lags]
-    poly = np.polyfit(np.log(lags), np.log(tau), 1)
+    tau = []
+    valid_lags = []
+    for lag in lags:
+        diff = np.subtract(ts[lag:], ts[:-lag])
+        std = np.std(diff)
+        if std > 0:
+            tau.append(np.sqrt(std))
+            valid_lags.append(lag)
+    if len(valid_lags) < 2:
+        return 0.5
+    poly = np.polyfit(np.log(valid_lags), np.log(tau), 1)
     return poly[0] * 2.0
 
 # --- 3. The Live WebSocket Stream ---
@@ -132,8 +146,10 @@ async def stream_ethereum_data():
                             volatility_forecast = target_scaler.inverse_transform(output_scaled.cpu().numpy())[0][0]
                             
                             breakout_window = best_params.get('breakout_window', 48)
+                            hurst_window = best_params.get('hurst_window', 48)
                             rolling_max = float(max(closes[-breakout_window-1:-1]))
                             rolling_min = float(min(closes[-breakout_window-1:-1]))
+                            current_hurst = get_hurst_exponent(closes[-hurst_window:])
                             
                             prob_high_vol = get_high_vol_probability(closes)
                             gmm_z_score, gmm_cluster = get_gmm_state(closes)
@@ -142,7 +158,7 @@ async def stream_ethereum_data():
                             print(f"🚨 HOURLY REGIME UPDATE 🚨")
                             print(f"   Real-Time Hourly Close: ${current_price:,.2f}")
                             print(f"   LSTM Volatility Forecast (24h): {volatility_forecast:.4%}")
-                            print(f"   HMM High-Vol Prob: {prob_high_vol:.4f}")
+                            print(f"   HMM High-Vol Prob: {prob_high_vol:.4f} | Hurst: {current_hurst:.4f}")
                             print(f"   GMM Z-Score: {gmm_z_score:.4f} | Cluster: {gmm_cluster}")
                             print(f"   Vol 24h: {vol_24h:.6f} | Vol 168h: {vol_168h:.6f}")
                             print(f"   Rolling Max ({breakout_window}h): ${rolling_max:,.2f}")
@@ -156,6 +172,7 @@ async def stream_ethereum_data():
                                     "current_price": float(current_price),
                                     "forecasted_vol": float(volatility_forecast),
                                     "prob_high_vol": float(prob_high_vol),
+                                    "hurst": float(current_hurst),
                                     "rolling_max": float(rolling_max),
                                     "rolling_min": float(rolling_min),
                                     "gmm_z_score": float(gmm_z_score),

@@ -78,6 +78,7 @@ MODEL_STATE = {'model': None, 'feat_scaler': None, 'tgt_scaler': None, 'device':
 class TradingState:
     def __init__(self):
         self.cooldown_until = datetime.min
+        self.last_exit_time = datetime.min
 
 current_state = TradingState()
 
@@ -249,6 +250,7 @@ class LiveExecutionPayload(BaseModel):
     current_price: float
     forecasted_vol: float
     prob_high_vol: float
+    hurst: float
     rolling_max: float
     rolling_min: float
     gmm_z_score: float
@@ -302,7 +304,7 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         gmm_z_buy       = best_params.get('gmm_z_buy', -1.5)
         gmm_z_sell      = best_params.get('gmm_z_sell', 0.5)
         cooldown_hours  = best_params.get('cooldown_hours', 3)
-        gmm_max_vol     = best_params.get('gmm_max_vol', 0.02)
+        hurst_threshold = best_params.get('hurst_threshold', 0.45)
 
         # Get current position and size from database
         db_path = get_db_path()
@@ -336,8 +338,8 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
                 action = "HOLDING" if current_position == "SHORT" else "CASH" if current_position == "LONG" else "FLAT"
                 
         elif payload.prob_high_vol < hmm_chop_max and not vol_shock:
-            # Route to GMM (Long Only + Volatility Gate)
-            if (payload.gmm_z_score < gmm_z_buy or payload.gmm_cluster == 0) and (payload.vol_24h < gmm_max_vol): 
+            # Route to GMM (Long Only + Hurst Gate)
+            if (payload.gmm_z_score < gmm_z_buy or payload.gmm_cluster == 0) and (payload.hurst < hurst_threshold): 
                 action = "BUY"
             elif payload.gmm_z_score > gmm_z_sell or payload.gmm_cluster == 2: 
                 action = "CASH" # Take profit on the long
@@ -346,6 +348,34 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         else:
             # Transition Zone - Force Cash
             action = "CASH"
+
+        # Apply Breakout Time-Based Exit for Short position
+        if current_position == "SHORT" and open_trade is not None:
+            entry_time = datetime.strptime(open_trade[2], "%Y-%m-%d %H:%M:%S")
+            raw_df_naive = raw_df.copy()
+            if raw_df_naive.index.tz is not None:
+                raw_df_naive.index = raw_df_naive.index.tz_localize(None)
+            closes_since_entry = raw_df_naive.loc[raw_df_naive.index >= entry_time, 'close']
+            # Convert series to list of floats and append current price
+            closes_list = [float(c) for c in closes_since_entry.values] + [float(payload.current_price)]
+            lowest_price = min(closes_list)
+            lowest_price_idx = closes_list.index(lowest_price)
+            hours_since_new_low = len(closes_list) - 1 - lowest_price_idx
+            
+            if hours_since_new_low >= 12:
+                print(f"   [BREAKOUT TIME-BASED EXIT] Short position open for {hours_since_new_low} hours without hitting a new low. Forcing CASH exit.")
+                action = "CASH"
+
+        # Apply Cooldown Matrix for GMM entry
+        if action == "BUY":
+            if current_state.last_exit_time != datetime.min:
+                hours_since_exit = (datetime.now() - current_state.last_exit_time).total_seconds() / 3600.0
+            else:
+                hours_since_exit = float(cooldown_hours)
+                
+            if hours_since_exit < cooldown_hours:
+                print(f"   [GMM COOLDOWN MATRIX VETO] Blocked GMM BUY entry because hours since last exit ({hours_since_exit:.2f}h) is less than cooldown_hours ({cooldown_hours}h).")
+                action = "FLAT"
 
         # Sizing and Rebalance Threshold (Friction Filter)
         daily_forecasted_vol = forecasted_vol * np.sqrt(24)
@@ -383,6 +413,8 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         # Check Cooldown condition: if we exit and have a realized loss
         if action == "CASH" and open_trade is not None:
             entry_price = open_trade[0]
+            current_state.last_exit_time = datetime.now()
+            print(f"   [COOLDOWN STATE] Recorded last_exit_time = {current_state.last_exit_time}")
             if current_position == "LONG" and close_price < entry_price:
                 current_state.cooldown_until = datetime.now() + timedelta(hours=cooldown_hours)
                 print(f"   [COOLDOWN TRIGGERED] Exited LONG at a loss. Cooldown for {cooldown_hours}h.")
