@@ -196,6 +196,13 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
 
     bt['hurst'] = bt['close'].rolling(int(params.get('hurst_window', 48))).apply(calculate_hurst, raw=True)
 
+    # Calculate ATR (14 period)
+    high_low = bt['high'] - bt['low']
+    high_close = np.abs(bt['high'] - bt['close'].shift(1))
+    low_close = np.abs(bt['low'] - bt['close'].shift(1))
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    bt['atr'] = tr.rolling(14).mean()
+
     # 2. Hierarchical Routing
     bt['signal'] = np.nan
     
@@ -230,6 +237,9 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     # 4. Friction Filter & Cooldown Matrix (Rebalance Threshold Loop)
     raw_targets = bt['target_size'].values
     closes = bt['close'].values
+    highs = bt['high'].values
+    lows = bt['low'].values
+    atrs = bt['atr'].fillna(0.0).values
     active_positions = np.zeros(len(raw_targets))
     current_pos = 0.0
     rebalance_thresh = params['rebalance_threshold']
@@ -241,8 +251,29 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     lowest_short_price = float('inf')
     hours_since_new_low = 0
     
+    atr_mult = params.get('atr_sl_mult', 2.5)
+    extreme_price = 0.0
+    entry_atr = 0.0
+    
     for i in range(len(raw_targets)):
         target = raw_targets[i]
+        current_high = highs[i]
+        current_low = lows[i]
+        current_close = closes[i]
+        current_atr = atrs[i]
+        
+        # Trailing stop-loss logic
+        if current_pos == 0 and target != 0:
+            extreme_price = current_close
+            entry_atr = current_atr
+        elif current_pos > 0:
+            extreme_price = max(extreme_price, current_high)
+            if current_close < (extreme_price - (entry_atr * atr_mult)):
+                target = 0.0
+        elif current_pos < 0:
+            extreme_price = min(extreme_price, current_low)
+            if current_close > (extreme_price + (entry_atr * atr_mult)):
+                target = 0.0
         
         # Breakout Short-Exit Logic (Time-Based / New Low Exit)
         if current_pos < 0:
@@ -347,6 +378,7 @@ def objective(trial, test_df):
         'hurst_threshold': trial.suggest_float('hurst_threshold', 0.35, 0.55),
         'hurst_window': trial.suggest_int('hurst_window', 8, 24),
         'cooldown_hours': trial.suggest_int('cooldown_hours', 4, 24),
+        'atr_sl_mult': trial.suggest_float('atr_sl_mult', 1.5, 4.0),
         'optimizer_fee_pct': OPTIMIZER_FEE_PCT,
     }
 
@@ -365,6 +397,7 @@ def write_best_params(study, current_params):
     current_params['hurst_threshold']     = float(best['hurst_threshold'])
     current_params['hurst_window']        = int(best['hurst_window'])
     current_params['cooldown_hours']      = int(best['cooldown_hours'])
+    current_params['atr_sl_mult']         = float(best['atr_sl_mult'])
 
     with open(PARAMS_PATH, 'w') as f:
         json.dump(current_params, f, indent=2)

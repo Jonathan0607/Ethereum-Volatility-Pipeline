@@ -159,6 +159,7 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     hurst_threshold = best_params.get('hurst_threshold', 0.45)
     hurst_window    = best_params.get('hurst_window', 48)
     cooldown_hours  = best_params.get('cooldown_hours', 11)
+    atr_sl_mult     = best_params.get('atr_sl_mult', 2.5)
 
     # Calculate HMM Probability on full df before splitting to prevent NaNs
     df = df.copy()
@@ -224,6 +225,13 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     # Calculate Hurst Exponent
     test_df['hurst'] = test_df['close'].rolling(int(hurst_window)).apply(get_hurst_exponent, raw=True)
 
+    # Calculate ATR (14 period)
+    high_low = test_df['high'] - test_df['low']
+    high_close = np.abs(test_df['high'] - test_df['close'].shift(1))
+    low_close = np.abs(test_df['low'] - test_df['close'].shift(1))
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    test_df['atr'] = tr.rolling(14).mean()
+
     # Bi-directional HMM/GMM Hierarchical Logic
     test_df['signal'] = np.nan
     
@@ -264,6 +272,9 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     # 4. Friction Filter & Cooldown Matrix (Rebalance Threshold Loop)
     raw_targets = test_df['target_size'].values
     closes = test_df['close'].values
+    highs = test_df['high'].values
+    lows = test_df['low'].values
+    atrs = test_df['atr'].fillna(0.0).values
     active_positions = np.zeros(len(raw_targets))
     current_pos = 0.0
     
@@ -274,8 +285,28 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     lowest_short_price = float('inf')
     hours_since_new_low = 0
     
+    extreme_price = 0.0
+    entry_atr = 0.0
+    
     for i in range(len(raw_targets)):
         target = raw_targets[i]
+        current_high = highs[i]
+        current_low = lows[i]
+        current_close = closes[i]
+        current_atr = atrs[i]
+        
+        # Trailing stop-loss logic
+        if current_pos == 0 and target != 0:
+            extreme_price = current_close
+            entry_atr = current_atr
+        elif current_pos > 0:
+            extreme_price = max(extreme_price, current_high)
+            if current_close < (extreme_price - (entry_atr * atr_sl_mult)):
+                target = 0.0
+        elif current_pos < 0:
+            extreme_price = min(extreme_price, current_low)
+            if current_close > (extreme_price + (entry_atr * atr_sl_mult)):
+                target = 0.0
         
         # Breakout Short-Exit Logic (Time-Based / New Low Exit)
         if current_pos < 0:

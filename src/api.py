@@ -79,6 +79,8 @@ class TradingState:
     def __init__(self):
         self.cooldown_until = datetime.min
         self.last_exit_time = datetime.min
+        self.extreme_price = 0.0
+        self.entry_atr = 0.0
 
 current_state = TradingState()
 
@@ -251,6 +253,9 @@ class LiveExecutionPayload(BaseModel):
     forecasted_vol: float
     prob_high_vol: float
     hurst: float
+    atr: float
+    high: float
+    low: float
     rolling_max: float
     rolling_min: float
     gmm_z_score: float
@@ -305,6 +310,7 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         gmm_z_sell      = best_params.get('gmm_z_sell', 0.5)
         cooldown_hours  = best_params.get('cooldown_hours', 3)
         hurst_threshold = best_params.get('hurst_threshold', 0.45)
+        atr_sl_mult     = best_params.get('atr_sl_mult', 2.5)
 
         # Get current position and size from database
         db_path = get_db_path()
@@ -322,49 +328,84 @@ def execute_live_stream_trade(payload: LiveExecutionPayload):
         
         conn.close()
 
-        # Gate 3: Hierarchical Execution Routing Logic
-        rolling_mean = sum(payload.closes[-24:]) / 24
-        
-        # Volatility Shock Meta-Controller Bypass
-        vol_shock = payload.vol_24h > (payload.vol_168h * best_params.get('vol_shock_mult', 1.5))
+        # Check Trailing Stop
+        trailing_stop_hit = False
+        if current_position == "LONG":
+            if current_state.extreme_price == 0.0:
+                current_state.extreme_price = payload.current_price
+                current_state.entry_atr = payload.atr
+            current_state.extreme_price = max(current_state.extreme_price, payload.high)
+            if payload.current_price < (current_state.extreme_price - (current_state.entry_atr * atr_sl_mult)):
+                trailing_stop_hit = True
+                print(f"   [ATR TRAILING STOP TRIGGERED] Price {payload.current_price} < {current_state.extreme_price} - {current_state.entry_atr} * {atr_sl_mult}")
+        elif current_position == "SHORT":
+            if current_state.extreme_price == 0.0:
+                current_state.extreme_price = payload.current_price
+                current_state.entry_atr = payload.atr
+            current_state.extreme_price = min(current_state.extreme_price, payload.low)
+            if payload.current_price > (current_state.extreme_price + (current_state.entry_atr * atr_sl_mult)):
+                trailing_stop_hit = True
+                print(f"   [ATR TRAILING STOP TRIGGERED] Price {payload.current_price} > {current_state.extreme_price} + {current_state.entry_atr} * {atr_sl_mult}")
 
-        if payload.prob_high_vol > hmm_trend_min or vol_shock:
-            # Route to Breakout (Short Only)
-            if payload.current_price < payload.rolling_min: 
-                action = "SELL_SHORT"
-            elif payload.current_price > payload.rolling_max and current_position == "SHORT":
-                action = "CASH" # Stop out the short
-            else: 
-                action = "HOLDING" if current_position == "SHORT" else "CASH" if current_position == "LONG" else "FLAT"
-                
-        elif payload.prob_high_vol < hmm_chop_max and not vol_shock:
-            # Route to GMM (Long Only + Hurst Gate)
-            if (payload.gmm_z_score < gmm_z_buy or payload.gmm_cluster == 0) and (payload.hurst < hurst_threshold): 
-                action = "BUY"
-            elif payload.gmm_z_score > gmm_z_sell or payload.gmm_cluster == 2: 
-                action = "CASH" # Take profit on the long
-            else: 
-                action = "HOLDING" if current_position == "LONG" else "CASH" if current_position == "SHORT" else "FLAT"
-        else:
-            # Transition Zone - Force Cash
+        if trailing_stop_hit:
+            print("   [TRAILING STOP VETO] Forcing CASH action and resetting stop tracking.")
             action = "CASH"
-
-        # Apply Breakout Time-Based Exit for Short position
-        if current_position == "SHORT" and open_trade is not None:
-            entry_time = datetime.strptime(open_trade[2], "%Y-%m-%d %H:%M:%S")
-            raw_df_naive = raw_df.copy()
-            if raw_df_naive.index.tz is not None:
-                raw_df_naive.index = raw_df_naive.index.tz_localize(None)
-            closes_since_entry = raw_df_naive.loc[raw_df_naive.index >= entry_time, 'close']
-            # Convert series to list of floats and append current price
-            closes_list = [float(c) for c in closes_since_entry.values] + [float(payload.current_price)]
-            lowest_price = min(closes_list)
-            lowest_price_idx = closes_list.index(lowest_price)
-            hours_since_new_low = len(closes_list) - 1 - lowest_price_idx
+            current_state.extreme_price = 0.0
+            current_state.entry_atr = 0.0
+        else:
+            # Gate 3: Hierarchical Execution Routing Logic
+            rolling_mean = sum(payload.closes[-24:]) / 24
             
-            if hours_since_new_low >= 12:
-                print(f"   [BREAKOUT TIME-BASED EXIT] Short position open for {hours_since_new_low} hours without hitting a new low. Forcing CASH exit.")
+            # Volatility Shock Meta-Controller Bypass
+            vol_shock = payload.vol_24h > (payload.vol_168h * best_params.get('vol_shock_mult', 1.5))
+
+            if payload.prob_high_vol > hmm_trend_min or vol_shock:
+                # Route to Breakout (Short Only)
+                if payload.current_price < payload.rolling_min: 
+                    action = "SELL_SHORT"
+                elif payload.current_price > payload.rolling_max and current_position == "SHORT":
+                    action = "CASH" # Stop out the short
+                else: 
+                    action = "HOLDING" if current_position == "SHORT" else "CASH" if current_position == "LONG" else "FLAT"
+                    
+            elif payload.prob_high_vol < hmm_chop_max and not vol_shock:
+                # Route to GMM (Long Only + Hurst Gate)
+                if (payload.gmm_z_score < gmm_z_buy or payload.gmm_cluster == 0) and (payload.hurst < hurst_threshold): 
+                    action = "BUY"
+                elif payload.gmm_z_score > gmm_z_sell or payload.gmm_cluster == 2: 
+                    action = "CASH" # Take profit on the long
+                else: 
+                    action = "HOLDING" if current_position == "LONG" else "CASH" if current_position == "SHORT" else "FLAT"
+            else:
+                # Transition Zone - Force Cash
                 action = "CASH"
+
+            # Apply Breakout Time-Based Exit for Short position
+            if current_position == "SHORT" and open_trade is not None:
+                entry_time = datetime.strptime(open_trade[2], "%Y-%m-%d %H:%M:%S")
+                raw_df_naive = raw_df.copy()
+                if raw_df_naive.index.tz is not None:
+                    raw_df_naive.index = raw_df_naive.index.tz_localize(None)
+                closes_since_entry = raw_df_naive.loc[raw_df_naive.index >= entry_time, 'close']
+                # Convert series to list of floats and append current price
+                closes_list = [float(c) for c in closes_since_entry.values] + [float(payload.current_price)]
+                lowest_price = min(closes_list)
+                lowest_price_idx = closes_list.index(lowest_price)
+                hours_since_new_low = len(closes_list) - 1 - lowest_price_idx
+                
+                if hours_since_new_low >= 12:
+                    print(f"   [BREAKOUT TIME-BASED EXIT] Short position open for {hours_since_new_low} hours without hitting a new low. Forcing CASH exit.")
+                    action = "CASH"
+
+        # Update extreme price and entry atr state upon transition to non-flat trade or exit
+        if action in ["BUY", "SELL_SHORT"]:
+            current_state.extreme_price = payload.current_price
+            current_state.entry_atr = payload.atr
+            print(f"   [STOP STATE INITIALIZED] {action} entry price = {current_state.extreme_price}, ATR = {current_state.entry_atr}")
+        elif action == "CASH":
+            current_state.extreme_price = 0.0
+            current_state.entry_atr = 0.0
+            print("   [STOP STATE RESET] Position exited to CASH.")
 
         # Apply Cooldown Matrix for GMM entry
         if action == "BUY":

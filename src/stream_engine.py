@@ -145,6 +145,31 @@ async def stream_ethereum_data():
                                 
                             volatility_forecast = target_scaler.inverse_transform(output_scaled.cpu().numpy())[0][0]
                             
+                            # Fetch 15 candles to calculate standard 14-period ATR and hourly extremes
+                            atr_url = "https://api.binance.us/api/v3/klines?symbol=ETHUSDT&interval=1h&limit=15"
+                            req_atr = urllib.request.Request(atr_url, headers={'User-Agent': 'Mozilla/5.0'})
+                            try:
+                                with urllib.request.urlopen(req_atr) as resp_atr:
+                                    kline_atr = json.loads(resp_atr.read().decode())
+                                    closes_atr = [float(k[4]) for k in kline_atr]
+                                    highs_atr = [float(k[2]) for k in kline_atr]
+                                    lows_atr = [float(k[3]) for k in kline_atr]
+                                    
+                                    trs = []
+                                    for idx in range(1, len(kline_atr)):
+                                        hl = highs_atr[idx] - lows_atr[idx]
+                                        hc = abs(highs_atr[idx] - closes_atr[idx-1])
+                                        lc = abs(lows_atr[idx] - closes_atr[idx-1])
+                                        trs.append(max(hl, hc, lc))
+                                    current_atr = float(np.mean(trs))
+                                    latest_high = highs_atr[-1]
+                                    latest_low = lows_atr[-1]
+                            except Exception as e:
+                                print(f"[!] Error calculating live ATR: {e}")
+                                current_atr = 0.0
+                                latest_high = float(current_price)
+                                latest_low = float(current_price)
+
                             breakout_window = best_params.get('breakout_window', 48)
                             hurst_window = best_params.get('hurst_window', 48)
                             rolling_max = float(max(closes[-breakout_window-1:-1]))
@@ -158,7 +183,7 @@ async def stream_ethereum_data():
                             print(f"🚨 HOURLY REGIME UPDATE 🚨")
                             print(f"   Real-Time Hourly Close: ${current_price:,.2f}")
                             print(f"   LSTM Volatility Forecast (24h): {volatility_forecast:.4%}")
-                            print(f"   HMM High-Vol Prob: {prob_high_vol:.4f} | Hurst: {current_hurst:.4f}")
+                            print(f"   HMM High-Vol Prob: {prob_high_vol:.4f} | Hurst: {current_hurst:.4f} | ATR: {current_atr:.4f}")
                             print(f"   GMM Z-Score: {gmm_z_score:.4f} | Cluster: {gmm_cluster}")
                             print(f"   Vol 24h: {vol_24h:.6f} | Vol 168h: {vol_168h:.6f}")
                             print(f"   Rolling Max ({breakout_window}h): ${rolling_max:,.2f}")
@@ -173,6 +198,9 @@ async def stream_ethereum_data():
                                     "forecasted_vol": float(volatility_forecast),
                                     "prob_high_vol": float(prob_high_vol),
                                     "hurst": float(current_hurst),
+                                    "atr": float(current_atr),
+                                    "high": float(latest_high),
+                                    "low": float(latest_low),
                                     "rolling_max": float(rolling_max),
                                     "rolling_min": float(rolling_min),
                                     "gmm_z_score": float(gmm_z_score),
