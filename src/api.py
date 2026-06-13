@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from data import calculate_features_test, FEATURE_COLS
+from strategy import get_gmm_state
 import monte_carlo
 from alpaca_client import AlpacaExecutionClient
 
@@ -84,6 +85,8 @@ class TradingState:
         self.current_position = "FLAT"
         self.position_size = 0.0
         self.entry_price = 0.0
+        self.s_breakout = 0.0
+        self.s_gmm = 0.0
 
 current_state = TradingState()
 
@@ -109,16 +112,22 @@ def load_artifacts():
                 current_state.current_position = "SHORT"
                 current_state.position_size = size
                 current_state.entry_price = price
+                current_state.s_breakout = -1.0
+                current_state.s_gmm = 0.0
                 print(f"[Startup] Reconciled state: System in active SHORT position (size={size}, entry_price={price})")
             elif action in ["CASH", "FLAT"]:
                 current_state.current_position = "FLAT"
                 current_state.position_size = 0.0
                 current_state.entry_price = 0.0
+                current_state.s_breakout = 0.0
+                current_state.s_gmm = 0.0
                 print("[Startup] Reconciled state: System is FLAT")
             elif action == "BUY":
                 current_state.current_position = "LONG"
                 current_state.position_size = size
                 current_state.entry_price = price
+                current_state.s_breakout = 0.0
+                current_state.s_gmm = 1.0
                 print(f"[Startup] Reconciled state: System in active LONG position (size={size}, entry_price={price})")
             elif action == "HOLDING":
                 # Find the original open entry trade
@@ -132,21 +141,33 @@ def load_artifacts():
                     current_state.current_position = "SHORT" if o_action == "SELL_SHORT" else "LONG"
                     current_state.position_size = o_size
                     current_state.entry_price = o_price
+                    if current_state.current_position == "SHORT":
+                        current_state.s_breakout = -1.0
+                        current_state.s_gmm = 0.0
+                    else:
+                        current_state.s_breakout = 0.0
+                        current_state.s_gmm = 1.0
                     print(f"[Startup] Reconciled state: System in active {current_state.current_position} (holding, size={o_size}, entry_price={o_price})")
                 else:
                     current_state.current_position = "FLAT"
                     current_state.position_size = 0.0
                     current_state.entry_price = 0.0
+                    current_state.s_breakout = 0.0
+                    current_state.s_gmm = 0.0
                     print("[Startup] Reconciled state: System is FLAT (no open trade found for HOLDING status)")
             else:
                 current_state.current_position = "FLAT"
                 current_state.position_size = 0.0
                 current_state.entry_price = 0.0
+                current_state.s_breakout = 0.0
+                current_state.s_gmm = 0.0
                 print(f"[Startup] Reconciled state: Unknown/FLAT last action {action}. Defaulting to FLAT")
         else:
             current_state.current_position = "FLAT"
             current_state.position_size = 0.0
             current_state.entry_price = 0.0
+            current_state.s_breakout = 0.0
+            current_state.s_gmm = 0.0
             print("[Startup] Reconciled state: No prior trades found. System is FLAT")
     except Exception as e:
         print(f"[Startup Error] State reconciliation failed: {e}")
@@ -324,28 +345,37 @@ def execute_live_stream_trade(payload: LiveExecutionPayload, background_tasks: B
         current_size = current_state.position_size
         entry_price = current_state.entry_price
 
-        # Gate 3: Hierarchical Execution Routing Logic
-        rolling_mean = sum(payload.closes[-24:]) / 24
-        
-        # Volatility Shock Meta-Controller Bypass
+        # Calculate GMM state
+        gmm_z_score, gmm_cluster = get_gmm_state(payload.closes)
+
+        # 1. Independent Sub-Agent Triggers (Stateful)
+        # S_breakout logic
+        if close_price < payload.rolling_min:
+            current_state.s_breakout = -1.0
+        elif close_price > payload.rolling_max:
+            current_state.s_breakout = 0.0
+
+        # S_gmm logic
+        gmm_z_buy = best_params.get('gmm_z_buy', -1.5)
+        gmm_z_sell = best_params.get('gmm_z_sell', 0.5)
+        if gmm_z_score < gmm_z_buy:
+            current_state.s_gmm = 1.0
+        elif gmm_z_score > gmm_z_sell:
+            current_state.s_gmm = 0.0
+
+        # 2. Dynamic Weighting Math
         vol_shock = payload.vol_24h > (payload.vol_168h * best_params.get('vol_shock_mult', 1.5))
+        p = 1.0 if vol_shock else payload.prob_high_vol
+        w_breakout = p ** 2
+        w_gmm = 1.0 - w_breakout
 
-        if payload.prob_high_vol > hmm_trend_min or vol_shock:
-            # Route to Breakout (Short Only)
-            if payload.current_price < payload.rolling_min: 
-                action = "SELL_SHORT"
-            elif payload.current_price > payload.rolling_max and current_position == "SHORT":
-                action = "CASH" # Stop out the short
-            else: 
-                action = "HOLDING" if current_position == "SHORT" else "CASH" if current_position == "LONG" else "FLAT"
-        else:
-            # Transition / Chop Zone - Force Cash
-            action = "CASH" if current_position in ["LONG", "SHORT"] else "FLAT"
+        # 3. Target Position Formula (Blended & Scaled)
+        raw_target = (w_breakout * current_state.s_breakout) + (w_gmm * current_state.s_gmm)
 
-        # Sizing and Rebalance Threshold (Friction Filter)
         daily_forecasted_vol = forecasted_vol * np.sqrt(24)
-        ideal_size = min(TARGET_VOLATILITY / (daily_forecasted_vol + 1e-8), 1.0)
-        
+        vol_scaler = TARGET_VOLATILITY / (daily_forecasted_vol + 1e-8)
+        ideal_size = np.clip(raw_target * vol_scaler, -1.0, 1.0)
+
         # Define current signed position size
         if current_position == "LONG":
             current_position_size = current_size
@@ -354,25 +384,31 @@ def execute_live_stream_trade(payload: LiveExecutionPayload, background_tasks: B
         else:
             current_position_size = 0.0
 
-        # Define target signed position size based on action
-        if action == "BUY":
-            target_position_size = ideal_size
-        elif action == "SELL_SHORT":
-            target_position_size = -ideal_size
-        elif action in ["CASH", "FLAT"]:
-            target_position_size = 0.0
-        else: # HOLDING
-            target_position_size = current_position_size
-
         # Apply Friction Filter (Rebalance Threshold)
         rebalance_threshold = best_params.get('rebalance_threshold', 0.15)
-        if action != "CASH" and abs(target_position_size - current_position_size) < rebalance_threshold:
-            action = "HOLDING" if current_position in ["LONG", "SHORT"] else "FLAT"
-
-        # Now set actual position_size for DB and return
-        if action in ["BUY", "SELL_SHORT", "HOLDING"]:
-            position_size = ideal_size
+        if ideal_size == 0.0 or abs(ideal_size - current_position_size) > rebalance_threshold:
+            target_position_size = ideal_size
         else:
+            target_position_size = current_position_size
+
+        # Map target_position_size to action and position_size
+        if target_position_size > 0.0:
+            if target_position_size == current_position_size:
+                action = "HOLDING"
+            else:
+                action = "BUY"
+            position_size = target_position_size
+        elif target_position_size < 0.0:
+            if target_position_size == current_position_size:
+                action = "HOLDING"
+            else:
+                action = "SELL_SHORT"
+            position_size = abs(target_position_size)
+        else: # target_position_size == 0.0
+            if current_position != "FLAT":
+                action = "CASH"
+            else:
+                action = "FLAT"
             position_size = 0.0
 
         # Update in-memory state based on routing decision
@@ -420,7 +456,9 @@ def execute_live_stream_trade(payload: LiveExecutionPayload, background_tasks: B
             float(payload.prob_high_vol),
             mc_results['lower_bound'],
             mc_results['upper_bound'],
-            position_size
+            position_size,
+            float(gmm_z_score),
+            int(gmm_cluster)
         )
         
         return {
@@ -435,7 +473,7 @@ def execute_live_stream_trade(payload: LiveExecutionPayload, background_tasks: B
 # --- DASHBOARD ENDPOINTS ---
 @app.get("/")
 def health_check():
-    return {"status": "Online", "engine": "ProgressiveModel", "sizing": "Volatility-Scaled"}
+    return {"status": "Online", "engine": "HMM-GMM-Dual-Engine", "sizing": "Volatility-Scaled"}
 
 @app.get("/latest-state")
 def get_latest_state():

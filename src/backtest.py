@@ -5,13 +5,16 @@ import matplotlib.dates as mdates
 import json
 import os
 import sys
-import torch
 import ast
 import pickle
+import logging
+
+# Tell hmmlearn to shut up unless it's a fatal error
+logging.getLogger("hmmlearn").setLevel(logging.WARNING)
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from data import calculate_features, calculate_features_test, split_data, FEATURE_COLS
-from strategy import ProgressiveModel, get_gmm_state
+from strategy import get_gmm_state
 from hmm_engine import get_high_vol_probability
 
 SEQ_LENGTH = 60
@@ -32,93 +35,6 @@ def load_data():
     df = pd.read_csv(data_path, parse_dates=['timestamp'], index_col='timestamp')
     return df
 
-def get_lstm_predictions(df):
-    """
-    Generates forward 24h volatility forecasts using the ProgressiveModel
-    with 5-feature input and StandardScaler.
-    """
-    # print("Generating Volatility Forecasts (ProgressiveModel, 5-feature)...")
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-
-    params_path = os.path.join(current_dir, '..', 'best_params.txt')
-    hidden_dim, dropout = 64, 0.2
-    input_dim = len(FEATURE_COLS)
-
-    if os.path.exists(params_path):
-        with open(params_path, 'r') as f:
-            content = f.read()
-            try:
-                params = json.loads(content)
-            except Exception:
-                params = ast.literal_eval(content)
-            hidden_dim = params.get('hidden_dim', 64)
-            dropout = params.get('dropout', 0.2)
-            input_dim = params.get('input_dim', len(FEATURE_COLS))
-
-    model = ProgressiveModel(input_dim=input_dim, hidden_dim=hidden_dim, output_dim=1, dropout=dropout)
-    model_path = os.path.join(current_dir, '..', 'lstm_model.pth')
-
-    if not os.path.exists(model_path):
-        print("   [WARNING] Model not found. Returning flat line.")
-        return pd.Series(0, index=df.index)
-
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.to(device)
-    model.eval()
-
-    # Load scalers
-    scaler_path = os.path.join(current_dir, '..', 'scaler.pkl')
-    tgt_scaler_path = os.path.join(current_dir, '..', 'target_scaler.pkl')
-
-    if os.path.exists(scaler_path):
-        with open(scaler_path, 'rb') as f:
-            feat_scaler = pickle.load(f)
-    else:
-        print("   [WARNING] scaler.pkl not found! Using raw features.")
-        feat_scaler = None
-
-    tgt_scaler = None
-    if os.path.exists(tgt_scaler_path):
-        with open(tgt_scaler_path, 'rb') as f:
-            tgt_scaler = pickle.load(f)
-
-    # Extract and scale features
-    feature_data = df[FEATURE_COLS].values.astype(np.float32)
-
-    if feat_scaler is not None:
-        feature_scaled = feat_scaler.transform(feature_data)
-    else:
-        feature_scaled = feature_data
-
-    predictions = [np.nan] * SEQ_LENGTH
-    inputs = []
-
-    for i in range(len(feature_scaled) - SEQ_LENGTH):
-        inputs.append(feature_scaled[i:i + SEQ_LENGTH])
-
-    if len(inputs) == 0:
-        return pd.Series(0, index=df.index)
-
-    inputs = np.array(inputs)  # [N, 60, 5]
-    inputs = torch.from_numpy(inputs).to(device)
-
-    batch_size = 1024
-    with torch.no_grad():
-        for i in range(0, len(inputs), batch_size):
-            batch = inputs[i:i + batch_size]
-            output = model(batch)
-            preds_scaled = output.cpu().numpy().flatten()
-
-            if tgt_scaler is not None:
-                preds = tgt_scaler.inverse_transform(preds_scaled.reshape(-1, 1)).flatten()
-            else:
-                preds = preds_scaled
-
-            predictions.extend(preds)
-
-    return pd.Series(predictions, index=df.index)
-
 def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     # print("Running Backtest with Volatility-Scaled Sizing...")
     
@@ -135,7 +51,8 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     else:
         best_params = {}
         
-    breakout_window = best_params.get('breakout_window', 48)
+    rolling_min_window = best_params.get('rolling_min_window', 48)
+    rolling_max_window = best_params.get('rolling_max_window', 48)
     hmm_chop_max    = best_params.get('hmm_chop_max', 0.40)
     hmm_trend_min   = best_params.get('hmm_trend_min', 0.60)
     gmm_z_buy       = best_params.get('gmm_z_buy', -1.5)
@@ -182,21 +99,21 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
         raise ValueError("Test set is empty!")
 
     train_df = calculate_features(train_raw, train_df=train_raw)
-    test_df = calculate_features_test(test_raw)
+    test_df = calculate_features_test(test_raw, train_df=train_raw)
 
     # print(f"--- BACKTEST STARTING ON {test_df.index[0]} ---")
-    test_df['forecasted_vol'] = get_lstm_predictions(test_df)
     test_df['market_returns'] = test_df['close'].pct_change()
-
-    # Compression Breakout Filters
-    test_df['rolling_max'] = test_df['close'].rolling(window=breakout_window).max().shift(1)
-    test_df['rolling_min'] = test_df['close'].rolling(window=breakout_window).min().shift(1)
-    test_df['rolling_mean'] = test_df['close'].rolling(window=24).mean()
-    
-    # Realized Volatility Overlay (Circuit Breaker)
     test_df['log_ret'] = np.log(test_df['close'] / test_df['close'].shift(1))
     test_df['vol_24h'] = test_df['log_ret'].rolling(24).std()
     test_df['vol_168h'] = test_df['log_ret'].rolling(168).std()
+    
+    test_df['forecasted_vol'] = test_df['vol_24h']
+
+    # Compression Breakout Filters
+    test_df['rolling_max'] = test_df['close'].rolling(window=rolling_max_window).max().shift(1)
+    test_df['rolling_min'] = test_df['close'].rolling(window=rolling_min_window).min().shift(1)
+    test_df['rolling_mean'] = test_df['close'].rolling(window=24).mean()
+    
     vol_shock = (test_df['vol_24h'] > (test_df['vol_168h'] * vol_shock_mult)).fillna(False)
 
     # Fast Z-Score
@@ -204,40 +121,72 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     roll_std = test_df['close'].rolling(window=20).std()
     test_df['z_score'] = (test_df['close'] - roll_mean) / (roll_std + 1e-8)
 
-    # Bi-directional HMM/GMM Hierarchical Logic
-    test_df['signal'] = np.nan
+    # 1. Evaluate BOTH sub-agents independently on every tick (stateful)
+    s_breakout_arr = np.zeros(len(test_df))
+    s_gmm_arr = np.zeros(len(test_df))
     
-    # AGENT 1: Breakout Sub-Agent (SHORT ONLY)
-    trend_active = (test_df['prob_high_vol'] > hmm_trend_min) | vol_shock
-    test_df.loc[trend_active & (test_df['close'] < test_df['rolling_min']), 'signal'] = -1
+    current_s_breakout = 0.0
+    current_s_gmm = 0.0
     
-    # AGENT 2: GMM Mean-Reversion (LONG ONLY)
-    chop_active = (test_df['prob_high_vol'] < hmm_chop_max) & ~vol_shock
-    test_df.loc[chop_active & (test_df['z_score'] < gmm_z_buy), 'signal'] = 1
+    closes = test_df['close'].values
+    rolling_mins = test_df['rolling_min'].values
+    rolling_maxs = test_df['rolling_max'].values
+    z_scores = test_df['z_score'].values
     
-    # 3. Master Exits
-    # Exit Longs when overbought, Exit Shorts when trend breaks upward
-    test_df.loc[chop_active & (test_df['z_score'] > gmm_z_sell), 'signal'] = 0
-    test_df.loc[trend_active & (test_df['close'] > test_df['rolling_max']), 'signal'] = 0
-    
-    # Force Cash in the Transition Zone
-    test_df.loc[(test_df['prob_high_vol'] >= hmm_chop_max) & (test_df['prob_high_vol'] <= hmm_trend_min) & ~vol_shock, 'signal'] = 0
-    
-    test_df['signal'] = test_df['signal'].ffill().fillna(0)
+    for i in range(len(test_df)):
+        close = closes[i]
+        r_min = rolling_mins[i]
+        r_max = rolling_maxs[i]
+        z_score = z_scores[i]
+        
+        # S_breakout logic
+        if not np.isnan(r_min) and close < r_min:
+            current_s_breakout = -1.0
+        elif not np.isnan(r_max) and close > r_max:
+            current_s_breakout = 0.0
+            
+        # S_gmm logic
+        if not np.isnan(z_score) and z_score < gmm_z_buy:
+            current_s_gmm = 1.0
+        elif not np.isnan(z_score) and z_score > gmm_z_sell:
+            current_s_gmm = 0.0
+            
+        s_breakout_arr[i] = current_s_breakout
+        s_gmm_arr[i] = current_s_gmm
 
-    # Track Active Regimes in Dataframe
-    test_df['active_agent'] = 'CASH'
-    test_df.loc[trend_active, 'active_agent'] = 'Breakout'
-    test_df.loc[chop_active, 'active_agent'] = 'GMM'
+    test_df['S_breakout'] = s_breakout_arr
+    test_df['S_gmm'] = s_gmm_arr
 
+    # 2. Dynamic Weighting Math
+    p = test_df['prob_high_vol'].values
+    vol_shock_arr = vol_shock.values
+    p_blended = np.where(vol_shock_arr, 1.0, p)
+    
+    w_breakout = p_blended ** 2
+    w_gmm = 1.0 - w_breakout
+    
+    # 3. Target Position Formula (Blended & Scaled)
+    raw_target = (w_breakout * s_breakout_arr) + (w_gmm * s_gmm_arr)
+    
+    daily_forecasted_vol = test_df['forecasted_vol'].values * np.sqrt(24)
+    vol_scaler = target_volatility / (daily_forecasted_vol + 1e-8)
+    ideal_size = np.clip(raw_target * vol_scaler, -1.0, 1.0)
+    test_df['target_size'] = ideal_size
 
-    # Convert forecasted hourly volatility to daily volatility (since TARGET is likely daily risk)
-    daily_forecasted_vol = test_df['forecasted_vol'] * np.sqrt(24)
+    # Backwards compatibility signals and tracking
+    test_df['signal'] = np.where(ideal_size > 0.0, 1.0, np.where(ideal_size < 0.0, -1.0, 0.0))
 
-    # Volatility-Scaled Position Sizing (signed: +1 long, -1 short)
-    uncapped_size = target_volatility / (daily_forecasted_vol + 1e-8)
-    base_position_size = uncapped_size.clip(upper=1.0)
-    test_df['target_size'] = base_position_size * test_df['signal']
+    active_agents = []
+    for w_b, s_b, w_g, s_g in zip(w_breakout, s_breakout_arr, w_gmm, s_gmm_arr):
+        b_val = w_b * abs(s_b)
+        g_val = w_g * abs(s_g)
+        if b_val > g_val:
+            active_agents.append('Breakout')
+        elif g_val > b_val:
+            active_agents.append('GMM')
+        else:
+            active_agents.append('CASH')
+    test_df['active_agent'] = active_agents
 
     # 4. Friction Filter (Rebalance Threshold Loop)
     raw_targets = test_df['target_size'].values
@@ -267,13 +216,70 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     # 2. Calculate Gross Return based on the scaled position
     test_df['gross_strategy_returns'] = test_df['market_returns'] * test_df['active_position']
 
-    # 3. Calculate Transaction Friction (Fees)
-    # We pay a fee every time the position size changes.
+    # 3. Calculate Transaction Friction (Dynamic Square-Root Market Impact Slippage)
+    market_returns = test_df['market_returns'].values
+    active_position = test_df['active_position'].values
+    closes = test_df['close'].values
+    volumes = test_df['volume'].values
+    vols = test_df['vol_24h'].values
+    
+    strategy_returns = np.zeros(len(test_df))
+    slippage_pcts = np.zeros(len(test_df))
+    equity = np.zeros(len(test_df))
+    
+    # Calculate median non-zero hourly volume to use as fallback
+    non_zero_vols = volumes[volumes > 0]
+    median_vol = np.median(non_zero_vols) if len(non_zero_vols) > 0 else 3.38e8
+    
+    current_equity = 10000.0
+    gamma = 0.5
+    
+    for t in range(len(test_df)):
+        r_t = market_returns[t]
+        w_t = active_position[t]
+        vol_t = vols[t] if not np.isnan(vols[t]) else 0.0
+        v_t = volumes[t] if not np.isnan(volumes[t]) else 0.0
+        
+        # Calculate position change
+        w_prev = active_position[t-1] if t > 0 else 0.0
+        pos_change = abs(w_t - w_prev)
+        
+        if pos_change > 0.0 and t > 0:
+            # Trade value in USD
+            trade_val_usd = current_equity * pos_change
+            
+            # Fallback to median volume if reported volume is 0
+            v_t_usd = v_t if v_t > 0.0 else median_vol
+            
+            # Slippage percent using Square-Root Law (dimensionless ratio in USD)
+            slip = gamma * vol_t * np.sqrt(trade_val_usd / v_t_usd)
+            slip = min(slip, 0.05)
+            
+            # Apply broker fee floor of 10 bps (0.0010)
+            friction = max(0.0010, slip)
+        else:
+            friction = 0.0
+            
+        slippage_pcts[t] = friction
+        
+        # Gross return
+        gross_ret = r_t * w_t
+        if np.isnan(gross_ret):
+            gross_ret = 0.0
+            
+        # Net return
+        net_ret = gross_ret - friction
+        strategy_returns[t] = net_ret
+        
+        # Update equity
+        current_equity = current_equity * (1.0 + net_ret)
+        current_equity = max(current_equity, 0.0)
+        equity[t] = current_equity
+        
+    test_df['slippage_costs'] = slippage_pcts
+    test_df['transaction_costs'] = slippage_pcts
+    test_df['strategy_returns'] = strategy_returns
     test_df['position_change'] = test_df['active_position'].diff().abs().fillna(0)
-    test_df['transaction_costs'] = test_df['position_change'] * FEE_PCT
-
-    # 4. Calculate Net Strategy Return
-    test_df['strategy_returns'] = test_df['gross_strategy_returns'] - test_df['transaction_costs']
 
     test_df['cumulative_market'] = (1 + test_df['market_returns']).cumprod()
     test_df['cumulative_strategy'] = (1 + test_df['strategy_returns']).cumprod()
@@ -319,6 +325,32 @@ def calculate_metrics(df, verbose=True):
     market_ret = (df['cumulative_market'].iloc[-1] - 1) * 100
     strat_ret = (df['cumulative_strategy'].iloc[-1] - 1) * 100
 
+    # Calculate Deflated Sharpe Ratio (DSR)
+    from scipy.stats import norm, skew, kurtosis
+    returns = df['strategy_returns'].dropna()
+    mean_ret = returns.mean()
+    std_ret = returns.std(ddof=1)
+    
+    dsr = 0.0
+    if std_ret > 1e-9:
+        sr_observed = mean_ret / std_ret
+        n = len(returns)
+        skewness = skew(returns)
+        excess_kurt = kurtosis(returns, fisher=True)
+        
+        std_sr_unann = np.sqrt((1.0 + 0.5 * sr_observed**2 - skewness * sr_observed + (excess_kurt / 4.0) * sr_observed**2) / (n - 1.0))
+        std_sr_ann = std_sr_unann * np.sqrt(24 * 365)
+        
+        n_trials = 500
+        var_sharpes = 0.5
+        gamma_const = 0.57721566490153286
+        expected_max_ann = 0.0 + np.sqrt(var_sharpes) * (
+            (1.0 - gamma_const) * norm.ppf(1.0 - 1.0 / n_trials) +
+            gamma_const * norm.ppf(1.0 - 1.0 / (n_trials * np.e))
+        )
+        
+        dsr = norm.cdf((sharpe - expected_max_ann) / (std_sr_ann + 1e-9))
+
     if verbose:
         market_return = market_ret / 100
         strategy_return = strat_ret / 100
@@ -336,7 +368,8 @@ def calculate_metrics(df, verbose=True):
         
         print(f"Market Return:   {market_return * 100:.2f}%")
         print(f"Strategy Return: {strategy_return * 100:.2f}%")
-        print(f"Sharpe Ratio:    {sharpe_ratio:.2f}")
+        print(f"Raw Sharpe:      {sharpe_ratio:.2f}")
+        print(f"Deflated Sharpe: {dsr:.4f} ({dsr * 100:.2f}% Prob of Gen Alpha)")
         print(f"Max Drawdown:    {max_drawdown * 100:.2f}%")
         
         if 'trade_owner' in df.columns:
@@ -350,6 +383,7 @@ def calculate_metrics(df, verbose=True):
         'market_return': round(market_ret, 2),
         'strategy_return': round(strat_ret, 2),
         'sharpe': round(sharpe, 2),
+        'deflated_sharpe': round(dsr, 4),
         'max_drawdown': round(max_drawdown * 100, 2),
     }
 
@@ -468,14 +502,14 @@ def plot_dashboard(df):
     ax2.plot(subset.index, subset['volatility'], color='blue', alpha=0.5, label='Actual Volatility')
 
     if lstm_col in subset.columns:
-        ax2.plot(subset.index, subset[lstm_col], color='magenta', linestyle='--', linewidth=1.5, label='AI Forecast')
+        ax2.plot(subset.index, subset[lstm_col], color='magenta', linestyle='--', linewidth=1.5, label='Rolling Vol (24h)')
         veto_line = subset['volatility'].rolling(24).mean() * 1.8
         ax2.plot(subset.index, veto_line, color='black', linestyle=':', alpha=0.6, label='Risk Threshold (1.8σ)')
         ax2.fill_between(subset.index, 0, subset['volatility'].max(),
                          where=(subset[lstm_col] > veto_line),
-                         color='red', alpha=0.1, label='AI Signal: CASH')
+                         color='red', alpha=0.1, label='Risk Signal: CASH')
 
-    ax2.set_title('AI Risk Detection (ProgressiveModel)', fontsize=12)
+    ax2.set_title('Risk Detection & Regimes', fontsize=12)
     ax2.set_ylabel('Volatility')
     ax2.legend(loc='upper left')
     ax2.grid(True, alpha=0.15)
@@ -520,8 +554,10 @@ def run_visualizer():
             pass
 
     df = calculate_features(df)
-    df['forecasted_vol'] = get_lstm_predictions(df)
-    df['lstm_pred_vol'] = df['forecasted_vol']
+    df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
+    df['vol_24h'] = df['log_ret'].rolling(24).std()
+    df['forecasted_vol'] = df['vol_24h']
+    df['lstm_pred_vol'] = df['vol_24h']
     plot_dashboard(df)
 
 if __name__ == "__main__":

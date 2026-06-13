@@ -1,8 +1,4 @@
 {
-  "hidden_dim": 64,
-  "lr": 0.001,
-  "dropout": 0.2,
-  "input_dim": 5,
   "z_window": 79,
   "z_buy": -1.1410220464763705,
   "z_sell": 2.0719498228229916,
@@ -14,12 +10,13 @@
   "use_partial_sell": true,
   "partial_sell_ratio": 0.22268405731261148,
   "use_ema_exit": false,
-  "breakout_window": 48,
   "hmm_threshold": 0.6594155980615416,
-  "hmm_chop_max": 0.4016123759712631,
-  "hmm_trend_min": 0.6856947885131909,
-  "gmm_z_buy": -3.646731151774149,
-  "gmm_z_sell": 0.9038446907034337,
-  "vol_shock_mult": 1.513058448533281,
-  "rebalance_threshold": 0.4828855175725217
+  "hmm_chop_max": 0.40,
+  "hmm_trend_min": 0.60,
+  "gmm_z_buy": -3.65,
+  "gmm_z_sell": 0.5,
+  "vol_shock_mult": 1.50,
+  "rebalance_threshold": 0.48,
+  "rolling_min_window": 48,
+  "rolling_max_window": 48
 }

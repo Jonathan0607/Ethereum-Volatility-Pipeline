@@ -32,16 +32,8 @@ def run_pipeline():
     else:
         print("\n[2/3] Optimized params found. Proceeding to training.")
 
-    # 3. TRAIN MODEL (The Teacher)
-    print("\n[3/4] Training Model on History...")
-    try:
-        strategy.train_model()
-    except Exception as e:
-        print(f"CRITICAL ERROR during training: {e}")
-        return
-
-    # 4. BACKTEST & VISUALIZE (The Auditor)
-    print("\n[4/4] Running Out-of-Sample Backtest & Dashboard...")
+    # 3. BACKTEST & VISUALIZE (The Auditor)
+    print("\n[3/4] Running Out-of-Sample Backtest & Dashboard...")
     try:
         # Load and Backtest
         df = backtest.load_data()
@@ -60,7 +52,6 @@ def run_pipeline():
     print("\n==========================================")
     print("   PIPELINE SUCCESSFUL.                   ")
     print("   Artifacts Generated:                   ")
-    print("   - lstm_model.pth                       ")
     print("   - backtest_results.png                 ")
     print("   - model_dashboard.png                  ")
     print("==========================================")

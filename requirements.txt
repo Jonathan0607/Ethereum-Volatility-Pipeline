@@ -1,8 +1,6 @@
---extra-index-url https://download.pytorch.org/whl/cpu
 pandas
 numpy
 requests
-torch
 scikit-learn
 matplotlib
 yfinance
@@ -12,3 +10,4 @@ arch
 optuna
 hmmlearn
 alpaca-trade-api
+websockets

@@ -188,17 +188,29 @@ def calculate_features(df, train_df=None):
     # print(f"   Rows after dropna:   {len(df)}")
     return df
 
-def calculate_features_test(df):
+def calculate_features_test(df, train_df=None):
     """
     Feature engineering for TEST / LIVE data.
-    Uses pre-fitted GARCH params. Does NOT compute forward target.
+    Uses pre-fitted GARCH params from train_df if provided to avoid look-ahead leak.
     """
     df = df.copy()
     df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
     df.dropna(inplace=True)
 
-    garch_model = arch_model(df['log_ret'] * 100, vol='Garch', p=1, q=1, mean='Constant', dist='Normal')
-    res = garch_model.fit(update_freq=0, disp='off')
+    if train_df is not None:
+        train_copy = train_df.copy()
+        train_copy['log_ret'] = np.log(train_copy['close'] / train_copy['close'].shift(1))
+        train_copy.dropna(inplace=True)
+        train_log_ret = train_copy['log_ret'] * 100
+        train_garch = arch_model(train_log_ret, vol='Garch', p=1, q=1, mean='Constant', dist='Normal')
+        train_res = train_garch.fit(update_freq=0, disp='off')
+        
+        test_log_ret = df['log_ret'] * 100
+        test_garch = arch_model(test_log_ret, vol='Garch', p=1, q=1, mean='Constant', dist='Normal')
+        res = test_garch.fix(train_res.params)
+    else:
+        garch_model = arch_model(df['log_ret'] * 100, vol='Garch', p=1, q=1, mean='Constant', dist='Normal')
+        res = garch_model.fit(update_freq=0, disp='off')
 
     df['garch_vol'] = res.conditional_volatility / 100
     df['volatility'] = df['garch_vol']
@@ -210,10 +222,6 @@ def calculate_features_test(df):
 
     # Drop all NaN rows from rolling windows
     df.dropna(inplace=True)
-
-    # print(f"Test Feature Engineering Complete (no GARCH refit).")
-    # print(f"   Stationary features: {FEATURE_COLS}")
-    # print(f"   Rows after dropna:   {len(df)}")
     return df
 
 

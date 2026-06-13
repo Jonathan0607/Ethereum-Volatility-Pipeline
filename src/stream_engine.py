@@ -2,8 +2,6 @@ import asyncio
 # pyrefly: ignore [missing-import]
 import websockets
 import json
-import torch
-import pickle
 import numpy as np
 import os
 import ast
@@ -12,7 +10,6 @@ from datetime import datetime
 
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from strategy import ProgressiveModel
 from hmm_engine import get_high_vol_probability
 
 # --- 1. The Cold Start (REST API Seed) ---
@@ -29,8 +26,7 @@ except Exception as e:
     print(f"[!] ERROR FETCHING SEED DATA: {e}")
     hourly_price_buffer = []
 
-# --- 2. Model Initialization ---
-device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+# --- 2. Configuration Initialization ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
 params_path = os.path.join(current_dir, '..', 'best_params.txt')
@@ -42,26 +38,7 @@ if os.path.exists(params_path):
         except Exception:
             best_params = ast.literal_eval(content)
 else:
-    best_params = {'hidden_dim': 64, 'input_dim': 5, 'dropout': 0.2}
-
-model = ProgressiveModel(
-    input_dim=best_params.get('input_dim', 5),
-    hidden_dim=best_params.get('hidden_dim', 64),
-    output_dim=1,
-    dropout=best_params.get('dropout', 0.2)
-)
-model_path = os.path.join(current_dir, '..', 'lstm_model.pth')
-model.load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
-model.to(device)
-model.eval()
-
-scaler_path = os.path.join(current_dir, '..', 'scaler.pkl')
-with open(scaler_path, 'rb') as f:
-    scaler = pickle.load(f)
-
-target_scaler_path = os.path.join(current_dir, '..', 'target_scaler.pkl')
-with open(target_scaler_path, 'rb') as f:
-    target_scaler = pickle.load(f)
+    best_params = {}
 
 
 def get_hurst_exponent(ts, max_lag=20):
@@ -124,31 +101,23 @@ async def stream_ethereum_data():
                                 ma_50 = np.mean(closes[-50:])
                                 ma_50_dist = (closes[-1] - ma_50) / ma_50
                                 
-                                # Scaler expects 5 features (volatility, log_return, rolling_vol_24h, ma_20_dist, ma_50_dist)
-                                latest_features = np.array([[rolling_vol_24h, log_return, rolling_vol_24h, ma_20_dist, ma_50_dist]])
-                                scaled_features = scaler.transform(latest_features)
+                                volatility_forecast = float(vol_24h)
                                 
-                                tensor_features = torch.tensor(scaled_features, dtype=torch.float32).unsqueeze(0).to(device)
-                                
-                                with torch.no_grad():
-                                    output_scaled = model(tensor_features)
-                                    
-                                volatility_forecast = target_scaler.inverse_transform(output_scaled.cpu().numpy())[0][0]
-                                
-                                breakout_window = best_params.get('breakout_window', 48)
-                                rolling_max = float(max(closes[-breakout_window-1:-1]))
-                                rolling_min = float(min(closes[-breakout_window-1:-1]))
+                                rolling_max_window = best_params.get('rolling_max_window', 48)
+                                rolling_min_window = best_params.get('rolling_min_window', 48)
+                                rolling_max = float(max(closes[-rolling_max_window-1:-1]))
+                                rolling_min = float(min(closes[-rolling_min_window-1:-1]))
                                 
                                 prob_high_vol = get_high_vol_probability(closes)
 
                                 print("\n" + "="*60)
                                 print(f"🚨 HOURLY REGIME UPDATE 🚨")
                                 print(f"   Real-Time Hourly Close: ${current_price:,.2f}")
-                                print(f"   LSTM Volatility Forecast (24h): {volatility_forecast:.4%}")
+                                print(f"   Rolling Volatility Forecast (24h): {volatility_forecast:.4%}")
                                 print(f"   HMM High-Vol Prob: {prob_high_vol:.4f}")
                                 print(f"   Vol 24h: {vol_24h:.6f} | Vol 168h: {vol_168h:.6f}")
-                                print(f"   Rolling Max ({breakout_window}h): ${rolling_max:,.2f}")
-                                print(f"   Rolling Min ({breakout_window}h): ${rolling_min:,.2f}")
+                                print(f"   Rolling Max ({rolling_max_window}h): ${rolling_max:,.2f}")
+                                print(f"   Rolling Min ({rolling_min_window}h): ${rolling_min:,.2f}")
                                 print("="*60 + "\n")
 
                                 # Fire the Microservice Handshake to the FastAPI engine

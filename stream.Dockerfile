@@ -7,9 +7,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy source and model artifacts
 COPY src/ ./src/
-COPY *.npy ./
-COPY *.pth ./
-COPY *.pkl ./
 COPY *.txt ./
 COPY *.json ./
 

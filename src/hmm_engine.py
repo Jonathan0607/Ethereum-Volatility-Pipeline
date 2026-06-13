@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from hmmlearn.hmm import GaussianHMM
+from sklearn.preprocessing import StandardScaler
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -22,8 +23,11 @@ def get_high_vol_probability(closes):
     features = df[['log_ret', 'roll_vol']].values
     
     try:
+        scaler = StandardScaler()
+        features = scaler.fit_transform(features)
+        
         # Fit the dynamic HMM
-        hmm = GaussianHMM(n_components=2, covariance_type="full", n_iter=100, random_state=42)
+        hmm = GaussianHMM(n_components=2, covariance_type="full", n_iter=100, tol=0.01, random_state=42)
         hmm.fit(features)
         
         # Identify which state is High Volatility (the one with the higher mean rolling volatility)

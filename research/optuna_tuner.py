@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║  OPTUNA BAYESIAN HYPERPARAMETER SANDBOX                              ║
+║  OPTUNA BAYESIAN HYPERPARAMETER SANDBOX (CONSTRAINED V2)             ║
 ║  Maximizes simulated Sharpe Ratio over historical ETH data.          ║
 ║  Auto-writes optimal params → best_params.txt on completion.         ║
-║  Loads HMM cache and pre-computes LSTM forecasts for ultra-speed!    ║
 ║                                                                      ║
 ║  Usage:  python research/optuna_tuner.py                             ║
 ╚══════════════════════════════════════════════════════════════════════╝
@@ -18,13 +17,10 @@ import numpy as np
 import pandas as pd
 import pickle
 import ast
-os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
-import torch
-import torch.nn as nn
 from sklearn.preprocessing import StandardScaler
 from arch import arch_model
-
 import optuna
+
 warnings.filterwarnings("ignore")
 
 # Force unbuffered stdout for immediate logging
@@ -36,14 +32,12 @@ sys.path.insert(0, SRC_DIR)
 sys.path.insert(0, PROJECT_ROOT)
 
 from data import FEATURE_COLS, split_data, calculate_features, calculate_features_test
-from strategy import ProgressiveModel, get_gmm_state
+from strategy import get_gmm_state
 from hmm_engine import get_high_vol_probability
 
 PARAMS_PATH = os.path.join(PROJECT_ROOT, 'best_params.txt')
 STUDY_DB    = f"sqlite:///{os.path.join(PROJECT_ROOT, 'research', 'optuna_study.db')}"
-N_TRIALS    = 150
-SEQ_LENGTH  = 60
-FEE_PCT     = 0.0010  # Fees enabled for backtesting
+N_TRIALS    = 500
 
 def load_eth_data() -> pd.DataFrame:
     """Load ETH-USD hourly data from static CSV."""
@@ -53,76 +47,6 @@ def load_eth_data() -> pd.DataFrame:
     df = pd.read_csv(data_path, parse_dates=['timestamp'], index_col='timestamp')
     print(f"[Sandbox] Loaded {len(df)} rows from CSV.")
     return df
-
-def get_lstm_predictions(df, best_params):
-    """Generates forward 24h volatility forecasts using the ProgressiveModel."""
-    print("Pre-generating Volatility Forecasts via ProgressiveModel...")
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    
-    hidden_dim = best_params.get('hidden_dim', 64)
-    dropout = best_params.get('dropout', 0.2)
-    input_dim = len(FEATURE_COLS)
-
-    model = ProgressiveModel(input_dim=input_dim, hidden_dim=hidden_dim, output_dim=1, dropout=dropout)
-    model_path = os.path.join(PROJECT_ROOT, 'lstm_model.pth')
-
-    if not os.path.exists(model_path):
-        print("   [WARNING] Model not found. Returning flat line.")
-        return pd.Series(0, index=df.index)
-
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.to(device)
-    model.eval()
-
-    # Load scalers
-    scaler_path = os.path.join(PROJECT_ROOT, 'scaler.pkl')
-    tgt_scaler_path = os.path.join(PROJECT_ROOT, 'target_scaler.pkl')
-
-    if os.path.exists(scaler_path):
-        with open(scaler_path, 'rb') as f:
-            feat_scaler = pickle.load(f)
-    else:
-        feat_scaler = None
-
-    tgt_scaler = None
-    if os.path.exists(tgt_scaler_path):
-        with open(tgt_scaler_path, 'rb') as f:
-            tgt_scaler = pickle.load(f)
-
-    feature_data = df[FEATURE_COLS].values.astype(np.float32)
-
-    if feat_scaler is not None:
-        feature_scaled = feat_scaler.transform(feature_data)
-    else:
-        feature_scaled = feature_data
-
-    predictions = [np.nan] * SEQ_LENGTH
-    inputs = []
-
-    for i in range(len(feature_scaled) - SEQ_LENGTH):
-        inputs.append(feature_scaled[i:i + SEQ_LENGTH])
-
-    if len(inputs) == 0:
-        return pd.Series(0, index=df.index)
-
-    inputs = np.array(inputs)
-    inputs = torch.from_numpy(inputs).to(device)
-
-    batch_size = 1024
-    with torch.no_grad():
-        for i in range(0, len(inputs), batch_size):
-            batch = inputs[i:i + batch_size]
-            output = model(batch)
-            preds_scaled = output.cpu().numpy().flatten()
-
-            if tgt_scaler is not None:
-                preds = tgt_scaler.inverse_transform(preds_scaled.reshape(-1, 1)).flatten()
-            else:
-                preds = preds_scaled
-
-            predictions.extend(preds)
-
-    return pd.Series(predictions, index=df.index)
 
 def load_hmm_features(df):
     """Loads HMM prob_high_vol from cache or computes it."""
@@ -154,13 +78,13 @@ def load_hmm_features(df):
     return df
 
 def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
-    """Ultra-fast hierarchical strategy simulation on pre-computed volatility forecasts."""
+    """Simulate the V3 HMM + GMM blended stateful strategy and calculate Sharpe."""
     bt = test_df.copy()
     bt['market_returns'] = bt['close'].pct_change()
 
     # 1. Pre-calculate metrics
-    bt['rolling_max'] = bt['close'].rolling(window=params['breakout_window']).max().shift(1)
-    bt['rolling_min'] = bt['close'].rolling(window=params['breakout_window']).min().shift(1)
+    bt['rolling_max'] = bt['close'].rolling(window=params['rolling_max_window']).max().shift(1)
+    bt['rolling_min'] = bt['close'].rolling(window=params['rolling_min_window']).min().shift(1)
     
     # Realized Volatility Overlay (Circuit Breaker)
     bt['log_ret'] = np.log(bt['close'] / bt['close'].shift(1))
@@ -168,38 +92,64 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     bt['vol_168h'] = bt['log_ret'].rolling(168).std()
     vol_shock = (bt['vol_24h'] > (bt['vol_168h'] * params['vol_shock_mult'])).fillna(False)
 
-    # Fast Z-Score for the vectorized backtester
+    # Fast Z-Score for the GMM condition
     roll_mean = bt['close'].rolling(window=20).mean()
     roll_std = bt['close'].rolling(window=20).std()
     bt['z_score'] = (bt['close'] - roll_mean) / (roll_std + 1e-8)
 
-    # 2. Hierarchical Routing
-    bt['signal'] = np.nan
+    # 2. Evaluate BOTH sub-agents independently on every tick (stateful)
+    s_breakout_arr = np.zeros(len(bt))
+    s_gmm_arr = np.zeros(len(bt))
     
-    # AGENT 1: Breakout Sub-Agent (SHORT ONLY)
-    trend_active = (bt['prob_high_vol'] > params['hmm_trend_min']) | vol_shock
-    bt.loc[trend_active & (bt['close'] < bt['rolling_min']), 'signal'] = -1
+    current_s_breakout = 0.0
+    current_s_gmm = 0.0
     
-    # AGENT 2: GMM Mean-Reversion (LONG ONLY)
-    chop_active = (bt['prob_high_vol'] < params['hmm_chop_max']) & ~vol_shock
-    bt.loc[chop_active & (bt['z_score'] < params['gmm_z_buy']), 'signal'] = 1
+    closes = bt['close'].values
+    rolling_mins = bt['rolling_min'].values
+    rolling_maxs = bt['rolling_max'].values
+    z_scores = bt['z_score'].values
     
-    # 3. Master Exits
-    # Exit Longs when overbought, Exit Shorts when trend breaks upward
-    bt.loc[chop_active & (bt['z_score'] > params['gmm_z_sell']), 'signal'] = 0
-    bt.loc[trend_active & (bt['close'] > bt['rolling_max']), 'signal'] = 0
+    gmm_z_buy = params['gmm_z_buy']
+    gmm_z_sell = params['gmm_z_sell']
     
-    # Force Cash in the Transition Zone
-    bt.loc[(bt['prob_high_vol'] >= params['hmm_chop_max']) & (bt['prob_high_vol'] <= params['hmm_trend_min']) & ~vol_shock, 'signal'] = 0
-    
-    bt['signal'] = bt['signal'].ffill().fillna(0)
+    for i in range(len(bt)):
+        close = closes[i]
+        r_min = rolling_mins[i]
+        r_max = rolling_maxs[i]
+        z_score = z_scores[i]
+        
+        # S_breakout logic
+        if not np.isnan(r_min) and close < r_min:
+            current_s_breakout = -1.0
+        elif not np.isnan(r_max) and close > r_max:
+            current_s_breakout = 0.0
+            
+        # S_gmm logic
+        if not np.isnan(z_score) and z_score < gmm_z_buy:
+            current_s_gmm = 1.0
+        elif not np.isnan(z_score) and z_score > gmm_z_sell:
+            current_s_gmm = 0.0
+            
+        s_breakout_arr[i] = current_s_breakout
+        s_gmm_arr[i] = current_s_gmm
 
-    # Volatility-Scaled Sizing (abs signal for sizing, sign for direction)
-    daily_forecasted_vol = bt['forecasted_vol'] * np.sqrt(24)
-    base_size = (0.06 / (daily_forecasted_vol + 1e-8)).clip(upper=1.0)
-    bt['target_size'] = base_size * bt['signal']
+    # 3. Dynamic Weighting Math
+    p = bt['prob_high_vol'].values
+    vol_shock_arr = vol_shock.values
+    p_blended = np.where(vol_shock_arr, 1.0, p)
+    
+    w_breakout = p_blended ** 2
+    w_gmm = 1.0 - w_breakout
+    
+    # 4. Target Position Formula (Blended & Scaled)
+    raw_target = (w_breakout * s_breakout_arr) + (w_gmm * s_gmm_arr)
+    
+    daily_forecasted_vol = bt['vol_24h'].values * np.sqrt(24)
+    vol_scaler = 0.06 / (daily_forecasted_vol + 1e-8)
+    ideal_size = np.clip(raw_target * vol_scaler, -1.0, 1.0)
+    bt['target_size'] = ideal_size
 
-    # 4. Friction Filter (Rebalance Threshold Loop)
+    # 5. Friction Filter (Rebalance Threshold Loop)
     raw_targets = bt['target_size'].values
     active_positions = np.zeros(len(raw_targets))
     current_pos = 0.0
@@ -216,20 +166,19 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
         
     bt['position_size'] = active_positions
 
-    # 5. Shift the position size (because we enter the position at the CLOSE of the signal candle)
+    # 6. Shift the position size (because we enter the position at the CLOSE of the signal candle)
     bt['active_position'] = bt['position_size'].shift(1).fillna(0)
 
-    # 6. Calculate Gross Return based on the scaled position
+    # 7. Calculate Gross Return
     bt['gross_strategy_returns'] = bt['market_returns'] * bt['active_position']
 
-    # 7. Calculate Transaction Friction (Fees)
+    # 8. Calculate Transaction Friction (Enforce 20 bps fee per trade)
     bt['position_change'] = bt['active_position'].diff().abs().fillna(0)
     
-    OPTIMIZER_FEE_PCT = params.get('optimizer_fee_pct', 0.0030)
-    # Calculate transaction costs with the artificial heavy penalty
-    bt['transaction_costs'] = bt['position_change'] * OPTIMIZER_FEE_PCT
+    FEE_PCT = 0.0020  # 20 bps fee per trade
+    bt['transaction_costs'] = bt['position_change'] * FEE_PCT
 
-    # 8. Calculate Net Strategy Return
+    # 9. Calculate Net Strategy Return
     bt['strategy_returns'] = bt['gross_strategy_returns'] - bt['transaction_costs']
     bt.dropna(subset=['strategy_returns'], inplace=True)
 
@@ -249,38 +198,33 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     drawdown = (cumulative_returns - peak) / peak
     max_dd = drawdown.min()
     
-    # Normalize trade count (adjusting for ~519 days of training data)
+    # Normalize trade count
     dataset_days = len(bt) / 24
     normalized_trades = total_trades * (150 / dataset_days)
     
-    # PENALTY 1: Hyper-activity
-    if normalized_trades > 220:
+    # PENALTY 1: Hyper-activity (avoid whipsaws)
+    if normalized_trades > 250:
         return -5.0
         
-    # PENALTY 2: Drawdown Violation (Strict Capital Preservation)
-    if max_dd < -0.12:
-        # Subtract the magnitude of the violation from the Sharpe score
-        penalty = abs(max_dd + 0.12) * 10 
-        return sharpe - penalty
+    # PENALTY 2: Severe drawdown violation (Drawdown > -25%)
+    if max_dd < -0.25:
+        # Subtract a heavy penalty based on violation magnitude
+        penalty = abs(max_dd + 0.25) * 100.0
+        return float(sharpe - penalty)
         
     return float(sharpe)
 
 def objective(trial, test_df):
-    # Use a 30 bps artificial fee to terrify the optimizer into avoiding high-frequency whipsaws
-    OPTIMIZER_FEE_PCT = 0.0030 
-
+    rolling_window = trial.suggest_int('rolling_window', 24, 72)
     params = {
-        'hmm_chop_max': trial.suggest_float('hmm_chop_max', 0.30, 0.45),
-        'hmm_trend_min': trial.suggest_float('hmm_trend_min', 0.55, 0.70),
-        # Force strict extreme oversold entries (2 to 4 standard deviations)
-        'gmm_z_buy': trial.suggest_float('gmm_z_buy', -4.0, -2.0),
-        # Take profit aggressively on the reversion to the mean
-        'gmm_z_sell': trial.suggest_float('gmm_z_sell', -0.5, 1.0),
-        'breakout_window': trial.suggest_int('breakout_window', 12, 48),
-        'vol_shock_mult': trial.suggest_float('vol_shock_mult', 1.3, 2.0),
-        # Allow the rebalance threshold to scale up to 50% to force long-term holds
-        'rebalance_threshold': trial.suggest_float('rebalance_threshold', 0.15, 0.50),
-        'optimizer_fee_pct': OPTIMIZER_FEE_PCT,
+        'hmm_chop_max': trial.suggest_float('hmm_chop_max', 0.10, 0.40),
+        'hmm_trend_min': trial.suggest_float('hmm_trend_min', 0.60, 0.95),
+        'gmm_z_buy': trial.suggest_float('gmm_z_buy', -4.00, -3.20),
+        'gmm_z_sell': trial.suggest_float('gmm_z_sell', 0.0, 1.5),
+        'rolling_min_window': rolling_window,
+        'rolling_max_window': rolling_window,
+        'vol_shock_mult': trial.suggest_float('vol_shock_mult', 1.30, 2.00),
+        'rebalance_threshold': trial.suggest_float('rebalance_threshold', 0.45, 0.65),
     }
 
     sharpe = simulate_sharpe(test_df, params)
@@ -288,13 +232,18 @@ def objective(trial, test_df):
 
 def write_best_params(study, current_params):
     best = study.best_trial.params
-    current_params['breakout_window'] = int(best['breakout_window'])
+    current_params['rolling_min_window'] = int(best['rolling_window'])
+    current_params['rolling_max_window'] = int(best['rolling_window'])
     current_params['hmm_chop_max']    = float(best['hmm_chop_max'])
     current_params['hmm_trend_min']   = float(best['hmm_trend_min'])
     current_params['gmm_z_buy']       = float(best['gmm_z_buy'])
     current_params['gmm_z_sell']      = float(best['gmm_z_sell'])
     current_params['vol_shock_mult']      = float(best['vol_shock_mult'])
     current_params['rebalance_threshold'] = float(best['rebalance_threshold'])
+    
+    # Remove obsolete single breakout_window to avoid confusion
+    if 'breakout_window' in current_params:
+        del current_params['breakout_window']
 
     with open(PARAMS_PATH, 'w') as f:
         json.dump(current_params, f, indent=2)
@@ -305,7 +254,7 @@ def write_best_params(study, current_params):
 
 def main():
     print("=" * 60)
-    print("  OPTUNA BAYESIAN HYPERPARAMETER SANDBOX (FAST MODE)")
+    print("  OPTUNA BAYESIAN HYPERPARAMETER SANDBOX (CONSTRAINED V2)")
     print("  Metric: Maximize Simulated Sharpe Ratio")
     print(f"  Trials: {N_TRIALS}  |  Study DB: {STUDY_DB}")
     print("=" * 60)
@@ -319,7 +268,7 @@ def main():
             except Exception:
                 best_params = ast.literal_eval(content)
     else:
-        best_params = {"hidden_dim": 64, "lr": 0.001, "dropout": 0.2, "input_dim": 5}
+        best_params = {}
 
     df = load_eth_data()
     df = load_hmm_features(df)
@@ -353,8 +302,8 @@ def main():
     # Feature engineering for train set
     train_df = calculate_features_test(train_raw)
     
-    # Pre-generate forecasts
-    train_df['forecasted_vol'] = get_lstm_predictions(train_df, best_params)
+    # Pre-generate forecasts using rolling volatility of log returns (vol_24h)
+    train_df['forecasted_vol'] = train_df['rolling_vol_24h']
     train_df.dropna(subset=['forecasted_vol'], inplace=True)
 
     print(f"\n[Sandbox] Feature engineering & pre-computation complete.")
