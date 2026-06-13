@@ -1,14 +1,14 @@
 {
-  "hmm_chop_max": 0.2692684169035535,
-  "hmm_trend_min": 0.9499977893217249,
-  "gmm_z_buy": -3.3327190886132274,
-  "gmm_z_sell": 1.429970185546743,
-  "vol_shock_mult": 1.904379401102854,
-  "rebalance_threshold": 0.48315043139250335,
-  "rolling_min_window": 52,
-  "rolling_max_window": 52,
-  "gmm_ema_mult": 0.99002648193803,
+  "hmm_chop_max": 0.37537844869159337,
+  "hmm_trend_min": 0.7107347285984579,
+  "gmm_z_buy": -3.950511834147472,
+  "gmm_z_sell": 0.5884066227467456,
+  "vol_shock_mult": 1.415052074806785,
+  "rebalance_threshold": 0.564144483310325,
+  "rolling_min_window": 50,
+  "rolling_max_window": 59,
+  "gmm_ema_mult": 1.1417316373089357,
   "cooldown_hours": 11,
-  "breakout_time_stop_hours": 56,
-  "short_dip_thresh": 0.11605402480712694
+  "breakout_time_stop_hours": 72,
+  "short_dip_thresh": 0.12389253491819237
 }

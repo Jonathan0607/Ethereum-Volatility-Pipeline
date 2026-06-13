@@ -78,7 +78,6 @@ def suggest_neighborhood_int(trial, name, default_center, low_factor=0.8, high_f
         low = high - 1
     return trial.suggest_int(name, int(low), int(high))
 
-STUDY_NAME  = "eth_hmm_breakout_v4_fresh"
 STUDY_DB    = f"sqlite:///{os.path.join(PROJECT_ROOT, 'research', 'optuna_study.db')}"
 N_TRIALS    = 500
 
@@ -389,12 +388,19 @@ def main():
     print(f"\n[Sandbox] Feature engineering & pre-computation complete.")
     print(f"[Sandbox] Beginning {N_TRIALS} fast Optuna trials...\n")
 
-    # Instantiating the clean study name
+    import time
+
+    # Create a unique timestamped study name for a completely clean canvas
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    STUDY_NAME = f"eth_hmm_breakout_v4_{timestamp}"
+
+    print(f"[Sandbox] Initializing clean optimization study: {STUDY_NAME}")
+
     study = optuna.create_study(
         study_name=STUDY_NAME,
         direction="maximize",
         storage=STUDY_DB,
-        load_if_exists=False, # Set to False or change STUDY_NAME to purge old trial memories
+        load_if_exists=False, # Safe now because the name is unique every run
     )
 
     study.optimize(lambda trial: objective(trial, train_df), n_trials=N_TRIALS)
