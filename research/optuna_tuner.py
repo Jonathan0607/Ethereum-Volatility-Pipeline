@@ -56,8 +56,8 @@ def load_hmm_features(df):
         try:
             with open(cache_path, 'rb') as f:
                 cached_df = pickle.load(f)
-            if cached_df.index[-1] == df.index[-1] and len(cached_df) == len(df):
-                df['prob_high_vol'] = cached_df['prob_high_vol']
+            if df.index.isin(cached_df.index).all():
+                df['prob_high_vol'] = cached_df.loc[df.index, 'prob_high_vol']
                 print("[Cache] Loaded HMM prob_high_vol from cache.")
                 hmm_loaded = True
         except Exception as e:
@@ -108,9 +108,11 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     rolling_mins = bt['rolling_min'].values
     rolling_maxs = bt['rolling_max'].values
     z_scores = bt['z_score'].values
+    ema_200s = bt['ema_200'].values
     
     gmm_z_buy = params['gmm_z_buy']
     gmm_z_sell = params['gmm_z_sell']
+    gmm_ema_mult = params.get('gmm_ema_mult', 1.03)
     
     for i in range(len(bt)):
         close = closes[i]
@@ -126,7 +128,8 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
             
         # S_gmm logic
         if not np.isnan(z_score) and z_score < gmm_z_buy:
-            current_s_gmm = 1.0
+            if close < ema_200s[i] * gmm_ema_mult:
+                current_s_gmm = 1.0
         elif not np.isnan(z_score) and z_score > gmm_z_sell:
             current_s_gmm = 0.0
             
@@ -225,6 +228,7 @@ def objective(trial, test_df):
         'rolling_max_window': rolling_window,
         'vol_shock_mult': trial.suggest_float('vol_shock_mult', 1.30, 2.00),
         'rebalance_threshold': trial.suggest_float('rebalance_threshold', 0.45, 0.65),
+        'gmm_ema_mult': trial.suggest_float('gmm_ema_mult', 0.95, 1.10),
     }
 
     sharpe = simulate_sharpe(test_df, params)
@@ -240,6 +244,7 @@ def write_best_params(study, current_params):
     current_params['gmm_z_sell']      = float(best['gmm_z_sell'])
     current_params['vol_shock_mult']      = float(best['vol_shock_mult'])
     current_params['rebalance_threshold'] = float(best['rebalance_threshold'])
+    current_params['gmm_ema_mult']        = float(best['gmm_ema_mult'])
     
     # Remove obsolete single breakout_window to avoid confusion
     if 'breakout_window' in current_params:

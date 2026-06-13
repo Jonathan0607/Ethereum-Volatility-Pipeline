@@ -18,5 +18,6 @@
   "vol_shock_mult": 1.50,
   "rebalance_threshold": 0.48,
   "rolling_min_window": 48,
-  "rolling_max_window": 48
+  "rolling_max_window": 48,
+  "gmm_ema_mult": 1.03
 }

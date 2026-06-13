@@ -59,6 +59,7 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     gmm_z_sell      = best_params.get('gmm_z_sell', 0.5)
     vol_shock_mult  = best_params.get('vol_shock_mult', 1.5)
     rebalance_threshold = best_params.get('rebalance_threshold', 0.15)
+    gmm_ema_mult    = best_params.get('gmm_ema_mult', 1.03)
 
     # Calculate HMM Probability on full df before splitting to prevent NaNs
     df = df.copy()
@@ -71,8 +72,8 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
         try:
             with open(cache_path, 'rb') as f:
                 cached_df = pickle.load(f)
-            if cached_df.index[-1] == df.index[-1] and len(cached_df) == len(df):
-                df['prob_high_vol'] = cached_df['prob_high_vol']
+            if df.index.isin(cached_df.index).all():
+                df['prob_high_vol'] = cached_df.loc[df.index, 'prob_high_vol']
                 # print("[Cache] Loaded HMM prob_high_vol from cache.")
                 hmm_loaded = True
         except Exception as e:
@@ -132,6 +133,7 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     rolling_mins = test_df['rolling_min'].values
     rolling_maxs = test_df['rolling_max'].values
     z_scores = test_df['z_score'].values
+    ema_200s = test_df['ema_200'].values
     
     for i in range(len(test_df)):
         close = closes[i]
@@ -147,7 +149,8 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
             
         # S_gmm logic
         if not np.isnan(z_score) and z_score < gmm_z_buy:
-            current_s_gmm = 1.0
+            if close < ema_200s[i] * gmm_ema_mult:
+                current_s_gmm = 1.0
         elif not np.isnan(z_score) and z_score > gmm_z_sell:
             current_s_gmm = 0.0
             

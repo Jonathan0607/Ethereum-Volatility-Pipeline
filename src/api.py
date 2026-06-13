@@ -358,8 +358,10 @@ def execute_live_stream_trade(payload: LiveExecutionPayload, background_tasks: B
         # S_gmm logic
         gmm_z_buy = best_params.get('gmm_z_buy', -1.5)
         gmm_z_sell = best_params.get('gmm_z_sell', 0.5)
+        gmm_ema_mult = best_params.get('gmm_ema_mult', 1.03)
         if gmm_z_score < gmm_z_buy:
-            current_state.s_gmm = 1.0
+            if close_price < ema_200 * gmm_ema_mult:
+                current_state.s_gmm = 1.0
         elif gmm_z_score > gmm_z_sell:
             current_state.s_gmm = 0.0
 
