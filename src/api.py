@@ -87,6 +87,7 @@ class TradingState:
         self.entry_price = 0.0
         self.s_breakout = 0.0
         self.s_gmm = 0.0
+        self.short_hold_duration = 0
 
 current_state = TradingState()
 
@@ -133,20 +134,28 @@ def load_artifacts():
                 # Find the original open entry trade
                 conn = sqlite3.connect(db_path)
                 cursor = conn.cursor()
-                cursor.execute("SELECT action, position_size, execution_price FROM paper_trades WHERE status = 'OPEN' ORDER BY timestamp ASC LIMIT 1")
+                cursor.execute("SELECT action, position_size, execution_price, timestamp FROM paper_trades WHERE status = 'OPEN' ORDER BY timestamp ASC LIMIT 1")
                 open_trade = cursor.fetchone()
                 conn.close()
                 if open_trade:
-                    o_action, o_size, o_price = open_trade
+                    o_action, o_size, o_price, o_timestamp = open_trade
                     current_state.current_position = "SHORT" if o_action == "SELL_SHORT" else "LONG"
                     current_state.position_size = o_size
                     current_state.entry_price = o_price
                     if current_state.current_position == "SHORT":
                         current_state.s_breakout = -1.0
                         current_state.s_gmm = 0.0
+                        # Calculate elapsed hours from database entries
+                        conn = sqlite3.connect(db_path)
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT COUNT(*) FROM paper_trades WHERE timestamp >= ? AND status = 'OPEN'", (o_timestamp,))
+                        count_rows = cursor.fetchone()[0]
+                        conn.close()
+                        current_state.short_hold_duration = max(0, count_rows - 1)
                     else:
                         current_state.s_breakout = 0.0
                         current_state.s_gmm = 1.0
+                        current_state.short_hold_duration = 0
                     print(f"[Startup] Reconciled state: System in active {current_state.current_position} (holding, size={o_size}, entry_price={o_price})")
                 else:
                     current_state.current_position = "FLAT"
@@ -349,11 +358,26 @@ def execute_live_stream_trade(payload: LiveExecutionPayload, background_tasks: B
         gmm_z_score, gmm_cluster = get_gmm_state(payload.closes)
 
         # 1. Independent Sub-Agent Triggers (Stateful)
-        # S_breakout logic
-        if close_price < payload.rolling_min:
-            current_state.s_breakout = -1.0
-        elif close_price > payload.rolling_max:
-            current_state.s_breakout = 0.0
+        # S_breakout logic with Option C and Dip Filter
+        breakout_time_stop_hours = best_params.get('breakout_time_stop_hours', 72)
+        short_dip_thresh = best_params.get('short_dip_thresh', 0.12)
+        
+        if current_state.s_breakout == -1.0:
+            current_state.short_hold_duration += 1
+            is_exit = False
+            if close_price > payload.rolling_max:
+                is_exit = True
+            elif current_state.short_hold_duration >= breakout_time_stop_hours:
+                is_exit = True
+                
+            if is_exit:
+                current_state.s_breakout = 0.0
+                current_state.short_hold_duration = 0
+        else:
+            if close_price < payload.rolling_min:
+                if close_price >= ema_200 * (1.0 - short_dip_thresh):
+                    current_state.s_breakout = -1.0
+                    current_state.short_hold_duration = 0
 
         # S_gmm logic
         gmm_z_buy = best_params.get('gmm_z_buy', -1.5)
@@ -426,6 +450,9 @@ def execute_live_stream_trade(payload: LiveExecutionPayload, background_tasks: B
             current_state.current_position = "FLAT"
             current_state.position_size = 0.0
             current_state.entry_price = 0.0
+            
+        if current_state.current_position != "SHORT":
+            current_state.short_hold_duration = 0
 
         # Check Cooldown condition: if we exit and have a realized loss
         if action == "CASH" and current_position != "FLAT":

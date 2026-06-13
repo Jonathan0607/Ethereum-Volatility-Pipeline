@@ -19,5 +19,7 @@
   "rebalance_threshold": 0.48,
   "rolling_min_window": 48,
   "rolling_max_window": 48,
-  "gmm_ema_mult": 1.03
+  "gmm_ema_mult": 1.03,
+  "breakout_time_stop_hours": 72,
+  "short_dip_thresh": 0.12
 }

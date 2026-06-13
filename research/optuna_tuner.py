@@ -97,6 +97,11 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     roll_std = bt['close'].rolling(window=20).std()
     bt['z_score'] = (bt['close'] - roll_mean) / (roll_std + 1e-8)
 
+    # 3. Dynamic Weighting Math
+    p = bt['prob_high_vol'].values
+    vol_shock_arr = vol_shock.values
+    p_blended = np.where(vol_shock_arr, 1.0, p)
+
     # 2. Evaluate BOTH sub-agents independently on every tick (stateful)
     s_breakout_arr = np.zeros(len(bt))
     s_gmm_arr = np.zeros(len(bt))
@@ -113,7 +118,10 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     gmm_z_buy = params['gmm_z_buy']
     gmm_z_sell = params['gmm_z_sell']
     gmm_ema_mult = params.get('gmm_ema_mult', 1.03)
+    breakout_time_stop_hours = params.get('breakout_time_stop_hours', 72)
+    short_dip_thresh         = params.get('short_dip_thresh', 0.12)
     
+    short_hold_duration = 0
     for i in range(len(bt)):
         close = closes[i]
         r_min = rolling_mins[i]
@@ -121,10 +129,24 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
         z_score = z_scores[i]
         
         # S_breakout logic
-        if not np.isnan(r_min) and close < r_min:
-            current_s_breakout = -1.0
-        elif not np.isnan(r_max) and close > r_max:
-            current_s_breakout = 0.0
+        if current_s_breakout == -1.0:
+            short_hold_duration += 1
+            is_exit = False
+            if not np.isnan(r_max) and close > r_max:
+                is_exit = True
+            elif short_hold_duration >= breakout_time_stop_hours:
+                is_exit = True
+                
+            if is_exit:
+                current_s_breakout = 0.0
+                short_hold_duration = 0
+        else:
+            if not np.isnan(r_min) and close < r_min:
+                trend_active = p_blended[i] > params.get('hmm_trend_min', 0.60)
+                if trend_active:
+                    if close >= ema_200s[i] * (1.0 - short_dip_thresh):
+                        current_s_breakout = -1.0
+                        short_hold_duration = 0
             
         # S_gmm logic
         if not np.isnan(z_score) and z_score < gmm_z_buy:
@@ -136,7 +158,7 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
         s_breakout_arr[i] = current_s_breakout
         s_gmm_arr[i] = current_s_gmm
 
-    # 3. Dynamic Weighting Math
+    # 3. Dynamic Weighting Math (re-use p_blended)
     p = bt['prob_high_vol'].values
     vol_shock_arr = vol_shock.values
     p_blended = np.where(vol_shock_arr, 1.0, p)
@@ -229,6 +251,8 @@ def objective(trial, test_df):
         'vol_shock_mult': trial.suggest_float('vol_shock_mult', 1.30, 2.00),
         'rebalance_threshold': trial.suggest_float('rebalance_threshold', 0.45, 0.65),
         'gmm_ema_mult': trial.suggest_float('gmm_ema_mult', 0.95, 1.10),
+        'breakout_time_stop_hours': trial.suggest_int('breakout_time_stop_hours', 24, 96),
+        'short_dip_thresh': trial.suggest_float('short_dip_thresh', 0.05, 0.15),
     }
 
     sharpe = simulate_sharpe(test_df, params)
@@ -245,6 +269,8 @@ def write_best_params(study, current_params):
     current_params['vol_shock_mult']      = float(best['vol_shock_mult'])
     current_params['rebalance_threshold'] = float(best['rebalance_threshold'])
     current_params['gmm_ema_mult']        = float(best['gmm_ema_mult'])
+    current_params['breakout_time_stop_hours'] = int(best['breakout_time_stop_hours'])
+    current_params['short_dip_thresh']         = float(best['short_dip_thresh'])
     
     # Remove obsolete single breakout_window to avoid confusion
     if 'breakout_window' in current_params:

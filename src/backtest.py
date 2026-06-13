@@ -60,6 +60,8 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     vol_shock_mult  = best_params.get('vol_shock_mult', 1.5)
     rebalance_threshold = best_params.get('rebalance_threshold', 0.15)
     gmm_ema_mult    = best_params.get('gmm_ema_mult', 1.03)
+    breakout_time_stop_hours = best_params.get('breakout_time_stop_hours', 72)
+    short_dip_thresh         = best_params.get('short_dip_thresh', 0.12)
 
     # Calculate HMM Probability on full df before splitting to prevent NaNs
     df = df.copy()
@@ -122,6 +124,11 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     roll_std = test_df['close'].rolling(window=20).std()
     test_df['z_score'] = (test_df['close'] - roll_mean) / (roll_std + 1e-8)
 
+    # 2. Dynamic Weighting Math
+    p = test_df['prob_high_vol'].values
+    vol_shock_arr = vol_shock.values
+    p_blended = np.where(vol_shock_arr, 1.0, p)
+
     # 1. Evaluate BOTH sub-agents independently on every tick (stateful)
     s_breakout_arr = np.zeros(len(test_df))
     s_gmm_arr = np.zeros(len(test_df))
@@ -135,6 +142,7 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     z_scores = test_df['z_score'].values
     ema_200s = test_df['ema_200'].values
     
+    short_hold_duration = 0
     for i in range(len(test_df)):
         close = closes[i]
         r_min = rolling_mins[i]
@@ -142,10 +150,24 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
         z_score = z_scores[i]
         
         # S_breakout logic
-        if not np.isnan(r_min) and close < r_min:
-            current_s_breakout = -1.0
-        elif not np.isnan(r_max) and close > r_max:
-            current_s_breakout = 0.0
+        if current_s_breakout == -1.0:
+            short_hold_duration += 1
+            is_exit = False
+            if not np.isnan(r_max) and close > r_max:
+                is_exit = True
+            elif short_hold_duration >= breakout_time_stop_hours:
+                is_exit = True
+                
+            if is_exit:
+                current_s_breakout = 0.0
+                short_hold_duration = 0
+        else:
+            if not np.isnan(r_min) and close < r_min:
+                trend_active = p_blended[i] > hmm_trend_min
+                if trend_active:
+                    if close >= ema_200s[i] * (1.0 - short_dip_thresh):
+                        current_s_breakout = -1.0
+                        short_hold_duration = 0
             
         # S_gmm logic
         if not np.isnan(z_score) and z_score < gmm_z_buy:
@@ -159,11 +181,6 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
 
     test_df['S_breakout'] = s_breakout_arr
     test_df['S_gmm'] = s_gmm_arr
-
-    # 2. Dynamic Weighting Math
-    p = test_df['prob_high_vol'].values
-    vol_shock_arr = vol_shock.values
-    p_blended = np.where(vol_shock_arr, 1.0, p)
     
     w_breakout = p_blended ** 2
     w_gmm = 1.0 - w_breakout
