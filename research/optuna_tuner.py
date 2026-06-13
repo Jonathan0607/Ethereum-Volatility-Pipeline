@@ -49,36 +49,49 @@ def load_eth_data() -> pd.DataFrame:
     return df
 
 def load_hmm_features(df):
-    """Loads HMM prob_high_vol from cache or computes it."""
+    """Loads HMM prob_high_vol from cache or computes it incrementally."""
     cache_path = os.path.join(PROJECT_ROOT, 'data', 'hmm_features_cache.pkl')
-    hmm_loaded = False
+    df['prob_high_vol'] = np.nan
+    
+    cached_df = None
     if os.path.exists(cache_path):
         try:
             with open(cache_path, 'rb') as f:
                 cached_df = pickle.load(f)
-            if cached_df.index[-1] == df.index[-1] and len(cached_df) == len(df):
-                df['prob_high_vol'] = cached_df['prob_high_vol']
-                print("[Cache] Loaded HMM prob_high_vol from cache.")
-                hmm_loaded = True
+            common_idx = df.index.intersection(cached_df.index)
+            if len(common_idx) > 0:
+                df.loc[common_idx, 'prob_high_vol'] = cached_df.loc[common_idx, 'prob_high_vol']
+                print(f"[Cache] Loaded {len(common_idx)} cached HMM features.")
         except Exception as e:
             print(f"[Cache] Cache load error: {e}. Recomputing...")
 
-    if not hmm_loaded:
-        print("Computing rolling HMM high-vol probability...")
-        df['prob_high_vol'] = df['close'].rolling(window=500).apply(
-            lambda x: get_high_vol_probability(x) if not np.isnan(x).any() else 0.0, raw=True
-        )
+    missing_idx = df.index[df['prob_high_vol'].isna()]
+    if len(missing_idx) > 0:
+        print(f"Computing rolling HMM for {len(missing_idx)} missing rows...")
+        closes_series = df['close']
+        computed_probs = {}
+        for idx in missing_idx:
+            pos = df.index.get_loc(idx)
+            if pos >= 499:
+                window_closes = closes_series.iloc[pos-499:pos+1].values
+                prob = get_high_vol_probability(window_closes)
+            else:
+                prob = 0.0
+            computed_probs[idx] = prob
+            
+        df['prob_high_vol'] = df['prob_high_vol'].fillna(pd.Series(computed_probs))
+        
         try:
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
             with open(cache_path, 'wb') as f:
                 pickle.dump(df[['close', 'prob_high_vol']], f)
-            print("[Cache] Saved HMM features to cache.")
+            print("[Cache] Saved updated HMM features to cache.")
         except Exception as e:
             print(f"[Cache] Save error: {e}")
     return df
 
-def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
-    """Simulate the V3 HMM + GMM blended stateful strategy and calculate Sharpe."""
+def simulate_metrics(test_df: pd.DataFrame, params: dict) -> tuple[float, float]:
+    """Simulate the V3 HMM + GMM blended stateful strategy and calculate Sortino and Max Drawdown."""
     bt = test_df.copy()
     bt['market_returns'] = bt['close'].pct_change()
 
@@ -97,20 +110,31 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     roll_std = bt['close'].rolling(window=20).std()
     bt['z_score'] = (bt['close'] - roll_mean) / (roll_std + 1e-8)
 
+    # 3. Dynamic Weighting Math (Moved up to support breakout regime gate)
+    p = bt['prob_high_vol'].values
+    vol_shock_arr = vol_shock.values
+    p_blended = np.where(vol_shock_arr, 1.0, p)
+
     # 2. Evaluate BOTH sub-agents independently on every tick (stateful)
     s_breakout_arr = np.zeros(len(bt))
     s_gmm_arr = np.zeros(len(bt))
     
     current_s_breakout = 0.0
     current_s_gmm = 0.0
+    short_hold_duration = 0
     
     closes = bt['close'].values
     rolling_mins = bt['rolling_min'].values
     rolling_maxs = bt['rolling_max'].values
     z_scores = bt['z_score'].values
+    ema_200s = bt['ema_200'].values
     
     gmm_z_buy = params['gmm_z_buy']
     gmm_z_sell = params['gmm_z_sell']
+    gmm_ema_mult = params.get('gmm_ema_mult', 1.03)
+    hmm_trend_min = params.get('hmm_trend_min', 0.60)
+    breakout_time_stop_hours = params.get('breakout_time_stop_hours', 72)
+    short_dip_thresh = params.get('short_dip_thresh', 0.12)
     
     for i in range(len(bt)):
         close = closes[i]
@@ -120,24 +144,38 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
         
         # S_breakout logic
         if not np.isnan(r_min) and close < r_min:
-            current_s_breakout = -1.0
-        elif not np.isnan(r_max) and close > r_max:
-            current_s_breakout = 0.0
+            trend_active = p_blended[i] > hmm_trend_min
+            if trend_active:
+                # Dip Filter: Avoid shorting the bottom of a panic dip
+                if close > ema_200s[i] * (1.0 - short_dip_thresh):
+                    if current_s_breakout == 0.0:
+                        short_hold_duration = 0
+                    current_s_breakout = -1.0
+        else:
+            # Check exit conditions
+            if current_s_breakout == -1.0:
+                is_exit = False
+                if not np.isnan(r_max) and close > r_max:
+                    is_exit = True
+                if short_hold_duration >= breakout_time_stop_hours:
+                    is_exit = True
+                if is_exit:
+                    current_s_breakout = 0.0
+                    short_hold_duration = 0
+                    
+        if current_s_breakout == -1.0:
+            short_hold_duration += 1
             
         # S_gmm logic
         if not np.isnan(z_score) and z_score < gmm_z_buy:
-            current_s_gmm = 1.0
+            if close < ema_200s[i] * gmm_ema_mult:
+                current_s_gmm = 1.0
         elif not np.isnan(z_score) and z_score > gmm_z_sell:
             current_s_gmm = 0.0
             
         s_breakout_arr[i] = current_s_breakout
         s_gmm_arr[i] = current_s_gmm
 
-    # 3. Dynamic Weighting Math
-    p = bt['prob_high_vol'].values
-    vol_shock_arr = vol_shock.values
-    p_blended = np.where(vol_shock_arr, 1.0, p)
-    
     w_breakout = p_blended ** 2
     w_gmm = 1.0 - w_breakout
     
@@ -175,7 +213,7 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     # 8. Calculate Transaction Friction (Enforce 20 bps fee per trade)
     bt['position_change'] = bt['active_position'].diff().abs().fillna(0)
     
-    FEE_PCT = 0.0020  # 20 bps fee per trade
+    FEE_PCT = 0.00120  # 20 bps fee per trade
     bt['transaction_costs'] = bt['position_change'] * FEE_PCT
 
     # 9. Calculate Net Strategy Return
@@ -183,14 +221,23 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     bt.dropna(subset=['strategy_returns'], inplace=True)
 
     if len(bt) < 100 or bt['strategy_returns'].std() < 1e-10:
-        return -999.0
+        return -999.0, -999.0
 
     total_trades = (bt['active_position'].diff().abs() > 0).sum()
+    total_net_return = bt['strategy_returns'].sum()
     
-    # Annualized Sharpe
+    # Trade Expectancy Floor Check
+    avg_trade_profit = total_net_return / total_trades if total_trades > 0 else 0.0
+    if avg_trade_profit < 0.0025:
+        return -999.0, -999.0
+        
+    # Calculate Sortino Ratio
+    downside_returns = np.minimum(bt['strategy_returns'].values, 0.0)
+    downside_deviation = np.sqrt(np.mean(downside_returns**2))
+    downside_deviation_annualized = downside_deviation * np.sqrt(24 * 365)
+    
     mean_ret = bt['strategy_returns'].mean() * 24 * 365
-    std_ret  = bt['strategy_returns'].std() * np.sqrt(24 * 365)
-    sharpe   = mean_ret / (std_ret + 1e-9)
+    sortino = mean_ret / (downside_deviation_annualized + 1e-9)
     
     # Calculate Maximum Drawdown
     cumulative_returns = (1 + bt['strategy_returns']).cumprod()
@@ -204,42 +251,48 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     
     # PENALTY 1: Hyper-activity (avoid whipsaws)
     if normalized_trades > 250:
-        return -5.0
+        return -999.0, -999.0
         
-    # PENALTY 2: Severe drawdown violation (Drawdown > -25%)
-    if max_dd < -0.25:
-        # Subtract a heavy penalty based on violation magnitude
-        penalty = abs(max_dd + 0.25) * 100.0
-        return float(sharpe - penalty)
-        
-    return float(sharpe)
+    return float(sortino), float(max_dd)
 
 def objective(trial, test_df):
-    rolling_window = trial.suggest_int('rolling_window', 24, 72)
     params = {
-        'hmm_chop_max': trial.suggest_float('hmm_chop_max', 0.10, 0.40),
-        'hmm_trend_min': trial.suggest_float('hmm_trend_min', 0.60, 0.95),
-        'gmm_z_buy': trial.suggest_float('gmm_z_buy', -4.00, -3.20),
-        'gmm_z_sell': trial.suggest_float('gmm_z_sell', 0.0, 1.5),
-        'rolling_min_window': rolling_window,
-        'rolling_max_window': rolling_window,
-        'vol_shock_mult': trial.suggest_float('vol_shock_mult', 1.30, 2.00),
-        'rebalance_threshold': trial.suggest_float('rebalance_threshold', 0.45, 0.65),
+        'hmm_chop_max': trial.suggest_float('hmm_chop_max', 0.05, 0.50),
+        'hmm_trend_min': trial.suggest_float('hmm_trend_min', 0.50, 0.98),
+        'gmm_z_buy': trial.suggest_float('gmm_z_buy', -4.50, -1.00),
+        'gmm_z_sell': trial.suggest_float('gmm_z_sell', -0.5, 2.0),
+        'rolling_min_window': trial.suggest_int('rolling_min_window', 12, 120),
+        'rolling_max_window': trial.suggest_int('rolling_max_window', 12, 120),
+        'vol_shock_mult': trial.suggest_float('vol_shock_mult', 1.10, 2.50),
+        'rebalance_threshold': trial.suggest_float('rebalance_threshold', 0.05, 0.85),
+        'gmm_ema_mult': trial.suggest_float('gmm_ema_mult', 0.95, 1.10),
+        'breakout_time_stop_hours': trial.suggest_int('breakout_time_stop_hours', 12, 168),
+        'short_dip_thresh': trial.suggest_float('short_dip_thresh', 0.02, 0.25),
     }
 
-    sharpe = simulate_sharpe(test_df, params)
-    return sharpe
+    sortino, max_dd = simulate_metrics(test_df, params)
+    return sortino, max_dd
 
 def write_best_params(study, current_params):
-    best = study.best_trial.params
-    current_params['rolling_min_window'] = int(best['rolling_window'])
-    current_params['rolling_max_window'] = int(best['rolling_window'])
+    best_trials = study.best_trials
+    if not best_trials:
+        raise ValueError("No completed Pareto trials found.")
+        
+    # Select the trial on the Pareto frontier with the highest Sortino Ratio
+    best_trial = max(best_trials, key=lambda t: t.values[0] if t.values is not None else -999.0)
+    best = best_trial.params
+    
+    current_params['rolling_min_window'] = int(best['rolling_min_window'])
+    current_params['rolling_max_window'] = int(best['rolling_max_window'])
     current_params['hmm_chop_max']    = float(best['hmm_chop_max'])
     current_params['hmm_trend_min']   = float(best['hmm_trend_min'])
     current_params['gmm_z_buy']       = float(best['gmm_z_buy'])
     current_params['gmm_z_sell']      = float(best['gmm_z_sell'])
     current_params['vol_shock_mult']      = float(best['vol_shock_mult'])
     current_params['rebalance_threshold'] = float(best['rebalance_threshold'])
+    current_params['gmm_ema_mult']        = float(best['gmm_ema_mult'])
+    current_params['breakout_time_stop_hours'] = int(best['breakout_time_stop_hours'])
+    current_params['short_dip_thresh']        = float(best['short_dip_thresh'])
     
     # Remove obsolete single breakout_window to avoid confusion
     if 'breakout_window' in current_params:
@@ -249,13 +302,13 @@ def write_best_params(study, current_params):
         json.dump(current_params, f, indent=2)
 
     print(f"\n[Air-Gap] best_params.txt updated → {PARAMS_PATH}")
-    print(f"[Air-Gap] Best Sharpe: {study.best_value:+.4f}")
+    print(f"[Air-Gap] Best Sortino: {best_trial.values[0]:+.4f} | Drawdown: {best_trial.values[1]*100:+.2f}%")
     print(f"[Air-Gap] Updated Config:\n{json.dumps(current_params, indent=2)}")
 
 def main():
     print("=" * 60)
-    print("  OPTUNA BAYESIAN HYPERPARAMETER SANDBOX (CONSTRAINED V2)")
-    print("  Metric: Maximize Simulated Sharpe Ratio")
+    print("  OPTUNA BAYESIAN HYPERPARAMETER SANDBOX (PARETO MULTI-OBJECTIVE)")
+    print("  Metric: Maximize Sortino Ratio & Max Drawdown")
     print(f"  Trials: {N_TRIALS}  |  Study DB: {STUDY_DB}")
     print("=" * 60)
 
@@ -310,11 +363,26 @@ def main():
     print(f"[Sandbox] Beginning {N_TRIALS} fast Optuna trials...\n")
 
     study = optuna.create_study(
-        study_name="eth_hmm_breakout_opt",
-        direction="maximize",
+        study_name="eth_hmm_breakout_opt_multi_v3",
+        directions=["maximize", "maximize"],
         storage=STUDY_DB,
         load_if_exists=True,
     )
+
+    # Enqueue a known successful trial to anchor the TPE sampler and break the flat penalty surface
+    study.enqueue_trial({
+        'hmm_chop_max': 0.4509,
+        'hmm_trend_min': 0.8089,
+        'gmm_z_buy': -4.0537,
+        'gmm_z_sell': 0.7483,
+        'rolling_min_window': 70,
+        'rolling_max_window': 23,
+        'vol_shock_mult': 2.1667,
+        'rebalance_threshold': 0.7946,
+        'gmm_ema_mult': 0.9649,
+        'breakout_time_stop_hours': 111,
+        'short_dip_thresh': 0.0441
+    })
 
     study.optimize(lambda trial: objective(trial, train_df), n_trials=N_TRIALS)
 

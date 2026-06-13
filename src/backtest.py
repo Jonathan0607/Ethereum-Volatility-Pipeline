@@ -59,35 +59,53 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     gmm_z_sell      = best_params.get('gmm_z_sell', 0.5)
     vol_shock_mult  = best_params.get('vol_shock_mult', 1.5)
     rebalance_threshold = best_params.get('rebalance_threshold', 0.15)
+    gmm_ema_mult = best_params.get('gmm_ema_mult', 1.03)
+    breakout_time_stop_hours = best_params.get('breakout_time_stop_hours', 72)
+    short_dip_thresh = best_params.get('short_dip_thresh', 0.12)
 
     # Calculate HMM Probability on full df before splitting to prevent NaNs
     df = df.copy()
     
-    # Check HMM cache
+    # Check HMM cache and load incrementally
     import pickle
     cache_path = os.path.join(current_dir, '..', 'data', 'hmm_features_cache.pkl')
-    hmm_loaded = False
+    df['prob_high_vol'] = np.nan
+    
+    cached_df = None
     if os.path.exists(cache_path):
         try:
             with open(cache_path, 'rb') as f:
                 cached_df = pickle.load(f)
-            if cached_df.index[-1] == df.index[-1] and len(cached_df) == len(df):
-                df['prob_high_vol'] = cached_df['prob_high_vol']
-                # print("[Cache] Loaded HMM prob_high_vol from cache.")
-                hmm_loaded = True
+            # Load values for existing indices in cache
+            common_idx = df.index.intersection(cached_df.index)
+            if len(common_idx) > 0:
+                df.loc[common_idx, 'prob_high_vol'] = cached_df.loc[common_idx, 'prob_high_vol']
+                print(f"[Cache] Loaded {len(common_idx)} cached HMM features.")
         except Exception as e:
             print(f"[Cache] Cache load error: {e}. Recomputing...")
             
-    if not hmm_loaded:
-        # print("Computing rolling HMM high-vol probability (this might take a few minutes if not cached)...")
-        df['prob_high_vol'] = df['close'].rolling(window=500).apply(
-            lambda x: get_high_vol_probability(x) if not np.isnan(x).any() else 0.0, raw=True
-        )
+    # Calculate rolling HMM only for indices missing from cache
+    missing_idx = df.index[df['prob_high_vol'].isna()]
+    if len(missing_idx) > 0:
+        print(f"Computing rolling HMM for {len(missing_idx)} missing rows...")
+        closes_series = df['close']
+        computed_probs = {}
+        for idx in missing_idx:
+            pos = df.index.get_loc(idx)
+            if pos >= 499:
+                window_closes = closes_series.iloc[pos-499:pos+1].values
+                prob = get_high_vol_probability(window_closes)
+            else:
+                prob = 0.0
+            computed_probs[idx] = prob
+            
+        df['prob_high_vol'] = df['prob_high_vol'].fillna(pd.Series(computed_probs))
+        
         try:
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
             with open(cache_path, 'wb') as f:
                 pickle.dump(df[['close', 'prob_high_vol']], f)
-            # print("[Cache] Saved computed HMM prob_high_vol to cache.")
+            print("[Cache] Saved updated HMM prob_high_vol to cache.")
         except Exception as e:
             print(f"[Cache] Save error: {e}")
             
@@ -121,17 +139,26 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
     roll_std = test_df['close'].rolling(window=20).std()
     test_df['z_score'] = (test_df['close'] - roll_mean) / (roll_std + 1e-8)
 
+    # 2. Pre-calculate Dynamic Weighting Math for loop use
+    p = test_df['prob_high_vol'].values
+    vol_shock_arr = vol_shock.values
+    p_blended = np.where(vol_shock_arr, 1.0, p)
+    w_breakout = p_blended ** 2
+    w_gmm = 1.0 - w_breakout
+
     # 1. Evaluate BOTH sub-agents independently on every tick (stateful)
     s_breakout_arr = np.zeros(len(test_df))
     s_gmm_arr = np.zeros(len(test_df))
     
     current_s_breakout = 0.0
     current_s_gmm = 0.0
+    short_hold_duration = 0
     
     closes = test_df['close'].values
     rolling_mins = test_df['rolling_min'].values
     rolling_maxs = test_df['rolling_max'].values
     z_scores = test_df['z_score'].values
+    ema_200s = test_df['ema_200'].values
     
     for i in range(len(test_df)):
         close = closes[i]
@@ -141,13 +168,33 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
         
         # S_breakout logic
         if not np.isnan(r_min) and close < r_min:
-            current_s_breakout = -1.0
-        elif not np.isnan(r_max) and close > r_max:
-            current_s_breakout = 0.0
+            # Regime Gate: Only enter short if HMM detects active trend or vol shock is active
+            trend_active = p_blended[i] > hmm_trend_min
+            if trend_active:
+                # Dip Filter: Avoid shorting the bottom of a panic dip
+                if close > ema_200s[i] * (1.0 - short_dip_thresh):
+                    if current_s_breakout == 0.0:
+                        short_hold_duration = 0
+                    current_s_breakout = -1.0
+        else:
+            # Check exit conditions
+            if current_s_breakout == -1.0:
+                is_exit = False
+                if not np.isnan(r_max) and close > r_max:
+                    is_exit = True
+                if short_hold_duration >= breakout_time_stop_hours:
+                    is_exit = True
+                if is_exit:
+                    current_s_breakout = 0.0
+                    short_hold_duration = 0
+                    
+        if current_s_breakout == -1.0:
+            short_hold_duration += 1
             
         # S_gmm logic
         if not np.isnan(z_score) and z_score < gmm_z_buy:
-            current_s_gmm = 1.0
+            if close < ema_200s[i] * gmm_ema_mult:
+                current_s_gmm = 1.0
         elif not np.isnan(z_score) and z_score > gmm_z_sell:
             current_s_gmm = 0.0
             
@@ -156,11 +203,6 @@ def run_backtest(df, target_volatility=TARGET_VOLATILITY):
 
     test_df['S_breakout'] = s_breakout_arr
     test_df['S_gmm'] = s_gmm_arr
-
-    # 2. Dynamic Weighting Math
-    p = test_df['prob_high_vol'].values
-    vol_shock_arr = vol_shock.values
-    p_blended = np.where(vol_shock_arr, 1.0, p)
     
     w_breakout = p_blended ** 2
     w_gmm = 1.0 - w_breakout

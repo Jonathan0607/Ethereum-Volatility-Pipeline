@@ -87,6 +87,7 @@ class TradingState:
         self.entry_price = 0.0
         self.s_breakout = 0.0
         self.s_gmm = 0.0
+        self.short_hold_duration = 0
 
 current_state = TradingState()
 
@@ -311,7 +312,7 @@ def execute_live_stream_trade(payload: LiveExecutionPayload, background_tasks: B
         forecasted_vol = max(payload.forecasted_vol, 1e-8)
         
         # 1. Fetch historical data for Monte Carlo predicted GARCH volatility and EMA-200
-        raw_df = yf.download("ETH-USD", period="15d", interval="1h", progress=False, auto_adjust=True)
+        raw_df = yf.download("ETH-USD", period="30d", interval="1h", progress=False, auto_adjust=True)
         if isinstance(raw_df.columns, pd.MultiIndex):
             raw_df.columns = [col[0] for col in raw_df.columns]
         raw_df.rename(columns={"Open":"open","High":"high","Low":"low","Close":"close","Volume":"volume"}, inplace=True)
@@ -339,6 +340,9 @@ def execute_live_stream_trade(payload: LiveExecutionPayload, background_tasks: B
         hmm_chop_max    = best_params.get('hmm_chop_max', 0.40)
         hmm_trend_min   = best_params.get('hmm_trend_min', 0.60)
         cooldown_hours  = best_params.get('cooldown_hours', 3)
+        gmm_ema_mult    = best_params.get('gmm_ema_mult', 1.03)
+        breakout_time_stop_hours = best_params.get('breakout_time_stop_hours', 72)
+        short_dip_thresh = best_params.get('short_dip_thresh', 0.12)
 
         # Reconcile position and size from in-memory state to avoid DB latency and desync
         current_position = current_state.current_position
@@ -348,26 +352,46 @@ def execute_live_stream_trade(payload: LiveExecutionPayload, background_tasks: B
         # Calculate GMM state
         gmm_z_score, gmm_cluster = get_gmm_state(payload.closes)
 
+        # 2. Dynamic Weighting Math (Moved up to support breakout regime gate)
+        vol_shock = payload.vol_24h > (payload.vol_168h * best_params.get('vol_shock_mult', 1.5))
+        p = 1.0 if vol_shock else payload.prob_high_vol
+        w_breakout = p ** 2
+        w_gmm = 1.0 - w_breakout
+
         # 1. Independent Sub-Agent Triggers (Stateful)
         # S_breakout logic
         if close_price < payload.rolling_min:
-            current_state.s_breakout = -1.0
-        elif close_price > payload.rolling_max:
-            current_state.s_breakout = 0.0
+            # Regime Gate: Only enter short if HMM detects active trend or vol shock is active
+            trend_active = p > hmm_trend_min
+            if trend_active:
+                # Dip Filter: Avoid shorting the bottom of a panic dip
+                if close_price > ema_200 * (1.0 - short_dip_thresh):
+                    if current_state.s_breakout == 0.0:
+                        current_state.short_hold_duration = 0
+                    current_state.s_breakout = -1.0
+        else:
+            # Check exit conditions
+            if current_state.s_breakout == -1.0:
+                is_exit = False
+                if close_price > payload.rolling_max:
+                    is_exit = True
+                if current_state.short_hold_duration >= breakout_time_stop_hours:
+                    is_exit = True
+                if is_exit:
+                    current_state.s_breakout = 0.0
+                    current_state.short_hold_duration = 0
+                    
+        if current_state.s_breakout == -1.0:
+            current_state.short_hold_duration += 1
 
         # S_gmm logic
         gmm_z_buy = best_params.get('gmm_z_buy', -1.5)
         gmm_z_sell = best_params.get('gmm_z_sell', 0.5)
         if gmm_z_score < gmm_z_buy:
-            current_state.s_gmm = 1.0
+            if close_price < ema_200 * gmm_ema_mult:
+                current_state.s_gmm = 1.0
         elif gmm_z_score > gmm_z_sell:
             current_state.s_gmm = 0.0
-
-        # 2. Dynamic Weighting Math
-        vol_shock = payload.vol_24h > (payload.vol_168h * best_params.get('vol_shock_mult', 1.5))
-        p = 1.0 if vol_shock else payload.prob_high_vol
-        w_breakout = p ** 2
-        w_gmm = 1.0 - w_breakout
 
         # 3. Target Position Formula (Blended & Scaled)
         raw_target = (w_breakout * current_state.s_breakout) + (w_gmm * current_state.s_gmm)
@@ -384,10 +408,23 @@ def execute_live_stream_trade(payload: LiveExecutionPayload, background_tasks: B
         else:
             current_position_size = 0.0
 
+        # Apply Asymmetric Position Scaling
+        abs_target = abs(ideal_size)
+        abs_current = current_size
+        delta = ideal_size - current_position_size
+        
+        leverage_dampener = best_params.get('leverage_dampener', 0.35)
+        if abs_target < abs_current:
+            multiplier = 1.0
+        else:
+            multiplier = leverage_dampener
+            
+        ideal_size_dampened = current_position_size + delta * multiplier
+
         # Apply Friction Filter (Rebalance Threshold)
         rebalance_threshold = best_params.get('rebalance_threshold', 0.15)
         if ideal_size == 0.0 or abs(ideal_size - current_position_size) > rebalance_threshold:
-            target_position_size = ideal_size
+            target_position_size = ideal_size_dampened
         else:
             target_position_size = current_position_size
 
