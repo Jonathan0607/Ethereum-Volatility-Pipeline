@@ -10,9 +10,6 @@ RUN pip install pybind11
 
 COPY src/ ./src/
 COPY setup.py .
-COPY *.npy ./
-COPY *.pth ./
-COPY *.pkl ./
 COPY *.txt ./
 COPY *.json ./
 

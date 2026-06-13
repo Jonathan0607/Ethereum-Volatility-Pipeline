@@ -3,6 +3,9 @@
 # Exit immediately if a command exits with a non-zero status
 set -e
 
+# Navigate to the directory where this script is located to prevent relative path crashes
+cd "$(dirname "$0")"
+
 echo "--- Starting Chronos Weekly Retraining Cycle: $(date) ---"
 
 # 1. Navigate to your absolute local project directory

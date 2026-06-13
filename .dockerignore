@@ -1,0 +1,16 @@
+venv/
+data/
+frontend/
+.git/
+.gitignore
+__pycache__/
+*.db
+*.png
+.env
+.DS_Store
+.antigravityignore
+pre_flight_audit_results.md
+project_audit.md
+README.md
+build/
+core/

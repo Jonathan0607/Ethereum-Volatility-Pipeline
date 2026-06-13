@@ -1,1 +1,22 @@
-{'hidden_dim': 64, 'lr': 0.003003155263577579, 'dropout': 0.10124230455490923, 'input_dim': 5}
+{
+  "z_window": 79,
+  "z_buy": -1.1410220464763705,
+  "z_sell": 2.0719498228229916,
+  "hurst_threshold": 0.3656135074851036,
+  "hurst_window": 48,
+  "sl_mult": 9.199366013380414,
+  "cooldown_hours": 11,
+  "vol_mult": 1.1182001556181016,
+  "use_partial_sell": true,
+  "partial_sell_ratio": 0.22268405731261148,
+  "use_ema_exit": false,
+  "hmm_threshold": 0.6594155980615416,
+  "hmm_chop_max": 0.40,
+  "hmm_trend_min": 0.60,
+  "gmm_z_buy": -3.65,
+  "gmm_z_sell": 0.5,
+  "vol_shock_mult": 1.50,
+  "rebalance_threshold": 0.48,
+  "rolling_min_window": 48,
+  "rolling_max_window": 48
+}
