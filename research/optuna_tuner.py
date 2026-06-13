@@ -78,6 +78,7 @@ def suggest_neighborhood_int(trial, name, default_center, low_factor=0.8, high_f
         low = high - 1
     return trial.suggest_int(name, int(low), int(high))
 
+STUDY_NAME  = "eth_hmm_breakout_v4_fresh"
 STUDY_DB    = f"sqlite:///{os.path.join(PROJECT_ROOT, 'research', 'optuna_study.db')}"
 N_TRIALS    = 500
 
@@ -282,16 +283,19 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     return float(sharpe)
 
 def objective(trial, test_df):
-    default_window = current_params.get('rolling_min_window', current_params.get('rolling_window', 48))
-    rolling_window = suggest_neighborhood_int(trial, 'rolling_window', default_window, low_factor=0.8, high_factor=1.2, min_val=12, max_val=120)
+    default_min = current_params.get('rolling_min_window', 52)
+    default_max = current_params.get('rolling_max_window', 52)
     
     params = {
         'hmm_chop_max': suggest_neighborhood_float(trial, 'hmm_chop_max', 0.40, low_factor=0.8, high_factor=1.2, min_val=0.10, max_val=0.50),
         'hmm_trend_min': suggest_neighborhood_float(trial, 'hmm_trend_min', 0.60, low_factor=0.8, high_factor=1.2, min_val=0.50, max_val=0.95),
         'gmm_z_buy': suggest_neighborhood_float(trial, 'gmm_z_buy', -3.65, low_factor=0.8, high_factor=1.2, min_val=-4.50, max_val=-1.00),
         'gmm_z_sell': suggest_neighborhood_float(trial, 'gmm_z_sell', 0.5, low_factor=0.8, high_factor=1.2, min_val=0.0, max_val=1.5),
-        'rolling_min_window': rolling_window,
-        'rolling_max_window': rolling_window,
+        
+        # Optimize support and resistance channels independently
+        'rolling_min_window': suggest_neighborhood_int(trial, 'rolling_min_window', default_min, low_factor=0.7, high_factor=1.3, min_val=12, max_val=150),
+        'rolling_max_window': suggest_neighborhood_int(trial, 'rolling_max_window', default_max, low_factor=0.7, high_factor=1.3, min_val=12, max_val=150),
+        
         'vol_shock_mult': suggest_neighborhood_float(trial, 'vol_shock_mult', 1.50, low_factor=0.8, high_factor=1.2, min_val=1.10, max_val=2.50),
         'rebalance_threshold': suggest_neighborhood_float(trial, 'rebalance_threshold', 0.48, low_factor=0.8, high_factor=1.2, min_val=0.10, max_val=0.85),
         'gmm_ema_mult': suggest_neighborhood_float(trial, 'gmm_ema_mult', 1.03, low_factor=0.8, high_factor=1.2, min_val=0.90, max_val=1.20),
@@ -304,8 +308,8 @@ def objective(trial, test_df):
 
 def write_best_params(study, current_params):
     best = study.best_trial.params
-    current_params['rolling_min_window'] = int(best['rolling_window'])
-    current_params['rolling_max_window'] = int(best['rolling_window'])
+    current_params['rolling_min_window'] = int(best['rolling_min_window'])
+    current_params['rolling_max_window'] = int(best['rolling_max_window'])
     current_params['hmm_chop_max']    = float(best['hmm_chop_max'])
     current_params['hmm_trend_min']   = float(best['hmm_trend_min'])
     current_params['gmm_z_buy']       = float(best['gmm_z_buy'])
@@ -371,24 +375,26 @@ def main():
     df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
     df.dropna(subset=FEATURE_COLS, inplace=True)
 
-    # Split data to get the train set
-    train_raw, _ = split_data(df, verbose=True)
-    
-    # Feature engineering for train set
-    train_df = calculate_features_test(train_raw)
-    
-    # Pre-generate forecasts using rolling volatility of log returns (vol_24h)
+    # In main(): Replace the rigid train split with a rolling production lookback
+    # Ensure the data passed to the optimizer represents the immediate trailing 90 or 180 days
+    optimization_window_days = 180
+    cutoff_date = df.index.max() - pd.Timedelta(days=optimization_window_days)
+    production_train_df = df[df.index >= cutoff_date]
+
+    # Complete feature preparation on the designated window
+    train_df = calculate_features_test(production_train_df)
     train_df['forecasted_vol'] = train_df['rolling_vol_24h']
     train_df.dropna(subset=['forecasted_vol'], inplace=True)
 
     print(f"\n[Sandbox] Feature engineering & pre-computation complete.")
     print(f"[Sandbox] Beginning {N_TRIALS} fast Optuna trials...\n")
 
+    # Instantiating the clean study name
     study = optuna.create_study(
-        study_name="eth_hmm_breakout_opt",
+        study_name=STUDY_NAME,
         direction="maximize",
         storage=STUDY_DB,
-        load_if_exists=True,
+        load_if_exists=False, # Set to False or change STUDY_NAME to purge old trial memories
     )
 
     study.optimize(lambda trial: objective(trial, train_df), n_trials=N_TRIALS)
