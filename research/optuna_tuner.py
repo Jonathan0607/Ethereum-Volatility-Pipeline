@@ -36,6 +36,48 @@ from strategy import get_gmm_state
 from hmm_engine import get_high_vol_probability
 
 PARAMS_PATH = os.path.join(PROJECT_ROOT, 'best_params.txt')
+
+# Load current best params at startup for Anchored Neighborhood Search
+current_params = {}
+if os.path.exists(PARAMS_PATH):
+    with open(PARAMS_PATH, 'r') as f:
+        content = f.read()
+        try:
+            current_params = json.loads(content)
+        except Exception:
+            try:
+                current_params = ast.literal_eval(content)
+            except Exception:
+                current_params = {}
+
+def suggest_neighborhood_float(trial, name, default_center, low_factor=0.8, high_factor=1.2, min_val=None, max_val=None):
+    center = current_params.get(name, default_center)
+    v1 = center * low_factor
+    v2 = center * high_factor
+    low = min(v1, v2)
+    high = max(v1, v2)
+    if min_val is not None:
+        low = max(low, min_val)
+    if max_val is not None:
+        high = min(high, max_val)
+    if low >= high:
+        low = high - 1e-5
+    return trial.suggest_float(name, float(low), float(high))
+
+def suggest_neighborhood_int(trial, name, default_center, low_factor=0.8, high_factor=1.2, min_val=1, max_val=None):
+    center = current_params.get(name, default_center)
+    v1 = int(round(center * low_factor))
+    v2 = int(round(center * high_factor))
+    low = min(v1, v2)
+    high = max(v1, v2)
+    if min_val is not None:
+        low = max(low, min_val)
+    if max_val is not None:
+        high = min(high, max_val)
+    if low >= high:
+        low = high - 1
+    return trial.suggest_int(name, int(low), int(high))
+
 STUDY_DB    = f"sqlite:///{os.path.join(PROJECT_ROOT, 'research', 'optuna_study.db')}"
 N_TRIALS    = 500
 
@@ -240,19 +282,21 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     return float(sharpe)
 
 def objective(trial, test_df):
-    rolling_window = trial.suggest_int('rolling_window', 24, 72)
+    default_window = current_params.get('rolling_min_window', current_params.get('rolling_window', 48))
+    rolling_window = suggest_neighborhood_int(trial, 'rolling_window', default_window, low_factor=0.8, high_factor=1.2, min_val=12, max_val=120)
+    
     params = {
-        'hmm_chop_max': trial.suggest_float('hmm_chop_max', 0.10, 0.40),
-        'hmm_trend_min': trial.suggest_float('hmm_trend_min', 0.60, 0.95),
-        'gmm_z_buy': trial.suggest_float('gmm_z_buy', -4.00, -3.20),
-        'gmm_z_sell': trial.suggest_float('gmm_z_sell', 0.0, 1.5),
+        'hmm_chop_max': suggest_neighborhood_float(trial, 'hmm_chop_max', 0.40, low_factor=0.8, high_factor=1.2, min_val=0.10, max_val=0.50),
+        'hmm_trend_min': suggest_neighborhood_float(trial, 'hmm_trend_min', 0.60, low_factor=0.8, high_factor=1.2, min_val=0.50, max_val=0.95),
+        'gmm_z_buy': suggest_neighborhood_float(trial, 'gmm_z_buy', -3.65, low_factor=0.8, high_factor=1.2, min_val=-4.50, max_val=-1.00),
+        'gmm_z_sell': suggest_neighborhood_float(trial, 'gmm_z_sell', 0.5, low_factor=0.8, high_factor=1.2, min_val=0.0, max_val=1.5),
         'rolling_min_window': rolling_window,
         'rolling_max_window': rolling_window,
-        'vol_shock_mult': trial.suggest_float('vol_shock_mult', 1.30, 2.00),
-        'rebalance_threshold': trial.suggest_float('rebalance_threshold', 0.45, 0.65),
-        'gmm_ema_mult': trial.suggest_float('gmm_ema_mult', 0.95, 1.10),
-        'breakout_time_stop_hours': trial.suggest_int('breakout_time_stop_hours', 24, 96),
-        'short_dip_thresh': trial.suggest_float('short_dip_thresh', 0.05, 0.15),
+        'vol_shock_mult': suggest_neighborhood_float(trial, 'vol_shock_mult', 1.50, low_factor=0.8, high_factor=1.2, min_val=1.10, max_val=2.50),
+        'rebalance_threshold': suggest_neighborhood_float(trial, 'rebalance_threshold', 0.48, low_factor=0.8, high_factor=1.2, min_val=0.10, max_val=0.85),
+        'gmm_ema_mult': suggest_neighborhood_float(trial, 'gmm_ema_mult', 1.03, low_factor=0.8, high_factor=1.2, min_val=0.90, max_val=1.20),
+        'breakout_time_stop_hours': suggest_neighborhood_int(trial, 'breakout_time_stop_hours', 72, low_factor=0.8, high_factor=1.2, min_val=24, max_val=168),
+        'short_dip_thresh': suggest_neighborhood_float(trial, 'short_dip_thresh', 0.12, low_factor=0.8, high_factor=1.2, min_val=0.01, max_val=0.30),
     }
 
     sharpe = simulate_sharpe(test_df, params)
