@@ -7,6 +7,7 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
+      - ./best_params.txt:/app/best_params.txt
     env_file:
       - .env
     environment:
@@ -31,4 +32,20 @@ services:
       - api
     environment:
       - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: backend.Dockerfile
+    command: python scheduler.py
+    volumes:
+      - ./data:/app/data
+      - ./best_params.txt:/app/best_params.txt
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - api
     restart: unless-stopped
