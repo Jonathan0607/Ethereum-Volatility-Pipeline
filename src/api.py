@@ -310,6 +310,12 @@ def execute_live_stream_trade(payload: LiveExecutionPayload, background_tasks: B
     """Real-Time Gateway: Triggered instantly by the WebSocket stream aggregator"""
     print(f"\n[{datetime.now()}] Live WebSocket signal received...")
     
+    # Check if trading is paused by the recon engine
+    pause_flag_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'trading_paused.flag')
+    if os.path.exists(pause_flag_path):
+        logger.warning("   [PAUSED VETO] Strategy execution is PAUSED by Risk Manager. Skipping execution.")
+        return {"status": "Success", "action": "FLAT", "position_size": 0.0, "reason": "paused"}
+        
     # Check Cooldown (if we just exited a trade with a loss, wait 3 hours)
     if datetime.now() < current_state.cooldown_until:
         print(f"   [COOLDOWN VETO] Strategy is in cooldown state until {current_state.cooldown_until}. Skipping execution.")
