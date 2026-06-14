@@ -28,6 +28,8 @@ services:
     build:
       context: .
       dockerfile: stream.Dockerfile
+    volumes:
+      - ./best_params.txt:/app/best_params.txt
     depends_on:
       - api
     environment:
