@@ -119,8 +119,8 @@ def load_hmm_features(df):
             print(f"[Cache] Save error: {e}")
     return df
 
-def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
-    """Simulate the V3 HMM + GMM blended stateful strategy and calculate Sharpe."""
+def simulate_metrics(test_df: pd.DataFrame, params: dict) -> tuple:
+    """Simulate the V3 HMM + GMM blended stateful strategy and calculate Sortino and Drawdown."""
     bt = test_df.copy()
     bt['market_returns'] = bt['close'].pct_change()
 
@@ -250,14 +250,23 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     bt.dropna(subset=['strategy_returns'], inplace=True)
 
     if len(bt) < 100 or bt['strategy_returns'].std() < 1e-10:
-        return -999.0
+        return -999.0, -999.0
 
     total_trades = (bt['active_position'].diff().abs() > 0).sum()
     
-    # Annualized Sharpe
+    # Trade Expectancy Floor Constraint (avg_trade_profit must be >= 20 bps)
+    if total_trades == 0:
+        return -999.0, -999.0
+    total_net_return = bt['strategy_returns'].sum()
+    avg_trade_profit = total_net_return / total_trades
+    if avg_trade_profit < 0.0020:
+        return -999.0, -999.0
+    
+    # Annualized return and downside deviation
     mean_ret = bt['strategy_returns'].mean() * 24 * 365
-    std_ret  = bt['strategy_returns'].std() * np.sqrt(24 * 365)
-    sharpe   = mean_ret / (std_ret + 1e-9)
+    negative_returns = np.minimum(bt['strategy_returns'].values, 0.0)
+    downside_dev = np.sqrt(np.mean(negative_returns ** 2)) * np.sqrt(24 * 365)
+    sortino_ratio = mean_ret / (downside_dev + 1e-9)
     
     # Calculate Maximum Drawdown
     cumulative_returns = (1 + bt['strategy_returns']).cumprod()
@@ -265,21 +274,16 @@ def simulate_sharpe(test_df: pd.DataFrame, params: dict) -> float:
     drawdown = (cumulative_returns - peak) / peak
     max_dd = drawdown.min()
     
-    # Normalize trade count
+    # Normalize trade count for penalty check
     dataset_days = len(bt) / 24
     normalized_trades = total_trades * (150 / dataset_days)
     
     # PENALTY 1: Hyper-activity (avoid whipsaws)
     if normalized_trades > 250:
-        return -5.0
+        return -999.0, -999.0
         
-    # PENALTY 2: Severe drawdown violation (Drawdown > -25%)
-    if max_dd < -0.25:
-        # Subtract a heavy penalty based on violation magnitude
-        penalty = abs(max_dd + 0.25) * 100.0
-        return float(sharpe - penalty)
-        
-    return float(sharpe)
+    return float(sortino_ratio), float(max_dd)
+
 
 def objective(trial, test_df):
     default_min = current_params.get('rolling_min_window', 52)
@@ -302,11 +306,19 @@ def objective(trial, test_df):
         'short_dip_thresh': suggest_neighborhood_float(trial, 'short_dip_thresh', 0.12, low_factor=0.8, high_factor=1.2, min_val=0.01, max_val=0.30),
     }
 
-    sharpe = simulate_sharpe(test_df, params)
-    return sharpe
+    sortino, max_dd = simulate_metrics(test_df, params)
+    return sortino, max_dd
+
 
 def write_best_params(study, current_params):
-    best = study.best_trial.params
+    best_trials = study.best_trials
+    if not best_trials:
+        raise ValueError("No completed trials found.")
+    
+    # Pick the trial with the highest Sortino Ratio (first objective value)
+    best_trial = max(best_trials, key=lambda t: t.values[0])
+    best = best_trial.params
+    
     current_params['rolling_min_window'] = int(best['rolling_min_window'])
     current_params['rolling_max_window'] = int(best['rolling_max_window'])
     current_params['hmm_chop_max']    = float(best['hmm_chop_max'])
@@ -327,13 +339,14 @@ def write_best_params(study, current_params):
         json.dump(current_params, f, indent=2)
 
     print(f"\n[Air-Gap] best_params.txt updated → {PARAMS_PATH}")
-    print(f"[Air-Gap] Best Sharpe: {study.best_value:+.4f}")
+    print(f"[Air-Gap] Best Sortino: {best_trial.values[0]:+.4f} | Max DD: {best_trial.values[1]*100:+.2f}%")
     print(f"[Air-Gap] Updated Config:\n{json.dumps(current_params, indent=2)}")
+
 
 def main():
     print("=" * 60)
     print("  OPTUNA BAYESIAN HYPERPARAMETER SANDBOX (CONSTRAINED V2)")
-    print("  Metric: Maximize Simulated Sharpe Ratio")
+    print("  Metric: Maximize Sortino Ratio & Minimize Max Drawdown (Pareto Frontier)")
     print(f"  Trials: {N_TRIALS}  |  Study DB: {STUDY_DB}")
     print("=" * 60)
 
@@ -398,10 +411,28 @@ def main():
 
     study = optuna.create_study(
         study_name=STUDY_NAME,
-        direction="maximize",
+        directions=["maximize", "maximize"],
         storage=STUDY_DB,
         load_if_exists=False, # Safe now because the name is unique every run
     )
+
+    # --- Warm Start: Enqueue current best params as Trial 0 ---
+    if best_params:
+        anchor_trial = {
+            'hmm_chop_max': best_params.get('hmm_chop_max', 0.40),
+            'hmm_trend_min': best_params.get('hmm_trend_min', 0.60),
+            'gmm_z_buy': best_params.get('gmm_z_buy', -3.65),
+            'gmm_z_sell': best_params.get('gmm_z_sell', 0.5),
+            'rolling_min_window': best_params.get('rolling_min_window', 52),
+            'rolling_max_window': best_params.get('rolling_max_window', 52),
+            'vol_shock_mult': best_params.get('vol_shock_mult', 1.50),
+            'rebalance_threshold': best_params.get('rebalance_threshold', 0.48),
+            'gmm_ema_mult': best_params.get('gmm_ema_mult', 1.03),
+            'breakout_time_stop_hours': best_params.get('breakout_time_stop_hours', 72),
+            'short_dip_thresh': best_params.get('short_dip_thresh', 0.12)
+        }
+        study.enqueue_trial(anchor_trial)
+        print("[Sandbox] Warm-started TPE sampler with anchor parameters.")
 
     study.optimize(lambda trial: objective(trial, train_df), n_trials=N_TRIALS)
 
@@ -412,5 +443,7 @@ def main():
 
     print("\n[Sandbox] Fast Optimization Done.")
 
+
 if __name__ == "__main__":
     main()
+
