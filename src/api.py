@@ -539,22 +539,26 @@ def get_portfolio_stats():
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        cursor.execute("SELECT SUM(realized_pnl_pct) FROM paper_trades WHERE action = 'BUY' AND status = 'CLOSED'")
+        cursor.execute("SELECT SUM(realized_pnl_pct) FROM paper_trades WHERE action IN ('BUY', 'SELL_SHORT') AND status = 'CLOSED'")
         total_realized = cursor.fetchone()[0] or 0.0
-        cursor.execute("SELECT COUNT(*) FROM paper_trades WHERE action = 'BUY' AND status = 'CLOSED'")
+        cursor.execute("SELECT COUNT(*) FROM paper_trades WHERE action IN ('BUY', 'SELL_SHORT') AND status = 'CLOSED'")
         total_closed = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM paper_trades WHERE action = 'BUY' AND status = 'CLOSED' AND realized_pnl_pct > 0")
+        cursor.execute("SELECT COUNT(*) FROM paper_trades WHERE action IN ('BUY', 'SELL_SHORT') AND status = 'CLOSED' AND realized_pnl_pct > 0")
         winning_trades = cursor.fetchone()[0]
         win_rate = (winning_trades / total_closed * 100) if total_closed > 0 else 0.0
         unrealized_pnl = 0.0
-        cursor.execute("SELECT execution_price FROM paper_trades WHERE status = 'OPEN' AND action = 'BUY' ORDER BY timestamp ASC LIMIT 1")
+        cursor.execute("SELECT execution_price, action FROM paper_trades WHERE status = 'OPEN' AND action IN ('BUY', 'SELL_SHORT') ORDER BY timestamp ASC LIMIT 1")
         open_trade = cursor.fetchone()
         if open_trade:
-            entry_price = open_trade[0]
+            entry_price, side_action = open_trade
             cursor.execute("SELECT execution_price FROM paper_trades ORDER BY timestamp DESC LIMIT 1")
             latest_row = cursor.fetchone()
             if latest_row:
-                unrealized_pnl = ((latest_row[0] - entry_price) / entry_price) * 100
+                latest_price = latest_row[0]
+                if side_action == 'SELL_SHORT':
+                    unrealized_pnl = ((entry_price - latest_price) / entry_price) * 100
+                else:
+                    unrealized_pnl = ((latest_price - entry_price) / entry_price) * 100
         conn.close()
         return {
             "total_realized_pnl_pct": round(total_realized, 2),
