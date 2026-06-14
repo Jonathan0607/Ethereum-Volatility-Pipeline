@@ -387,11 +387,11 @@ def main():
     df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
     df.dropna(subset=FEATURE_COLS, inplace=True)
 
-    # In main(): Replace the rigid train split with a rolling production lookback
-    # Ensure the data passed to the optimizer represents the immediate trailing 90 or 180 days
+    # Vaulted Out-of-Sample Split: Cutoff date at 2026-01-01 UTC
+    cutoff_date = pd.to_datetime('2026-01-01', utc=True)
     optimization_window_days = 180
-    cutoff_date = df.index.max() - pd.Timedelta(days=optimization_window_days)
-    production_train_df = df[df.index >= cutoff_date]
+    train_start_date = cutoff_date - pd.Timedelta(days=optimization_window_days)
+    production_train_df = df[(df.index >= train_start_date) & (df.index < cutoff_date)]
 
     # Complete feature preparation on the designated window
     train_df = calculate_features_test(production_train_df)
