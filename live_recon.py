@@ -338,27 +338,33 @@ def main():
         is_paused = True
         print("[Status] Strategy execution is currently PAUSED.")
 
-    if live_sharpe < MIN_SHARPE_ALLOWED and not is_paused:
-        print(f"\n[ALERT] Live Sharpe ({live_sharpe:.2f}) has decayed below threshold ({MIN_SHARPE_ALLOWED:.2f})!")
-        print("        Creating pause flag and triggering Webhook alert...")
-        
-        # Create Pause Flag file
-        with open(PAUSE_FLAG_PATH, 'w') as f:
-            f.write(f"PAUSED_DUE_TO_DECAY|Sharpe={live_sharpe:.4f}|Time={datetime.now().isoformat()}")
+    MIN_TRADES_REQUIRED = 15
+    closed_trades_count = len(df[df['action'].isin(['SELL_SHORT', 'BUY_COVER', 'EXIT', 'CASH', 'FLAT'])])
+
+    if closed_trades_count >= MIN_TRADES_REQUIRED:
+        if live_sharpe < MIN_SHARPE_ALLOWED and not is_paused:
+            print(f"\n[ALERT] Live Sharpe ({live_sharpe:.2f}) has decayed below threshold ({MIN_SHARPE_ALLOWED:.2f})!")
+            print("        Creating pause flag and triggering Webhook alert...")
             
-        if webhook_url:
-            title = "🚨 EMERGENCY SHIELD ACTIVATED: TRADING ENGINE PAUSED"
-            message = (
-                f"**Live Reconciliation Alarm Triggered!**\n\n"
-                f"• **Expected Sharpe:** `{WFA_EXPECTED_SHARPE:.2f}` (WFA Benchmark)\n"
-                f"• **Current Rolling Sharpe:** `{live_sharpe:.2f}` (Deviates by > 20%)\n"
-                f"• **Current Max Drawdown:** `{live_max_dd:.2f}%`\n"
-                f"• **Average Slippage:** `{df['slippage_bps'].mean():+.2f} bps`\n\n"
-                f"**Action Taken:** Created pause flag at `data/trading_paused.flag`. "
-                f"The API Execution Engine has vetoed live orders and will skip WebSocket signals until reviewed."
-            )
-            send_discord_alert(webhook_url, title, message, color=15548997)
-            print("[Webhook] Paused alert sent successfully to Discord.")
+            # Create Pause Flag file
+            with open(PAUSE_FLAG_PATH, 'w') as f:
+                f.write(f"PAUSED_DUE_TO_DECAY|Sharpe={live_sharpe:.4f}|Time={datetime.now().isoformat()}")
+                
+            if webhook_url:
+                title = "🚨 EMERGENCY SHIELD ACTIVATED: TRADING ENGINE PAUSED"
+                message = (
+                    f"**Live Reconciliation Alarm Triggered!**\n\n"
+                    f"• **Expected Sharpe:** `{WFA_EXPECTED_SHARPE:.2f}` (WFA Benchmark)\n"
+                    f"• **Current Rolling Sharpe:** `{live_sharpe:.2f}` (Deviates by > 20%)\n"
+                    f"• **Current Max Drawdown:** `{live_max_dd:.2f}%`\n"
+                    f"• **Average Slippage:** `{df['slippage_bps'].mean():+.2f} bps`\n\n"
+                    f"**Action Taken:** Created pause flag at `data/trading_paused.flag`. "
+                    f"The API Execution Engine has vetoed live orders and will skip WebSocket signals until reviewed."
+                )
+                send_discord_alert(webhook_url, title, message, color=15548997)
+                print("[Webhook] Paused alert sent successfully to Discord.")
+    else:
+        print(f"\n[Status] Grace period active. {closed_trades_count}/{MIN_TRADES_REQUIRED} trades completed. Skipping Sharpe check.")
 
     # 7. Plot shadow equity curve
     plt.figure(figsize=(12, 6))
