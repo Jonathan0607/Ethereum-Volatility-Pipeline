@@ -1,14 +1,5 @@
 {
-  "hmm_chop_max": 0.43497643863241203,
-  "hmm_trend_min": 0.7001046175833029,
-  "gmm_z_buy": -4.0119204317268,
-  "gmm_z_sell": 0.6280503967324453,
-  "vol_shock_mult": 1.5327009467904755,
-  "rebalance_threshold": 0.45531780369633446,
-  "rolling_min_window": 50,
-  "rolling_max_window": 57,
-  "gmm_ema_mult": 1.0395466172275183,
-  "cooldown_hours": 11,
-  "breakout_time_stop_hours": 72,
-  "short_dip_thresh": 0.1031181908918865
+  "entry_threshold": 2.2549968475005007,
+  "exit_threshold": 0.03463363989052381,
+  "holding_period_max": 19
 }

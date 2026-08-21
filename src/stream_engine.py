@@ -1,4 +1,5 @@
 import asyncio
+import sys
 # pyrefly: ignore [missing-import]
 import websockets
 import json
@@ -8,9 +9,8 @@ import ast
 import urllib.request
 from datetime import datetime
 
-import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from hmm_engine import get_high_vol_probability
+from ms_garch_engine import MSGARCHX
 
 # --- 1. The Cold Start (REST API Seed) ---
 print("=== FETCHING HOURLY MACRO-CONTEXT ===")
@@ -108,13 +108,17 @@ async def stream_ethereum_data():
                                 rolling_max = float(max(closes[-rolling_max_window-1:-1]))
                                 rolling_min = float(min(closes[-rolling_min_window-1:-1]))
                                 
-                                prob_high_vol = get_high_vol_probability(closes)
+                                # MS-GARCH-X inference
+                                msgarch = MSGARCHX()
+                                msgarch.fit(closes)
+                                regime_probs, var_pred = msgarch.predict_volatility()
+                                prob_high_vol = float(regime_probs[1])
 
                                 print("\n" + "="*60)
                                 print(f"🚨 HOURLY REGIME UPDATE 🚨")
                                 print(f"   Real-Time Hourly Close: ${current_price:,.2f}")
                                 print(f"   Rolling Volatility Forecast (24h): {volatility_forecast:.4%}")
-                                print(f"   HMM High-Vol Prob: {prob_high_vol:.4f}")
+                                print(f"   MS-GARCH-X High-Vol Prob: {prob_high_vol:.4f}")
                                 print(f"   Vol 24h: {vol_24h:.6f} | Vol 168h: {vol_168h:.6f}")
                                 print(f"   Rolling Max ({rolling_max_window}h): ${rolling_max:,.2f}")
                                 print(f"   Rolling Min ({rolling_min_window}h): ${rolling_min:,.2f}")
