@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
 ==============================================================================
-PURE 2-STATE MS-GARCH-X WALK-FORWARD ANALYSIS (WFA) BACKTESTER
-Volatility-Scaled Kelly Execution Engine with 15% Deadband & Risk-Off Override
+FAST MOMENTUM (7D / 7D) LONG/CASH TREND FOLLOWING ENGINE (FULL EXPOSURE)
 ==============================================================================
-- 180-Day In-Sample Window | 7-Day Out-of-Sample Window
-- In-Sample: Fits 2-State MS-GARCH(1,1)-X on historical OHLCV
-- Out-of-Sample: Evaluates pure structural volatility edge without hyperparameter tuning
-- Live API Replication: Target sizing scaled by (1 - prob_high_vol) * (TARGET_VOL / ann_vol)
-- Risk-Off Override: Prob_high_vol >= 0.50 immediately liquidates to 0.0 (CASH)
-- Friction: 20 bps transaction fee charged only on executed size deltas
+1. Fast Momentum Donchian Architecture:
+   - Entry: 7-Day (168-hour) Donchian Breakout (Upper 168) -> Long (+1.0)
+   - Exit: 7-Day (168-hour) Donchian Trailing Exit (Lower 168) -> Cash (0.0)
+   - Long / Cash Only (No shorting)
+2. Full Exposure Sizing (Zero Volatility De-leveraging):
+   - Target ETH = Direction (100% exposure in Long, 0% in Cash)
+   - No GARCH de-leveraging during secular bull trends
+3. Friction & Execution:
+   - 15% Deadband Filter
+   - 20 bps (0.0020) Transaction Fee applied on executed turnover
+4. 180-Day In-Sample Window | 7-Day Out-of-Sample Window (26 Weekly Folds)
+- Benchmark: 100% Buy & Hold ETH
 ==============================================================================
 """
 
@@ -21,7 +26,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-import matplotlib.patches as mpatches
 
 warnings.filterwarnings("ignore")
 sys.stdout.reconfigure(line_buffering=True)
@@ -32,124 +36,115 @@ sys.path.insert(0, SRC_DIR)
 sys.path.insert(0, PROJECT_ROOT)
 
 from data import load_microstructure_data
-from ms_garch_engine import MSGARCHX
+from kelly_execution import execute_kelly_rebalance
 
-FEE_PCT = 0.0020          # 20 bps transaction cost
-TARGET_VOLATILITY = 0.06  # Target volatility for Kelly scaling
-DEADBAND = 0.15           # 15% rebalance deadband filter
+CHANNEL_WINDOW = 168  # 7 Days = 168 Hours
+DEADBAND = 0.15       # 15% Rebalance Deadband
+FEE_PCT = 0.0020      # 20 bps Transaction Fee
 
 
-def run_oos_step(slice_df, test_start, trained_msgarch, initial_pos=0.0):
+def run_oos_step(slice_df, test_start, initial_direction=0.0, initial_position=0.0):
     """
-    Executes the 7-day Out-of-Sample window with exact live API state machine replication.
+    Executes the 7-day Out-of-Sample window:
+    - 7-Day (168h) Donchian Upper Entry / Lower Exit
+    - Full 100% Exposure when Long, 0% when Cash (No GARCH scaling)
+    - 15% Deadband Filter
+    - 20 bps Transaction Fee on executed turnover
     """
-    # 1. Filter MS-GARCH-X across the slice
-    filtered_garch = trained_msgarch.filter_full_series(slice_df)
-    slice_df = slice_df.join(filtered_garch[['prob_low_vol', 'prob_high_vol', 'ms_garch_variance', 'ms_garch_volatility']], how='left')
-    slice_df['prob_high_vol'] = slice_df['prob_high_vol'].ffill().fillna(1.0)
-    slice_df['ms_garch_volatility'] = slice_df['ms_garch_volatility'].ffill().fillna(0.01)
+    eth_c = slice_df['eth_close'] if 'eth_close' in slice_df.columns else slice_df['close']
 
+    # 1. Compute 7-Day (168h) Donchian Channel Bounds (strictly prior to bar t)
+    slice_df['upper_168'] = eth_c.shift(1).rolling(CHANNEL_WINDOW, min_periods=CHANNEL_WINDOW).max()
+    slice_df['lower_168'] = eth_c.shift(1).rolling(CHANNEL_WINDOW, min_periods=CHANNEL_WINDOW).min()
+
+    # Filter to strictly the Out-of-Sample window
     test_df = slice_df[slice_df.index >= test_start].copy()
     if test_df.empty:
-        return test_df, initial_pos
+        return test_df, initial_direction, initial_position
 
-    ann_factor = np.sqrt(24 * 365)
-    target_pos_list = []
-    actions_list = []
-    curr_pos = float(initial_pos)
+    n = len(test_df)
+    target_pos_arr = np.zeros(n, dtype=np.float64)
+    direction_arr = np.zeros(n, dtype=np.float64)
 
-    for idx in range(len(test_df)):
-        p_high = float(test_df['prob_high_vol'].iloc[idx])
-        g_vol = float(test_df['ms_garch_volatility'].iloc[idx])
+    curr_dir = float(initial_direction)
+    curr_pos = float(initial_position)
 
-        # Calculate volatility multiplier
-        ann_vol = g_vol * ann_factor
-        vol_scaler = TARGET_VOLATILITY / (ann_vol + 1e-8)
+    for i in range(n):
+        c_t = float(test_df['eth_close'].iloc[i]) if 'eth_close' in test_df.columns else float(test_df['close'].iloc[i])
+        u_168 = float(test_df['upper_168'].iloc[i])
+        l_168 = float(test_df['lower_168'].iloc[i])
 
-        # Risk-Off Deadband Override
-        if p_high >= 0.50:
-            # Bypass deadband and immediately liquidate
-            ideal_target = 0.0
-            if curr_pos != 0.0:
-                action = "CASH"
-            else:
-                action = "FLAT"
-            curr_pos = 0.0
-        else:
-            # Low-vol regime: scale target by (1.0 - prob_high_vol) * vol_scaler
-            raw_target = (1.0 - p_high) * vol_scaler
-            ideal_target = float(np.clip(raw_target, 0.0, 1.0))
+        # Fast 7D / 7D Long-Cash State Machine
+        if not np.isnan(u_168) and not np.isnan(l_168):
+            if curr_dir == 0.0:  # Currently FLAT / CASH
+                if c_t > u_168:
+                    curr_dir = 1.0   # 7-Day Long Breakout Entry
+            elif curr_dir == 1.0: # Currently LONG
+                if c_t < l_168:
+                    curr_dir = 0.0   # 7-Day Trailing Exit to Cash
 
-            # Active position rebalancing with 15% deadband
-            if abs(ideal_target - curr_pos) > DEADBAND:
-                curr_pos = ideal_target
-                action = "BUY"
-            else:
-                action = "HOLDING"
+        # Full Exposure Sizing (100% in Long, 0% in Cash)
+        raw_target = curr_dir
 
-        target_pos_list.append(curr_pos)
-        actions_list.append(action)
+        # 15% Deadband Filter
+        new_pos, _ = execute_kelly_rebalance(curr_pos, raw_target, rebalance_deadband=DEADBAND)
+        curr_pos = new_pos
 
-    test_df['target_position'] = target_pos_list
-    test_df['action'] = actions_list
+        target_pos_arr[i] = curr_pos
+        direction_arr[i] = curr_dir
 
-    # Execution position is shifted by 1 bar (trade executed on close t, earns return t+1)
-    test_df['eth_position'] = test_df['target_position'].shift(1).fillna(initial_pos)
+    test_df['direction'] = direction_arr
+    test_df['target_position'] = target_pos_arr
 
-    eth_c = test_df['eth_close'] if 'eth_close' in test_df.columns else test_df['close']
-    test_df['eth_returns'] = eth_c.pct_change().fillna(0.0)
+    # Shift execution position by 1 bar
+    test_df['eth_position'] = test_df['target_position'].shift(1).fillna(initial_position)
 
-    # Benchmark: 100% Buy & Hold ETH
-    test_df['market_returns'] = test_df['eth_returns']
-    test_df['gross_strategy_returns'] = test_df['eth_position'] * test_df['eth_returns']
+    # Returns & Transaction Costs (20 bps)
+    test_df['eth_returns'] = eth_c.loc[test_df.index].pct_change().fillna(0.0)
+    test_df['benchmark_returns'] = test_df['eth_returns']
+    test_df['gross_returns'] = test_df['eth_position'] * test_df['eth_returns']
+
+    # Turnover occurs only when executed position changes
     test_df['turnover'] = test_df['eth_position'].diff().abs().fillna(0.0)
     test_df['transaction_costs'] = test_df['turnover'] * FEE_PCT
-    test_df['strategy_returns'] = test_df['gross_strategy_returns'] - test_df['transaction_costs']
-    test_df['active_regime'] = np.where(test_df['prob_high_vol'] >= 0.50, 'High-Vol', 'Low-Vol')
+    test_df['strategy_returns'] = test_df['gross_returns'] - test_df['transaction_costs']
 
-    next_pos = target_pos_list[-1] if len(target_pos_list) > 0 else 0.0
-    return test_df, next_pos
+    return test_df, curr_dir, curr_pos
 
 
-def calculate_metrics(returns_series):
-    """
-    Computes annualized Sharpe, Sortino, Max Drawdown, and Deflated Sharpe Ratio.
-    """
-    returns = returns_series.dropna()
-    if len(returns) == 0:
-        return {'sharpe': 0.0, 'sortino': 0.0, 'max_drawdown': 0.0, 'deflated_sharpe': 0.0}
+def compute_metrics(returns_series):
+    r = returns_series.dropna()
+    if len(r) == 0:
+        return {'total_return': 0.0, 'sharpe': 0.0, 'sortino': 0.0, 'max_drawdown': 0.0}
 
-    mean_ret = returns.mean() * 24 * 365
-    std_ret = returns.std() * np.sqrt(24 * 365)
-    sharpe = mean_ret / (std_ret + 1e-9)
+    cum = (1.0 + r).cumprod()
+    total_ret = float(cum.iloc[-1] - 1.0) * 100
 
-    negative_returns = np.minimum(returns, 0.0)
-    downside_dev = np.sqrt(np.mean(negative_returns ** 2)) * np.sqrt(24 * 365)
-    sortino = mean_ret / (downside_dev + 1e-9)
+    mean_ann = r.mean() * 24 * 365
+    std_ann = r.std() * np.sqrt(24 * 365)
+    sharpe = mean_ann / (std_ann + 1e-9)
 
-    from scipy.stats import norm, skew, kurtosis
-    dsr = 0.0
-    if returns.std() > 1e-9 and len(returns) > 5:
-        sr_observed = returns.mean() / returns.std()
-        n = len(returns)
-        skewness = skew(returns)
-        excess_kurt = kurtosis(returns, fisher=True)
-        std_sr_unann = np.sqrt(max(1e-9, (1.0 + 0.5 * sr_observed**2 - skewness * sr_observed + (excess_kurt / 4.0) * sr_observed**2) / (n - 1.0)))
-        std_sr_ann = std_sr_unann * np.sqrt(24 * 365)
-        dsr = float(norm.cdf(sharpe / (std_sr_ann + 1e-9)))
+    neg_r = np.minimum(r.values, 0.0)
+    downside_dev = np.sqrt(np.mean(neg_r ** 2)) * np.sqrt(24 * 365)
+    sortino = mean_ann / (downside_dev + 1e-9)
+
+    peak = cum.cummax()
+    dd = (cum - peak) / peak
+    max_dd = float(dd.min()) * 100
 
     return {
+        'total_return': round(total_ret, 2),
         'sharpe': round(float(sharpe), 2),
         'sortino': round(float(sortino), 2),
-        'deflated_sharpe': round(float(dsr), 4)
+        'max_drawdown': round(max_dd, 2)
     }
 
 
 def main():
     print("=" * 85)
-    print("  PURE 2-STATE MS-GARCH-X WALK-FORWARD BACKTESTER")
-    print("  Kelly Volatility-Scaled Execution with 15% Deadband & Risk-Off Override")
-    print("  In-Sample: 180 Days | Out-of-Sample Step: 7 Days | Total Test: 6 Months")
+    print("  FAST MOMENTUM (7D/7D) LONG/CASH TREND FOLLOWING ENGINE (FULL EXPOSURE)")
+    print("  Direction: 7D Entry (Upper 168) / 7D Exit (Lower 168) | Long/Cash Only")
+    print("  Sizer: Full 100% Exposure (No Vol De-leveraging) | Friction: 15% Deadband, 20 bps Fee")
     print("=" * 85)
 
     df = load_microstructure_data()
@@ -164,136 +159,111 @@ def main():
 
     current_test_start = start_test_date
     oos_results = []
-    wfa_log = []
-    
-    current_pos = 0.0
     step_num = 0
+    state_direction = 0.0
+    state_position = 0.0
 
     while current_test_start + pd.Timedelta(days=step_days) <= end_test_date:
         current_test_end = current_test_start + pd.Timedelta(days=step_days)
         current_train_start = current_test_start - pd.Timedelta(days=train_days)
         current_train_end = current_test_start
 
-        print(f"--- WFA STEP {step_num} ---")
-        print(f"  Train: {current_train_start.strftime('%Y-%m-%d')} to {current_train_end.strftime('%Y-%m-%d')} | Test: {current_test_start.strftime('%Y-%m-%d')} to {current_test_end.strftime('%Y-%m-%d')}")
-
-        train_df = df[(df.index >= current_train_start) & (df.index < current_train_end)].copy()
-
-        # 1. Fit MS-GARCH-X model on In-Sample window
-        msgarch = MSGARCHX()
-        msgarch.fit(train_df)
-
-        # 2. Out-of-Sample 7-Day Execution (with 100h lookback for filter continuity)
-        lookback_delta = pd.Timedelta(hours=100)
+        # Out-of-Sample Step: Slice with 250h lookback for 168h channel
+        lookback_delta = pd.Timedelta(hours=250)
         slice_df = df[(df.index >= current_test_start - lookback_delta) & (df.index < current_test_end)].copy()
 
-        test_df_step, current_pos = run_oos_step(
+        test_step, state_direction, state_position = run_oos_step(
             slice_df=slice_df,
             test_start=current_test_start,
-            trained_msgarch=msgarch,
-            initial_pos=current_pos
+            initial_direction=state_direction,
+            initial_position=state_position
         )
 
-        test_df_step['step'] = step_num
-        oos_results.append(test_df_step)
+        test_step['step'] = step_num
+        oos_results.append(test_step)
 
-        wfa_log.append({
-            'step': step_num,
-            'test_start': current_test_start.strftime('%Y-%m-%d'),
-            'test_end': current_test_end.strftime('%Y-%m-%d')
-        })
+        dir_label = "LONG (+1.0)" if state_direction == 1.0 else "CASH (0.0)"
+        print(f"--- WFA STEP {step_num:02d} --- "
+              f"Test: {current_test_start.strftime('%Y-%m-%d')} to {current_test_end.strftime('%Y-%m-%d')} | "
+              f"Direction: {dir_label} | Position: {state_position:+.2f}")
 
         current_test_start = current_test_end
         step_num += 1
 
-    # 3. Stitch OOS results together
-    final_oos_df = pd.concat(oos_results)
-    final_oos_df.sort_index(inplace=True)
-    final_oos_df = final_oos_df[~final_oos_df.index.duplicated(keep='first')]
+    # Stitch Out-of-Sample Slices
+    final_oos = pd.concat(oos_results)
+    final_oos.sort_index(inplace=True)
+    final_oos = final_oos[~final_oos.index.duplicated(keep='first')]
 
-    final_oos_df['cumulative_market'] = (1.0 + final_oos_df['market_returns']).cumprod()
-    final_oos_df['cumulative_strategy'] = (1.0 + final_oos_df['strategy_returns']).cumprod()
+    final_oos['cum_benchmark'] = (1.0 + final_oos['benchmark_returns']).cumprod()
+    final_oos['cum_strategy'] = (1.0 + final_oos['strategy_returns']).cumprod()
+    final_oos['cum_gross'] = (1.0 + final_oos['gross_returns']).cumprod()
 
-    market_ret = (final_oos_df['cumulative_market'].iloc[-1] - 1.0) * 100
-    strat_ret = (final_oos_df['cumulative_strategy'].iloc[-1] - 1.0) * 100
+    # Performance Metrics
+    bench_m = compute_metrics(final_oos['benchmark_returns'])
+    strat_m = compute_metrics(final_oos['strategy_returns'])
+    gross_m = compute_metrics(final_oos['gross_returns'])
 
-    metrics = calculate_metrics(final_oos_df['strategy_returns'])
-    
-    peak = final_oos_df['cumulative_strategy'].cummax()
-    drawdown = (final_oos_df['cumulative_strategy'] - peak) / peak
-    max_dd = drawdown.min() * 100
+    total_fees_paid = float(final_oos['transaction_costs'].sum()) * 100
+    total_trades = int((final_oos['turnover'] > 0).sum())
 
     print("\n" + "=" * 85)
-    print("  PURE MS-GARCH-X VOLATILITY STRATEGY: OUT-OF-SAMPLE RESULTS")
+    print("      FAST MOMENTUM (7D/7D) FULL EXPOSURE: NET OUT-OF-SAMPLE RESULTS (26 WEEKS)")
     print("=" * 85)
-    print(f"Benchmark Return (Buy & Hold ETH): {market_ret:.2f}%")
-    print(f"Strategy Return:                   {strat_ret:.2f}%")
-    print(f"Annualized Sharpe:                 {metrics['sharpe']:.2f}")
-    print(f"Sortino Ratio:                     {metrics['sortino']:.2f}")
-    print(f"Deflated Sharpe (DSR):             {metrics['deflated_sharpe']:.4f}")
-    print(f"Max Drawdown:                      {max_dd:.2f}%")
+    print(f"Benchmark Return (Buy & Hold ETH): {bench_m['total_return']:>10.2f}% | Sharpe: {bench_m['sharpe']:>6.2f} | Max DD: {bench_m['max_drawdown']:>8.2f}%")
+    print(f"Gross Strategy Return (0 Fees):    {gross_m['total_return']:>10.2f}% | Sharpe: {gross_m['sharpe']:>6.2f} | Max DD: {gross_m['max_drawdown']:>8.2f}%")
+    print(f"Net Strategy Return (20 bps Fees): {strat_m['total_return']:>10.2f}% | Sharpe: {strat_m['sharpe']:>6.2f} | Max DD: {strat_m['max_drawdown']:>8.2f}%")
+    print(f"Strategy Sortino Ratio:            {strat_m['sortino']:>10.2f}")
+    print(f"Total Cumulative Fees Paid:        {total_fees_paid:>10.2f}% ({total_trades} round-trip adjustments)")
     print("=" * 85)
 
-    # 4. Save JSON results
+    # Save JSON Metrics
     results_payload = {
-        'metrics': {
-            'market_return': round(float(market_ret), 2),
-            'strategy_return': round(float(strat_ret), 2),
-            'sharpe': metrics['sharpe'],
-            'sortino': metrics['sortino'],
-            'deflated_sharpe': metrics['deflated_sharpe'],
-            'max_drawdown': round(float(max_dd), 2)
-        },
-        'wfa_log': wfa_log
+        'benchmark': bench_m,
+        'strategy_net': strat_m,
+        'strategy_gross': gross_m,
+        'model': 'Fast Momentum Long/Cash Trend Following (7D Entry / 7D Exit) with Full 100% Exposure',
+        'channel_window_hours': CHANNEL_WINDOW,
+        'deadband': DEADBAND,
+        'fee_pct': FEE_PCT,
+        'total_fees_pct': round(total_fees_paid, 2),
+        'total_rebalance_trades': total_trades
     }
-
-    out_json = os.path.join(PROJECT_ROOT, 'walk_forward_results.json')
-    with open(out_json, 'w') as f:
+    json_path = os.path.join(PROJECT_ROOT, 'research', 'walk_forward_results.json')
+    with open(json_path, 'w') as f:
         json.dump(results_payload, f, indent=4)
 
-    alt_json = os.path.join(PROJECT_ROOT, 'walk_forward_microstructure_results.json')
-    with open(alt_json, 'w') as f:
-        json.dump(results_payload, f, indent=4)
+    # Generate Performance Plot
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True, gridspec_kw={'height_ratios': [2.5, 1.2]})
 
-    # 5. Plot Performance Chart
-    plt.figure(figsize=(14, 8))
-    plt.plot(final_oos_df.index, final_oos_df['cumulative_market'], label='Benchmark (Buy & Hold ETH)', color='gray', alpha=0.6, linewidth=1.4)
-    plt.plot(final_oos_df.index, final_oos_df['cumulative_strategy'], label='2-State MS-GARCH Strategy (OOS)', color='#1f77b4', linewidth=2.0)
+    ax1.plot(final_oos.index, final_oos['cum_benchmark'], label=f"Benchmark: Buy & Hold ETH ({bench_m['total_return']:+.1f}%, SR={bench_m['sharpe']})", color='#7f7f7f', linestyle='--', linewidth=1.5, alpha=0.7)
+    ax1.plot(final_oos.index, final_oos['cum_gross'], label=f"Gross Fast 7D/7D (0 Fees: {gross_m['total_return']:+.1f}%, SR={gross_m['sharpe']})", color='#17becf', linestyle=':', linewidth=1.8)
+    ax1.plot(final_oos.index, final_oos['cum_strategy'], label=f"Net Fast 7D/7D (20 bps Fees: {strat_m['total_return']:+.1f}%, SR={strat_m['sharpe']})", color='#2ca02c', linewidth=2.4)
 
-    # Highlight High-Vol Regimes
-    ax = plt.gca()
-    changes = final_oos_df['active_regime'] != final_oos_df['active_regime'].shift(1)
-    change_indices = final_oos_df.index[changes].tolist()
-    time_diff = final_oos_df.index[1] - final_oos_df.index[0] if len(final_oos_df) > 1 else pd.Timedelta(hours=1)
-    change_indices.append(final_oos_df.index[-1] + time_diff)
+    ax1.set_title('Walk-Forward Analysis: Fast Momentum (7D Entry / 7D Exit) Long/Cash Engine', fontsize=13, fontweight='bold')
+    ax1.set_ylabel('Cumulative Return Multiplier')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc='upper left', framealpha=0.9, fontsize=10)
 
-    for k in range(len(change_indices) - 1):
-        start_time = change_indices[k]
-        end_time = change_indices[k+1]
-        regime = final_oos_df.loc[start_time, 'active_regime']
-        if isinstance(regime, pd.Series):
-            regime = regime.iloc[0]
-        if regime == 'High-Vol':
-            ax.axvspan(start_time, end_time, color='crimson', alpha=0.08)
+    # Subplot 2: Full Exposure Position
+    ax2.plot(final_oos.index, final_oos['eth_position'], color='#ff7f0e', linewidth=1.5, label='Executed Long Position (0.0 or 1.0)')
+    ax2.axhline(0.0, color='black', linestyle=':', alpha=0.5)
+    ax2.set_ylabel('Position Exposure')
+    ax2.set_ylim(-0.1, 1.1)
+    ax2.set_title('Full 100% Long / Cash Position Exposure', fontsize=11, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(loc='upper left', framealpha=0.9)
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    plt.xticks(rotation=45)
+    plt.tight_layout()
 
-    high_vol_patch = mpatches.Patch(color='crimson', alpha=0.15, label='MS-GARCH High-Vol Risk-Off Regime')
-    handles, labels = ax.get_legend_handles_labels()
-    handles.append(high_vol_patch)
-    ax.legend(handles=handles, loc='upper left', framealpha=0.9)
-
-    plt.title('Out-of-Sample Walk-Forward Performance: MS-GARCH(1,1)-X Volatility Strategy', fontsize=13, fontweight='bold')
-    plt.ylabel('Cumulative Return Multiplier')
-    plt.grid(True, alpha=0.3)
-    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-    plt.gcf().autofmt_xdate()
-
-    out_png = os.path.join(PROJECT_ROOT, 'walk_forward_results.png')
-    plt.savefig(out_png, bbox_inches='tight', dpi=300)
-    plt.savefig(os.path.join(PROJECT_ROOT, 'walk_forward_microstructure_results.png'), bbox_inches='tight', dpi=300)
+    png_path = os.path.join(PROJECT_ROOT, 'research', 'walk_forward_results.png')
+    plt.savefig(png_path, bbox_inches='tight', dpi=300)
+    plt.savefig(os.path.join(PROJECT_ROOT, 'walk_forward_results.png'), bbox_inches='tight', dpi=300)
     plt.close()
 
-    print(f"\nSaved performance chart to {out_png}")
-    print(f"Saved metrics payload to {out_json}")
+    print(f"\nSaved performance chart to: {png_path}")
+    print(f"Saved metrics payload to:    {json_path}")
 
 
 if __name__ == "__main__":

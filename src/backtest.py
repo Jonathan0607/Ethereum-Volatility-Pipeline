@@ -11,8 +11,8 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from data import split_data, load_microstructure_data
 from ms_garch_engine import MSGARCHX
 
-FEE_PCT = 0.0020          # 20 bps transaction friction
-TARGET_VOLATILITY = 0.06  # Target volatility for Kelly scaling
+FEE_PCT = 0.0000          # 20 bps transaction friction
+TARGET_VOLATILITY = 0.10  # Target volatility for Kelly scaling
 DEADBAND = 0.15           # 15% deadband filter
 
 
