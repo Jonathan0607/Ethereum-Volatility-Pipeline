@@ -1,120 +1,67 @@
-"""
-Structural Market-Microstructure Strategy Module
-Combines:
-- Perpetual Funding Rate 72-Hour Rolling Z-Score (Z_funding)
-- Discrete 2-State Gaussian HMM Volatility Regime Filter
-- Discrete Squeeze / Liquidation Dump Execution State Machine
-"""
-
-import os
-import json
-import ast
-import pandas as pd
 import numpy as np
-
-from strategy_microstructure import (
-    MicrostructureRegimeFilter,
-    execute_microstructure_state_machine,
-    FEE_PCT
-)
-from data import compute_rolling_funding_zscore
+import pandas as pd
 
 
-def load_best_params():
+def compute_unified_signal(
+    spot_df: pd.DataFrame, 
+    funding_df: pd.DataFrame, 
+    current_position: float
+) -> float:
     """
-    Loads optimized hyperparameters from best_params.txt with robust fallbacks.
+    Stateless Signal Generator: Perpetual Funding Rate Squeeze Harvester + 7D Donchian.
+    
+    Parameters:
+    -----------
+    spot_df : pd.DataFrame
+        Hourly spot OHLCV dataframe (must contain 'close' column and at least 168 rows).
+    funding_df : pd.DataFrame
+        8-hour perpetual funding rate dataframe (must contain 'fundingRate' column and at least 90 rows).
+    current_position : float
+        Current portfolio position (0.0 for FLAT/Cash, 1.0 for LONG).
+        
+    Returns:
+    --------
+    float: Target position (1.0 for LONG, 0.0 for FLAT/Cash).
     """
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    params_path = os.path.join(current_dir, '..', 'best_params.txt')
-    defaults = {
-        'entry_threshold': 1.80,
-        'exit_threshold': 0.20,
-        'holding_period_max': 12
-    }
-    if not os.path.exists(params_path):
-        return defaults
+    # 1. Validation
+    assert len(spot_df) >= 168, f"spot_df must contain at least 168 rows (received {len(spot_df)})"
+    assert len(funding_df) >= 90, f"funding_df must contain at least 90 rows (received {len(funding_df)})"
+    assert 'close' in spot_df.columns, "spot_df must contain 'close' column"
 
-    with open(params_path, 'r') as f:
-        content = f.read().strip()
-        try:
-            params = json.loads(content)
-        except Exception:
-            try:
-                params = ast.literal_eval(content)
-            except Exception:
-                params = defaults
+    # Handle funding rate column variations (e.g., fundingRate, funding_rate)
+    fr_col = 'fundingRate' if 'fundingRate' in funding_df.columns else ('funding_rate' if 'funding_rate' in funding_df.columns else funding_df.columns[-1])
 
-    if isinstance(params, dict):
-        defaults.update(params)
-    return defaults
+    # 2. Donchian 168-Hour (7-Day) Channel Bounds
+    close_series = spot_df['close'].astype(float)
+    # Channel bounds strictly prior to current bar (or over trailing 168 lookback)
+    upper_168 = float(close_series.iloc[-168:].max())
+    lower_168 = float(close_series.iloc[-168:].min())
+    current_close = float(close_series.iloc[-1])
 
+    # 3. Funding Rate 30-Day (90 8-hour epochs) Rolling Z-Score
+    funding_series = funding_df[fr_col].astype(float)
+    rolling_mean = float(funding_series.rolling(90, min_periods=30).mean().iloc[-1])
+    rolling_std = float(funding_series.rolling(90, min_periods=30).std().iloc[-1])
+    if rolling_std == 0 or np.isnan(rolling_std):
+        rolling_std = 1e-6
 
-def compute_microstructure_signal(
-    df_window, 
-    hmm_model, 
-    entry_threshold=1.80,
-    exit_threshold=0.20,
-    holding_period_max=12,
-    current_pos=0.0,
-    bars_held=0
-):
-    """
-    Calculates the live/recent microstructure funding squeeze signal.
-    """
-    c_eth = df_window['eth_close'].values if 'eth_close' in df_window.columns else df_window['close'].values
-    log_ret = np.diff(np.log(c_eth), prepend=0.0)
+    current_funding = float(funding_series.iloc[-1])
+    z_f = float((current_funding - rolling_mean) / (rolling_std + 1e-8))
 
-    # 1. HMM Volatility Regime
-    regime = hmm_model.predict_states(log_ret)[-1]
+    # 4. State Machine Execution Logic
+    curr_pos = float(current_position)
 
-    # 2. Funding Rate & 72h Z-score
-    if 'z_funding' in df_window.columns:
-        z_t = float(df_window['z_funding'].iloc[-1])
-        fr_t = float(df_window['funding_rate'].iloc[-1])
-    elif 'funding_rate' in df_window.columns:
-        fr = df_window['funding_rate'].values
-        z_fr = compute_rolling_funding_zscore(fr, window=72)
-        z_t = float(z_fr[-1])
-        fr_t = float(fr[-1])
+    if curr_pos == 0.0:
+        # Long Entry: Donchian 7-Day Breakout OR Short-Squeeze Surge (Z_F < -2.0)
+        if current_close > upper_168 or z_f < -2.0:
+            return 1.0
+        return 0.0
+
+    elif curr_pos == 1.0:
+        # Exit to Cash: Donchian 7-Day Breakdown OR Overheated Leverage Flush (Z_F > 2.5)
+        if current_close < lower_168 or z_f > 2.5:
+            return 0.0
+        return 1.0
+
     else:
-        z_t = 0.0
-        fr_t = 0.0
-
-    # 3. Discrete State Machine
-    new_pos = current_pos
-    new_bars_held = bars_held
-
-    if current_pos == 0.0:
-        if regime == 0:
-            if z_t < -entry_threshold:
-                new_pos = 1.0
-                new_bars_held = 0
-            elif z_t > entry_threshold:
-                new_pos = -1.0
-                new_bars_held = 0
-    else:
-        new_bars_held += 1
-        if regime == 1 or abs(z_t) <= exit_threshold or new_bars_held >= holding_period_max:
-            new_pos = 0.0
-            new_bars_held = 0
-
-    return {
-        'funding_rate': float(fr_t),
-        'z_funding': float(z_t),
-        'regime': int(regime),
-        'active_regime': 'High-Vol' if regime == 1 else 'Low-Vol',
-        'target_position': float(new_pos),
-        'eth_position': float(new_pos),
-        'btc_position': 0.0,
-        'bars_held': int(new_bars_held)
-    }
-
-
-def compute_unified_signal(df_window, predictor, msgarch_engine, **kwargs):
-    """
-    Backward-compatibility alias.
-    """
-    hmm = MicrostructureRegimeFilter()
-    c_eth = df_window['eth_close'].values if 'eth_close' in df_window.columns else df_window['close'].values
-    hmm.fit(np.diff(np.log(c_eth), prepend=0.0))
-    return compute_microstructure_signal(df_window, hmm, **kwargs)
+        return curr_pos
