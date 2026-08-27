@@ -17,5 +17,7 @@ data/
 *.json
 best_params.txt
 
+archive
+
 # Mac System files
 .DS_Store

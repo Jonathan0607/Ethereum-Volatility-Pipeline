@@ -1,5 +1,0 @@
-{
-  "entry_threshold": 2.2549968475005007,
-  "exit_threshold": 0.03463363989052381,
-  "holding_period_max": 19
-}
