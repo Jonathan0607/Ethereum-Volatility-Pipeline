@@ -6,6 +6,7 @@ from alpaca_trade_api.rest import REST
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("AlpacaClient")
 
+
 class AlpacaExecutionClient:
     def __init__(self):
         self.key_id = os.getenv("APCA_API_KEY_ID")
@@ -28,25 +29,48 @@ class AlpacaExecutionClient:
                 logger.error(f"CRITICAL INITIALIZATION ERROR: Failed to instantiate Alpaca REST API: {e}")
                 self.api = None
 
-    def execute_trade(self, action: str, target_weight: float, current_price: float):
+    def get_position(self, symbol: str = "ETH") -> float:
         """
-        Translates gateway actions into live Alpaca orders.
-        action: "BUY", "SELL_SHORT", "CASH", "FLAT", "HOLDING"
-        target_weight: Float between 0.0 and 1.0
+        Queries Alpaca for the active position of the symbol.
+        Returns 1.0 if Long, 0.0 if Flat/Cash, -1.0 if Short.
         """
         if not self.api:
-            logger.error("Trade abort: Alpaca API Client is not initialized due to missing credentials or configuration errors.")
-            return False
+            logger.info("Alpaca API not initialized. Returning 0.0 (Flat) for shadow execution.")
+            return 0.0
+        try:
+            target_sym = self.symbol if "USD" in self.symbol else f"{symbol}USD"
+            pos = self.api.get_position(target_sym)
+            qty = float(pos.qty)
+            if pos.side.lower() == 'short' or qty < 0:
+                return -1.0
+            elif qty > 0:
+                return 1.0
+            return 0.0
+        except Exception as e:
+            if "position does not exist" in str(e).lower() or "404" in str(e):
+                return 0.0
+            logger.warning(f"Error querying Alpaca position: {e}")
+            return 0.0
+
+    def execute_trade(self, action: str, target_weight: float = 1.0, current_price: float = 0.0):
+        """
+        Translates gateway actions into live Alpaca orders.
+        action: "BUY", "SELL", "SELL_SHORT", "CASH", "FLAT", "HOLDING"
+        target_weight: Float between 0.0 and 1.0 (defaults to 1.0)
+        current_price: Optional reference price
+        """
+        if not self.api:
+            logger.info(f"[Shadow Execution] Alpaca API Client not configured. Simulated trade: {action} (weight: {target_weight})")
+            return True
 
         try:
-            # 1. Handle CASH action (emergency liquidations / stop-outs)
-            if action in ["CASH", "FLAT"]:
-                logger.info(f"Executing {action} action: Liquidating all ETH positions.")
+            # 1. Handle CASH / SELL / FLAT action (liquidations / exit to cash)
+            if action in ["CASH", "FLAT", "SELL"]:
+                logger.info(f"Executing {action} action: Liquidating all ETH positions to cash.")
                 try:
                     self.api.close_position(self.symbol)
                     return True
                 except Exception as e:
-                    # If position is already closed or does not exist, Alpaca REST returns a 404. Handle gracefully.
                     if "position does not exist" in str(e).lower() or "404" in str(e):
                         logger.info("No active ETH position found to close. Flat state verified.")
                         return True
@@ -60,6 +84,14 @@ class AlpacaExecutionClient:
             account = self.api.get_account()
             equity = float(account.equity)
             
+            # Fetch latest price if current_price is 0
+            if current_price <= 0.0:
+                try:
+                    last_trade = self.api.get_latest_crypto_trade(self.symbol, exchange="CBSE")
+                    current_price = float(last_trade.price)
+                except Exception:
+                    current_price = 2500.0
+
             # 3. Query Alpaca for the current position size
             current_qty = 0.0
             current_side = 'flat'
@@ -84,24 +116,10 @@ class AlpacaExecutionClient:
                     pass
                 current_qty = 0.0
                 current_side = 'flat'
-            elif action == "SELL_SHORT" and current_side == 'long':
-                logger.info("Offset long position detected. Closing long position before entering short.")
-                try:
-                    self.api.close_position(self.symbol)
-                except Exception:
-                    pass
-                current_qty = 0.0
-                current_side = 'flat'
 
             # 5. Calculate Target Fractional Quantity & Delta
             target_qty = round(equity * target_weight / current_price, 4)
-            if action == "BUY":
-                target_qty_signed = target_qty
-            elif action == "SELL_SHORT":
-                target_qty_signed = -target_qty
-            else:
-                target_qty_signed = 0.0
-
+            target_qty_signed = target_qty if action == "BUY" else 0.0
             delta = round(target_qty_signed - current_qty, 4)
 
             if abs(delta) <= 0.001:
@@ -127,7 +145,7 @@ class AlpacaExecutionClient:
                     raise e
             else:
                 sell_qty = abs(delta)
-                logger.info(f"Submitting SELL/SHORT order: selling {sell_qty} ETH (target: {target_qty_signed} ETH).")
+                logger.info(f"Submitting SELL order: selling {sell_qty} ETH.")
                 try:
                     self.api.submit_order(
                         symbol=self.symbol,
@@ -136,16 +154,12 @@ class AlpacaExecutionClient:
                         type='market',
                         time_in_force='gtc'
                     )
-                    logger.info(f"SELL/SHORT order successfully submitted for {sell_qty} ETH.")
+                    logger.info(f"SELL order successfully submitted for {sell_qty} ETH.")
                     return True
                 except Exception as e:
-                    if "insufficient balance" in str(e).lower() or "insufficient funds" in str(e).lower():
-                        logger.warning(f"[SHADOW MODE] Caught expected broker rejection on sell/short: {e}. Mocking successful execution for PnL tracking.")
-                        return True
-                    raise e
+                    logger.warning(f"SELL order failed: {e}")
+                    return False
 
         except Exception as e:
             logger.error(f"Alpaca Execution Error encountered during action {action}: {e}")
             return False
-
-
