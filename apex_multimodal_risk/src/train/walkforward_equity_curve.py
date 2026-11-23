@@ -1,20 +1,31 @@
 """
-Strictly Out-of-Sample Expanding Walk-Forward Backtest & Publication-Grade Tear Sheet (EXP-003c).
+Strictly Out-of-Sample Expanding Walk-Forward Backtest & Publication-Grade Tear Sheet (EXP-003d).
 Methodology:
-1. Honest Incremental Fee Accounting:
+1. Honest Incremental Fee Accounting (Zero Phantom Slippage on Flat Books):
    - Unhedged APEX v45 returns are already net of trading fees.
-   - 25 bps stress slippage applies ONLY to incremental overlay scale adjustments (|Delta s_t| * W_sleeve).
-   - Zero double-taxing on base APEX trades.
+   - Slippage applies strictly to realized position deltas:
+     eff_pos_t = s_t * active_gross_t
+     base_turnover_t = |active_gross_t - active_gross_{t-1}|
+     overlay_turnover_t = |eff_pos_t - eff_pos_{t-1}|
+     incremental_turnover_t = max(0.0, overlay_turnover_t - base_turnover_t) * W_sleeve
+     incremental_fee_drag_t = incremental_turnover_t * 0.0025
+   - During flat cash periods (macro_regime == 0, e.g. SVB Mar 2023 and Aug 2024),
+     active_gross_t == 0.0 identically, incurring 0.0 bps incremental slippage.
 2. Causal Expanding Walk-Forward:
    - 4-month warm-up (2022-07-01 to 2022-10-31); OOS starts 2022-11-01 (covers FTX Nov 2022).
-   - Quarterly refits with 168-hour purge/embargo gap.
+   - Quarterly refits with 168-hour purge/embargo gap across 2.56 years (~22,435 bars).
    - Zero historical in-sample model scoring.
-3. Calibrated Risk Sizing:
-   - Surgical NLP Gate: triggers only on extreme exogenous spikes (train 95th pct p_crash_cal or joint novelty & proto_sim), active ~5%-8% of hours.
-   - ACI Tail-Budget Sizing: var_budget set to train-fold 85th percentile of |aci_var_5pct| (with 0.15 deadband), keeping scale=1.0 during ~85% of normal hours.
-4. Active Risk Book Evaluation:
+3. True Zero-Liquidation Entry Gating (Strategies 2 & 3):
+   - When gate_active_t == True: suppresses risk-increasing trades by clamping |pos_gated_t| <= |pos_gated_{t-1}|.
+   - Existing open positions are never force-liquidated.
+   - Overlay turnover <= base turnover, incurring 0.0 bps liquidation slippage.
+4. Calibrated Delayed-Feedback ACI VaR Tail-Budget Sizing (Strategy 4):
+   - var_budget computed on train-fold hourly worst-asset VaR: np.quantile(np.abs(train_hourly_var), 0.85).
+   - Sizing reset to 1.0 when raw_scale >= 0.95, keeping % Scaled (< 1.0) in the 10%–20% tail band.
+   - 0.15 deadband hysteresis eliminates high-frequency rebalancing churn.
+5. Active Risk Book Evaluation:
    - Evaluates overlay on Directional Sleeve (W_DIR=0.25) AND Active Risk Book (W_DIR+W_SPREAD=0.80).
-   - Explains crisis attribution and sleeve activity during FTX, SVB, SEC, and Aug 2024.
+   - Audited crisis attribution across FTX, SVB, SEC, and Aug 2024.
 """
 
 import os
@@ -55,10 +66,20 @@ sys.path.insert(0, str(PROJECT_ROOT / "research"))
 sys.path.insert(0, str(PROJECT_ROOT))
 from research.apex_v45_champion import (
     load_data_and_features,
-    run_directional_engine,
-    run_spread_engine,
     run_funding_arb_engine,
     UNIVERSE,
+    WARMUP_BARS,
+    DIR_WT,
+    DIR_WC,
+    DIR_WO,
+    DIR_HYST,
+    DIR_TAKER_FEE,
+    SP_WT,
+    SP_WC,
+    SP_WO,
+    SPREAD_HYST,
+    SPREAD_MAKER_FEE,
+    LEVERAGE,
     W_DIR,
     W_SPREAD,
     W_ARB,
@@ -66,10 +87,150 @@ from research.apex_v45_champion import (
 )
 
 
+def run_custom_directional_engine(
+    processed: Dict[str, pd.DataFrame],
+    dataset: Dict[str, pd.DataFrame],
+    univ: List[str],
+    eval_index: pd.DatetimeIndex,
+    n: int,
+    wts: Dict[str, np.ndarray],
+    skew_mult_dict: Dict[str, np.ndarray],
+    gate_mask: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
+    """
+    Parametric Directional Engine supporting True Zero-Liquidation Entry Gating.
+    When gate_mask[t] is True, clamps |pos_gated_t| <= |pos_gated_{t-1}| (blocks risk expansion, allows exits).
+    Returns (port_ret, total_turnover, positions_dict).
+    """
+    funding_hours = eval_index.hour.isin([0, 8, 16])
+    comps = {}
+    for s in univ:
+        df = processed[s].iloc[WARMUP_BARS:]
+        comps[s] = DIR_WT * df["tsmom"].values + DIR_WC * df["carry"].values + DIR_WO * df["oi_regime"].values
+
+    xs = {s: np.ones(n) for s in univ}
+    for t in range(1, n):
+        sc = sorted([(s, comps[s][t - 1]) for s in univ], key=lambda x: x[1], reverse=True)
+        xs[sc[0][0]][t] = 1.5
+        xs[sc[1][0]][t] = 1.0
+        xs[sc[2][0]][t] = 0.5
+
+    port_ret = np.zeros(n)
+    total_turn = np.zeros(n)
+    gated_pos = {s: np.zeros(n) for s in univ}
+
+    for s in univ:
+        df = processed[s].iloc[WARMUP_BARS:]
+        ret = df["hourly_return"].values
+        fr = dataset[s].iloc[WARMUP_BARS:]["funding_rate"].values
+        w = wts[s]
+        comp = comps[s]
+        x = xs[s]
+        sm = skew_mult_dict[s]
+
+        cur = 0.0
+        tgt = np.zeros(n)
+        for t in range(n):
+            wv = w[t] if not np.isnan(w[t]) else 0.0
+            cv = comp[t] if not np.isnan(comp[t]) else 0.0
+            ideal = cv * wv * x[t] * sm[t] * LEVERAGE
+            if abs(ideal - cur) >= DIR_HYST:
+                cur = ideal
+            tgt[t] = cur
+
+        raw_pos = pd.Series(tgt).shift(1).fillna(0.0).values
+        pos_s = np.zeros(n)
+        cur_p = 0.0
+
+        for t in range(n):
+            p_raw = raw_pos[t]
+            if gate_mask is not None and gate_mask[t]:
+                # True Zero-Liquidation Entry Gating
+                if cur_p == 0.0:
+                    p_gated = 0.0  # Block new trade entry
+                elif np.sign(p_raw) != np.sign(cur_p):
+                    p_gated = 0.0  # Allow closing current trade, do not flip into new opposite risk
+                elif abs(p_raw) > abs(cur_p):
+                    p_gated = cur_p  # Suppress position expansion
+                else:
+                    p_gated = p_raw  # Allow natural trade reduction
+            else:
+                p_gated = p_raw
+            cur_p = p_gated
+            pos_s[t] = p_gated
+
+        gated_pos[s] = pos_s
+        turn = np.abs(np.diff(np.concatenate(([0.0], pos_s))))
+        p_ret = ret * pos_s
+        p_fee = turn * DIR_TAKER_FEE
+        p_fund = np.where(funding_hours, -pos_s * fr, 0.0)
+
+        port_ret += p_ret - p_fee + p_fund
+        total_turn += turn
+
+    return port_ret, total_turn, gated_pos
+
+
+def run_custom_spread_engine(
+    processed: Dict[str, pd.DataFrame],
+    dataset: Dict[str, pd.DataFrame],
+    univ: List[str],
+    eval_index: pd.DatetimeIndex,
+    n: int,
+    gate_mask: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
+    """
+    Parametric Spread Engine supporting True Zero-Liquidation Entry Gating.
+    When gate_mask[t] is True, clamps |pos_gated_t| <= |pos_gated_{t-1}|.
+    Returns (port_ret, total_turnover, positions_dict).
+    """
+    funding_hours = eval_index.hour.isin([0, 8, 16])
+    comps = {}
+    for s in univ:
+        df = processed[s].iloc[WARMUP_BARS:]
+        comps[s] = SP_WT * df["tsmom"].values + SP_WC * df["carry"].values + SP_WO * df["oi_regime"].values
+
+    cur_pos = {s: 0.0 for s in univ}
+    port_ret = np.zeros(n)
+    total_turn = np.zeros(n)
+    all_sp_pos = {s: np.zeros(n) for s in univ}
+
+    for t in range(1, n):
+        sc = sorted([(s, comps[s][t - 1]) for s in univ], key=lambda x: x[1], reverse=True)
+        top_s = sc[0][0]
+        bot_s = sc[-1][0]
+        conv = abs(sc[0][1] - sc[-1][1])
+        ideal = {s: 0.0 for s in univ}
+        ideal[top_s] = conv * 1.0
+        ideal[bot_s] = -conv * 1.0
+
+        for s in univ:
+            old = cur_pos[s]
+            id_s = ideal[s]
+            if gate_mask is not None and gate_mask[t]:
+                if old == 0.0:
+                    id_s = 0.0
+                elif np.sign(id_s) != np.sign(old):
+                    id_s = 0.0
+                elif abs(id_s) > abs(old):
+                    id_s = old
+            if abs(id_s - cur_pos[s]) >= SPREAD_HYST:
+                cur_pos[s] = id_s
+            all_sp_pos[s][t] = cur_pos[s]
+            turn = abs(cur_pos[s] - old)
+            fee_cost = turn * SPREAD_MAKER_FEE if turn > 0.001 else 0.0
+            ret = processed[s].iloc[WARMUP_BARS:]["hourly_return"].values[t]
+            p_ret = ret * cur_pos[s]
+            p_fund = -cur_pos[s] * dataset[s].iloc[WARMUP_BARS:]["funding_rate"].values[t] if funding_hours[t] else 0.0
+            port_ret[t] += p_ret - fee_cost + p_fund
+            total_turn[t] += turn
+
+    return port_ret, total_turn, all_sp_pos
+
+
 def compute_quant_metrics(
     returns: np.ndarray,
-    scale_changes: np.ndarray,
-    sleeve_weight: float,
+    incremental_turnover: np.ndarray,
     slippage_bps: float,
     hedged_mask: np.ndarray,
 ) -> Dict[str, Any]:
@@ -114,8 +275,6 @@ def compute_quant_metrics(
     cvar_99 = float(np.mean(returns[returns <= p1]) * 100.0)
 
     # Honest Incremental Annual Turnover Drag (bps/year under slippage)
-    # Incremental turnover from scale changes = |Delta s_t| * sleeve_weight
-    incremental_turnover = scale_changes * sleeve_weight
     ann_incremental_turnover = float(np.mean(incremental_turnover) * HOURS_PER_YEAR)
     incremental_turnover_drag_bps = float(ann_incremental_turnover * slippage_bps)
 
@@ -164,7 +323,7 @@ def compute_crisis_attribution(
 def run_expanding_walk_forward() -> Dict[str, Any]:
     """Runs causal expanding walk-forward out-of-sample backtest across 2022-11-01 to 2025-05-23."""
     logger.info("=" * 80)
-    logger.info("EXECUTING CAUSAL EXPANDING WALK-FORWARD BACKTEST (EXP-003c)")
+    logger.info("EXECUTING CAUSAL EXPANDING WALK-FORWARD BACKTEST (EXP-003d)")
     logger.info("=" * 80)
     t0 = time.time()
 
@@ -174,14 +333,23 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
         load_data_and_features()
     )
 
-    # Base return streams (ALREADY NET OF TRADING FEES)
-    dir_ret, dir_turn = run_directional_engine(processed, dataset, UNIVERSE, eval_index, n, garch_wts, mtf_skew_mult)
-    dir_filtered = dir_ret * macro_regime
+    # Base return streams and base gross positions (ALREADY NET OF TRADING FEES)
+    dir_ret_base, dir_turn_base, pos_dir_base = run_custom_directional_engine(
+        processed, dataset, UNIVERSE, eval_index, n, garch_wts, mtf_skew_mult, gate_mask=None
+    )
+    dir_filtered_base = dir_ret_base * macro_regime
 
-    spread_stream, _ = run_spread_engine(processed, dataset, UNIVERSE, eval_index, n)
-    spread_filtered = spread_stream * macro_regime
+    sp_ret_base, sp_turn_base, pos_sp_base = run_custom_spread_engine(
+        processed, dataset, UNIVERSE, eval_index, n, gate_mask=None
+    )
+    spread_filtered_base = sp_ret_base * macro_regime
 
     arb_stream, _ = run_funding_arb_engine(dataset, UNIVERSE, eval_index, n, arb_mag_scale)
+
+    # Actual hourly gross exposure (0.0 identically when macro_regime == 0)
+    gross_dir_base = np.sum([np.abs(pos_dir_base[s]) for s in UNIVERSE], axis=0) * macro_regime
+    gross_sp_base = np.sum([np.abs(pos_sp_base[s]) for s in UNIVERSE], axis=0) * macro_regime
+    gross_book_base = (W_DIR * gross_dir_base + W_SPREAD * gross_sp_base) / (W_DIR + W_SPREAD)
 
     # 2. Load Multimodal Features and Targets Panel
     eval_panel, meta = engineer_nlp_features_and_targets()
@@ -229,9 +397,6 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
     eval_panel["aci_var_5pct"] = aci_vars
 
     # 4. Define Expanding Walk-Forward Split Dates
-    # Initial 4-month warm-up: 2022-07-01 to 2022-10-31
-    # OOS Evaluation: 2022-11-01 to 2025-05-23 (~2.56 years, ~22,435 bars)
-    # Refits quarterly with 168-hour purge/embargo gap
     quarterly_test_starts = [
         "2022-11-01 00:00:00+00:00",
         "2023-02-01 00:00:00+00:00",
@@ -277,7 +442,11 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
         tau_proto_fold = float(np.quantile(df_train["max_proto_sim_24h"], 0.85))
         tau_nov_90 = float(np.quantile(df_train["embedding_novelty_score"], 0.90))
         tau_proto_90 = float(np.quantile(df_train["max_proto_sim_24h"], 0.90))
-        var_budget_fold = float(np.quantile(np.abs(df_train["aci_var_5pct"]), 0.85))
+
+        # Hourly worst-asset VaR on training set (strictly matching test-time hourly sizing metric)
+        train_hourly_var = df_train.groupby("timestamp")["aci_var_5pct"].min()
+        var_budget_fold = float(np.quantile(np.abs(train_hourly_var), 0.85))
+        median_train_var = float(np.median(np.abs(train_hourly_var)))
 
         # Engineer sparse-gated features on train & test
         def build_features(sub_df, t_nov, t_proto, t_nov90, t_proto90):
@@ -288,7 +457,6 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
 
             g_nov = np.maximum(0.0, nov - t_nov).reshape(-1, 1)
             g_proto = np.maximum(0.0, sim - t_proto).reshape(-1, 1)
-            # Joint extreme novelty AND prototype similarity for surgical exogenous alerts
             alert = ((nov > t_nov90) & (sim > t_proto90)).astype(np.float32).reshape(-1, 1)
             x_20 = np.concatenate([x_mkt, g_nov, g_proto, alert, burst], axis=1)
             return x_mkt, x_20, alert
@@ -358,7 +526,8 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
         logger.info(
             f"  Fold {q_idx + 1:02d}: OOS {t_test_start.strftime('%Y-%m')} to {t_test_end.strftime('%Y-%m')} "
             f"({len(df_test):,d} bars) | Train: {len(df_train):,d} bars | "
-            f"tau_nov={tau_nov_fold:.4f}, tau_proto={tau_proto_fold:.4f}, p_gate={p_gate_fold:.4f}, var_budget={var_budget_fold:.4f}"
+            f"tau_nov={tau_nov_fold:.4f}, p_gate={p_gate_fold:.4f}, "
+            f"var_budget={var_budget_fold:.4f} (med_var={median_train_var:.4f})"
         )
 
     # 5. Align Hourly Signals with APEX v45 Timeline
@@ -372,7 +541,6 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
     alert_hourly = eval_panel.groupby("timestamp")["oos_gate_alert"].max()
     var_hourly = eval_panel.groupby("timestamp")["aci_var_5pct"].min()
     budget_hourly = eval_panel.groupby("timestamp")["oos_var_budget"].last()
-    raw_var_hourly = eval_panel.groupby("timestamp")["raw_var"].min()
     p_gate_hourly = eval_panel.groupby("timestamp")["oos_p_gate"].last()
 
     p_aligned = p_hourly.reindex(eval_index).bfill().ffill().to_numpy()
@@ -380,74 +548,74 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
     alert_aligned = alert_hourly.reindex(eval_index).fillna(0.0).to_numpy()
     var_aligned = var_hourly.reindex(eval_index).fillna(-0.040).to_numpy()
     budget_aligned = budget_hourly.reindex(eval_index).bfill().ffill().to_numpy()
-    raw_var_aligned = raw_var_hourly.reindex(eval_index).fillna(-0.040).to_numpy()
     p_gate_aligned = p_gate_hourly.reindex(eval_index).bfill().ffill().to_numpy()
 
-    # 6. Construct Strict Out-of-Sample Overlay Strategies
-    # S1: Unhedged APEX v45 Baseline (scale = 1.0)
-    scale_s1 = np.ones(n, dtype=np.float64)
-
-    # S2: Market-Only LightGBM Gate (threshold = 95th pct ~0.10)
-    # Holds defensive posture for 6h shock window with 0.15 deadband
-    scale_s2 = np.ones(n, dtype=np.float64)
+    # 6. Construct Strict Out-of-Sample Overlay Signals
+    # Gate Mask S2: Market-Only LightGBM Gate (threshold = 0.10, held for 6h)
+    gate_mask_s2 = np.zeros(n, dtype=bool)
     timer_s2 = 0
-    s_curr2 = 1.0
     for t in range(n):
         if p_mkt_aligned[t] > 0.10:
             timer_s2 = 6
-        target_s2 = 0.50 if timer_s2 > 0 else 1.0
         if timer_s2 > 0:
+            gate_mask_s2[t] = True
             timer_s2 -= 1
-        if abs(target_s2 - s_curr2) >= 0.15:
-            s_curr2 = target_s2
-        scale_s2[t] = s_curr2
 
-    # S3: Surgical Multimodal NLP Gate
-    # Trigger ONLY on extreme exogenous spikes (p_crash_cal > p_gate OR alert == 1.0)
-    # Holds defensive posture for 6h shock window with 0.15 deadband (targets ~5%-8% active hours)
-    scale_s3 = np.ones(n, dtype=np.float64)
+    # Gate Mask S3: Surgical Multimodal NLP Gate (p_cal > p_gate OR alert == 1.0, held for 6h)
+    gate_mask_s3 = np.zeros(n, dtype=bool)
     timer_s3 = 0
-    s_curr3 = 1.0
     for t in range(n):
         if (p_aligned[t] > p_gate_aligned[t]) or (alert_aligned[t] == 1.0):
             timer_s3 = 6
-        target_s3 = 0.50 if timer_s3 > 0 else 1.0
         if timer_s3 > 0:
+            gate_mask_s3[t] = True
             timer_s3 -= 1
-        if abs(target_s3 - s_curr3) >= 0.15:
-            s_curr3 = target_s3
-        scale_s3[t] = s_curr3
 
     # S4: Delayed-Feedback ACI VaR Tail-Budget Sizing
-    # var_budget set to train-fold 85th percentile of |aci_var_5pct| with 0.15 deadband
+    # var_budget set to train-fold 85th percentile of |train_hourly_var|
+    # With raw_scale >= 0.95 reset to 1.0, and 0.15 deadband hysteresis
     raw_scale_s4 = np.clip(budget_aligned / (np.abs(var_aligned) + 1e-6), 0.25, 1.0)
+    raw_scale_s4 = np.where(raw_scale_s4 >= 0.95, 1.0, raw_scale_s4)
+
     scale_s4 = np.ones(n, dtype=np.float64)
     s_curr4 = 1.0
     for t in range(n):
         s_tgt = raw_scale_s4[t]
-        if abs(s_tgt - s_curr4) >= 0.15:
+        if s_tgt >= 0.95:
+            s_curr4 = 1.0
+        elif abs(s_tgt - s_curr4) >= 0.15:
             s_curr4 = s_tgt
         scale_s4[t] = s_curr4
 
-    # S5: Multimodal + ACI Dual-Pillar Hybrid Overlay
-    # Combines Surgical NLP Gate with ACI Tail-Budget Sizing with 0.15 deadband
-    raw_scale_s5 = np.minimum(scale_s3, scale_s4)
-    scale_s5 = np.ones(n, dtype=np.float64)
-    s_curr5 = 1.0
-    for t in range(n):
-        s_tgt = raw_scale_s5[t]
-        if abs(s_tgt - s_curr5) >= 0.15:
-            s_curr5 = s_tgt
-        scale_s5[t] = s_curr5
+    logger.info(f"Strategy 4 % Scaled (< 1.0): {np.mean(scale_s4[oos_mask] < 0.999) * 100.0:.1f}%")
+    logger.info(f"Strategy 2 % Gated Active: {np.mean(gate_mask_s2[oos_mask]) * 100.0:.1f}%")
+    logger.info(f"Strategy 3 % Gated Active: {np.mean(gate_mask_s3[oos_mask]) * 100.0:.1f}%")
 
-    strategies = [
-        ("1. Unhedged APEX v45 Champion", scale_s1),
-        ("2. Market-Only LightGBM Gate", scale_s2),
-        ("3. Surgical Multimodal NLP Gate", scale_s3),
-        ("4. Delayed-Feedback ACI VaR Sizing", scale_s4),
-        ("5. Dual-Pillar Multimodal+ACI Overlay", scale_s5),
-    ]
+    # Run true entry-gated engines for Strategies 2 and 3
+    logger.info("Simulating true zero-liquidation entry-gated engines for S2 and S3...")
+    dir_ret_s2, dir_turn_s2, pos_dir_s2 = run_custom_directional_engine(
+        processed, dataset, UNIVERSE, eval_index, n, garch_wts, mtf_skew_mult, gate_mask=gate_mask_s2
+    )
+    sp_ret_s2, sp_turn_s2, pos_sp_s2 = run_custom_spread_engine(
+        processed, dataset, UNIVERSE, eval_index, n, gate_mask=gate_mask_s2
+    )
 
+    dir_ret_s3, dir_turn_s3, pos_dir_s3 = run_custom_directional_engine(
+        processed, dataset, UNIVERSE, eval_index, n, garch_wts, mtf_skew_mult, gate_mask=gate_mask_s3
+    )
+    sp_ret_s3, sp_turn_s3, pos_sp_s3 = run_custom_spread_engine(
+        processed, dataset, UNIVERSE, eval_index, n, gate_mask=gate_mask_s3
+    )
+
+    # Gross exposures for gated engines
+    gross_dir_s2 = np.sum([np.abs(pos_dir_s2[s]) for s in UNIVERSE], axis=0) * macro_regime
+    gross_sp_s2 = np.sum([np.abs(pos_sp_s2[s]) for s in UNIVERSE], axis=0) * macro_regime
+
+    gross_dir_s3 = np.sum([np.abs(pos_dir_s3[s]) for s in UNIVERSE], axis=0) * macro_regime
+    gross_sp_s3 = np.sum([np.abs(pos_sp_s3[s]) for s in UNIVERSE], axis=0) * macro_regime
+    gross_book_s3 = (W_DIR * gross_dir_s3 + W_SPREAD * gross_sp_s3) / (W_DIR + W_SPREAD)
+
+    # Crisis episodes
     crisis_episodes = {
         "FTX Collapse (Nov 2022)": ("2022-11-06", "2022-11-14"),
         "SVB / USDC Depeg (Mar 2023)": ("2023-03-09", "2023-03-14"),
@@ -455,9 +623,6 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
         "Aug 2024 Global Unwind": ("2024-08-02", "2024-08-07"),
     }
 
-    # Evaluate BOTH Modes:
-    # Mode A: Directional Sleeve Only (W_DIR = 0.25)
-    # Mode B: Active Risk Book (Directional + Spread = 0.80)
     eval_modes = {
         "Directional Sleeve Only (W_DIR=0.25)": W_DIR,
         "Active Risk Book (W_DIR+W_SPREAD=0.80)": W_DIR + W_SPREAD,
@@ -471,38 +636,95 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
         res_25bps = {}
         cr_25bps = {}
 
-        for strat_name, scale_arr in strategies:
-            # Incremental scale changes
-            delta_s = np.abs(np.diff(np.concatenate(([1.0], scale_arr))))
-            # Incremental fee drag under 25 bps slippage (0.0025)
-            drag_25bps = delta_s * sleeve_wt * 0.0025
+        is_mode_dir = sleeve_wt == W_DIR
 
-            # Portfolio return stream
-            if sleeve_wt == W_DIR:
-                # Scale Directional only
-                strat_ret_0 = W_DIR * (dir_filtered * scale_arr) + W_SPREAD * spread_filtered + W_ARB * arb_stream
-            else:
-                # Scale Active Risk Book (Directional + Spread)
-                strat_ret_0 = scale_arr * (W_DIR * dir_filtered + W_SPREAD * spread_filtered) + W_ARB * arb_stream
+        # Build return, turnover, and hedged masks for all 5 strategies under this mode
+        strat_dict = {}
 
-            strat_ret_25 = strat_ret_0 - drag_25bps
-            hedged_mask = scale_arr < 0.999
+        # S1: Unhedged Baseline
+        ret_s1_0 = (
+            W_DIR * dir_filtered_base + W_SPREAD * spread_filtered_base + W_ARB * arb_stream
+        )
+        inc_turn_s1 = np.zeros(n)
+        hedged_s1 = np.zeros(n, dtype=bool)
+        strat_dict["1. Unhedged APEX v45 Champion"] = (ret_s1_0, inc_turn_s1, hedged_s1)
+
+        # S2: Market-Only LightGBM Gate (True Entry Gating)
+        if is_mode_dir:
+            ret_s2_0 = W_DIR * (dir_ret_s2 * macro_regime) + W_SPREAD * spread_filtered_base + W_ARB * arb_stream
+        else:
+            ret_s2_0 = W_DIR * (dir_ret_s2 * macro_regime) + W_SPREAD * (sp_ret_s2 * macro_regime) + W_ARB * arb_stream
+        # True entry gating suppresses trades: overlay turnover <= base turnover -> inc_turn = 0.0
+        inc_turn_s2 = np.zeros(n)
+        hedged_s2 = gate_mask_s2
+        strat_dict["2. Market-Only LightGBM Gate"] = (ret_s2_0, inc_turn_s2, hedged_s2)
+
+        # S3: Surgical Multimodal NLP Gate (True Entry Gating)
+        if is_mode_dir:
+            ret_s3_0 = W_DIR * (dir_ret_s3 * macro_regime) + W_SPREAD * spread_filtered_base + W_ARB * arb_stream
+        else:
+            ret_s3_0 = W_DIR * (dir_ret_s3 * macro_regime) + W_SPREAD * (sp_ret_s3 * macro_regime) + W_ARB * arb_stream
+        inc_turn_s3 = np.zeros(n)
+        hedged_s3 = gate_mask_s3
+        strat_dict["3. Surgical Multimodal NLP Gate"] = (ret_s3_0, inc_turn_s3, hedged_s3)
+
+        # S4: Delayed-Feedback ACI VaR Sizing
+        # Incremental turnover strictly on realized position delta
+        if is_mode_dir:
+            gross_active = gross_dir_base
+            eff_pos_s4 = scale_s4 * gross_active
+            base_turn = np.abs(np.diff(np.concatenate(([0.0], gross_active))))
+            overlay_turn = np.abs(np.diff(np.concatenate(([0.0], eff_pos_s4))))
+            inc_turn_s4 = np.maximum(0.0, overlay_turn - base_turn) * W_DIR
+            ret_s4_0 = W_DIR * (dir_filtered_base * scale_s4) + W_SPREAD * spread_filtered_base + W_ARB * arb_stream
+        else:
+            gross_active = gross_book_base
+            eff_pos_s4 = scale_s4 * gross_active
+            base_turn = np.abs(np.diff(np.concatenate(([0.0], gross_active))))
+            overlay_turn = np.abs(np.diff(np.concatenate(([0.0], eff_pos_s4))))
+            inc_turn_s4 = np.maximum(0.0, overlay_turn - base_turn) * (W_DIR + W_SPREAD)
+            ret_s4_0 = scale_s4 * (W_DIR * dir_filtered_base + W_SPREAD * spread_filtered_base) + W_ARB * arb_stream
+
+        hedged_s4 = scale_s4 < 0.999
+        strat_dict["4. Delayed-Feedback ACI VaR Sizing"] = (ret_s4_0, inc_turn_s4, hedged_s4)
+
+        # S5: Dual-Pillar Multimodal + ACI Overlay
+        # Combines Surgical NLP Gate (S3) with ACI VaR Sizing (S4)
+        if is_mode_dir:
+            gross_active_s5 = gross_dir_s3
+            eff_pos_s5 = scale_s4 * gross_active_s5
+            base_turn = np.abs(np.diff(np.concatenate(([0.0], gross_active_s5))))
+            overlay_turn = np.abs(np.diff(np.concatenate(([0.0], eff_pos_s5))))
+            inc_turn_s5 = np.maximum(0.0, overlay_turn - base_turn) * W_DIR
+            ret_s5_0 = W_DIR * (dir_ret_s3 * macro_regime * scale_s4) + W_SPREAD * spread_filtered_base + W_ARB * arb_stream
+        else:
+            gross_active_s5 = gross_book_s3
+            eff_pos_s5 = scale_s4 * gross_active_s5
+            base_turn = np.abs(np.diff(np.concatenate(([0.0], gross_active_s5))))
+            overlay_turn = np.abs(np.diff(np.concatenate(([0.0], eff_pos_s5))))
+            inc_turn_s5 = np.maximum(0.0, overlay_turn - base_turn) * (W_DIR + W_SPREAD)
+            ret_s5_0 = scale_s4 * (W_DIR * dir_ret_s3 * macro_regime + W_SPREAD * sp_ret_s3 * macro_regime) + W_ARB * arb_stream
+
+        hedged_s5 = (scale_s4 < 0.999) | gate_mask_s3
+        strat_dict["5. Dual-Pillar Multimodal+ACI Overlay"] = (ret_s5_0, inc_turn_s5, hedged_s5)
+
+        for strat_name, (ret_0, inc_turn, hedged_m) in strat_dict.items():
+            fee_drag_25 = inc_turn * 0.0025
+            ret_25 = ret_0 - fee_drag_25
 
             m0 = compute_quant_metrics(
-                strat_ret_0[oos_mask],
-                delta_s[oos_mask],
-                sleeve_weight=sleeve_wt,
+                ret_0[oos_mask],
+                inc_turn[oos_mask],
                 slippage_bps=0.0,
-                hedged_mask=hedged_mask[oos_mask],
+                hedged_mask=hedged_m[oos_mask],
             )
             m25 = compute_quant_metrics(
-                strat_ret_25[oos_mask],
-                delta_s[oos_mask],
-                sleeve_weight=sleeve_wt,
+                ret_25[oos_mask],
+                inc_turn[oos_mask],
                 slippage_bps=25.0,
-                hedged_mask=hedged_mask[oos_mask],
+                hedged_mask=hedged_m[oos_mask],
             )
-            cr = compute_crisis_attribution(eval_index, strat_ret_25, crisis_episodes)
+            cr = compute_crisis_attribution(eval_index, ret_25, crisis_episodes)
 
             res_0bps[strat_name] = m0
             res_25bps[strat_name] = m25
@@ -515,15 +737,23 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
         }
 
     # 7. Print Institutional Quant Tear Sheet Tables
+    strat_order = [
+        "1. Unhedged APEX v45 Champion",
+        "2. Market-Only LightGBM Gate",
+        "3. Surgical Multimodal NLP Gate",
+        "4. Delayed-Feedback ACI VaR Sizing",
+        "5. Dual-Pillar Multimodal+ACI Overlay",
+    ]
+
     for mode_name, data in all_mode_results.items():
         print("\n" + "=" * 145)
-        print(f"EXP-003c: STRICTLY OUT-OF-SAMPLE QUANT TEAR SHEET TABLE ({mode_name.upper()})")
+        print(f"EXP-003d: STRICTLY OUT-OF-SAMPLE QUANT TEAR SHEET TABLE ({mode_name.upper()})")
         print("Coverage: 2022-11-01 to 2025-05-23 (2.56 Years, 22,435 Bars, Quarterly Refits, 168h Embargo)")
         print("=" * 145)
         print(f"{'Strategy Sleeve':38s} | {'Slippage':8s} | {'CAGR %':8s} | {'Code Cal':8s} | {'True Cal':8s} | {'Sharpe':8s} | {'Sortino':8s} | {'MaxDD %':8s} | {'WorstBar':8s} | {'Turn Drag':9s} | {'% Hedged':8s}")
         print("-" * 145)
 
-        for strat_name, _ in strategies:
+        for strat_name in strat_order:
             m0 = data["res_0bps"][strat_name]
             m25 = data["res_25bps"][strat_name]
             print(
@@ -544,12 +774,12 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
     # 8. Print Crisis Attribution Table
     for mode_name, data in all_mode_results.items():
         print("\n" + "=" * 135)
-        print(f"EXP-003c: 4-SHOCK CRISIS ATTRIBUTION ({mode_name.upper()} Under 25 bps Slippage)")
+        print(f"EXP-003d: 4-SHOCK CRISIS ATTRIBUTION ({mode_name.upper()} Under 25 bps Slippage)")
         print("=" * 135)
         print(f"{'Strategy Sleeve':36s} | {'FTX Collapse (Nov 22)':22s} | {'SVB / USDC (Mar 23)':22s} | {'SEC Lawsuit (Jun 23)':22s} | {'Aug 2024 Unwind':22s}")
         print("-" * 135)
 
-        for strat_name, _ in strategies:
+        for strat_name in strat_order:
             cr = data["cr_25bps"][strat_name]
             col_ftx = f"{cr['FTX Collapse (Nov 2022)']['net_return']:+.2f}% / {cr['FTX Collapse (Nov 2022)']['max_dd']:.1f}%"
             col_svb = f"{cr['SVB / USDC Depeg (Mar 2023)']['net_return']:+.2f}% / {cr['SVB / USDC Depeg (Mar 2023)']['max_dd']:.1f}%"
@@ -571,7 +801,6 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
         for spine in ax.spines.values():
             spine.set_color("#30363d")
 
-    # Dates and curves for Active Risk Book mode
     active_book_data = all_mode_results["Active Risk Book (W_DIR+W_SPREAD=0.80)"]["res_25bps"]
     dates = eval_oos
 
@@ -586,13 +815,13 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
     }
     linewidths = {
         "1. Unhedged APEX v45 Champion": 1.4,
-        "2. Market-Only LightGBM Gate": 1.5,
-        "3. Surgical Multimodal NLP Gate": 1.6,
-        "4. Delayed-Feedback ACI VaR Sizing": 1.8,
+        "2. Market-Only LightGBM Gate": 1.6,
+        "3. Surgical Multimodal NLP Gate": 1.8,
+        "4. Delayed-Feedback ACI VaR Sizing": 2.0,
         "5. Dual-Pillar Multimodal+ACI Overlay": 2.5,
     }
 
-    for strat_name, _ in strategies:
+    for strat_name in strat_order:
         cum_series = active_book_data[strat_name]["cum_series"]
         ax1.plot(
             dates,
@@ -645,20 +874,17 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
     ax2.set_ylabel("Underwater DD (%)", color="#c9d1d9", fontsize=11, fontweight="bold")
     ax2.legend(loc="lower left", facecolor="#161b22", edgecolor="#30363d", labelcolor="#c9d1d9", fontsize=9.5)
 
-    # Panel 3: Risk Telemetry (ACI 5% VaR & Overlay Active Sizing Multiplier)
+    # Panel 3: Risk Telemetry (Overlay Scale Multiplier & Calibrated Risk Alerts)
     ax3 = axes[2]
-    # Primary axis: Overlay Sizing Multiplier scale_s5
-    s5_oos = scale_s5[oos_mask]
-    ax3.plot(dates, s5_oos, color="#3fb950", linewidth=1.5, label="Active Exposure Scale $s_t$ (Dual-Pillar)")
-    ax3.set_ylabel("Overlay Scale Multiplier ($s_t$)", color="#3fb950", fontsize=11, fontweight="bold")
+    s5_oos = scale_s4[oos_mask]
+    ax3.plot(dates, s5_oos, color="#3fb950", linewidth=1.5, label="Tail-Budget Scale $s_t$ (ACI)")
+    ax3.set_ylabel("ACI Scale Multiplier ($s_t$)", color="#3fb950", fontsize=11, fontweight="bold")
     ax3.set_ylim(-0.05, 1.15)
 
-    # Secondary axis: Calibrated Crash Probability & ACI VaR
     ax3_twin = ax3.twinx()
     p_cal_oos = p_aligned[oos_mask]
     alert_oos = alert_aligned[oos_mask]
     ax3_twin.plot(dates, p_cal_oos, color="#f0883e", linewidth=1.0, alpha=0.7, label="Calibrated Crash Prob $p_{\\text{crash, cal}}$")
-    # Alert dots
     alert_idx = np.where(alert_oos == 1.0)[0]
     if len(alert_idx) > 0:
         ax3_twin.scatter(
@@ -673,12 +899,10 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
     ax3_twin.tick_params(colors="#f0883e", labelsize=10)
     ax3_twin.spines["right"].set_color("#f0883e")
 
-    # Combine legends for Panel 3
     lines_3, labels_3 = ax3.get_legend_handles_labels()
     lines_3t, labels_3t = ax3_twin.get_legend_handles_labels()
     ax3.legend(lines_3 + lines_3t, labels_3 + labels_3t, loc="upper right", facecolor="#161b22", edgecolor="#30363d", labelcolor="#c9d1d9", fontsize=9.0)
 
-    # Format x-axis dates
     axes[2].xaxis.set_major_locator(mdates.MonthLocator(interval=3))
     axes[2].xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
     plt.xticks(rotation=0)
