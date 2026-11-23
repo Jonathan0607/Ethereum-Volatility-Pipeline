@@ -43,11 +43,15 @@ apex_multimodal_risk/data/
 *.npy
 *.png
 *.pkl
+*.onnx
+*.onnx.data
 best_params.txt
 archive/
 mlruns/
 apex_multimodal_risk/mlruns/
 apex_multimodal_risk/artifacts/
+benchmarks/results/
+apex_multimodal_risk/benchmarks/results/
 
 # Frontend builds & caches
 frontend/.next/
