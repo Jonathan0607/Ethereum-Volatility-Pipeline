@@ -261,6 +261,9 @@ class MultiAssetDelayedFeedbackACI:
             )
         return self.engines[asset]
 
+    def get_alpha(self, asset: str) -> float:
+        return self.get_engine(asset).alpha_t
+
     def predict(
         self,
         asset: str,

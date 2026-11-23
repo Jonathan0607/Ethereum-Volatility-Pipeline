@@ -19,6 +19,8 @@ import pyarrow.parquet as pq
 import pytest
 from apex_multimodal_risk.src.utils import PROJECT_ROOT, load_config, read_parquet_utc
 
+pytestmark = pytest.mark.requires_local_artifacts
+
 
 @pytest.fixture(scope="session")
 def pipeline_config():

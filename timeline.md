@@ -710,3 +710,40 @@
      - Frozen champion `research/apex_v45_champion.py` strictly untouched.
      - Zero binary artifacts staged in git (`configs/drift_baseline.json` is small text JSON).
 - **Verdict & Next Step:** `[PASSED / SPRINT 4A COMPLETE]` - Microservice telemetry, stateful incremental train-serve parity, and drift monitoring fully productionized. Ready for final review / Sprint 4B.
+
+---
+
+## [2026-11-23] - SPRINT 4B: Redis Streams Shadow Scoring Worker, Docker Containerization & Fresh-Clone Green GitHub Actions CI (`EXP-004b`)
+- **Git Branch:** `feat/multimodal-risk-mle`
+- **Scope & Objective:**
+  Deliver Sprint 4B: Implement an asynchronous non-executing shadow scoring worker using Redis Streams (`market:bars`, `news:raw`), configure production-grade slim Docker containerization (`Dockerfile`, `docker-compose.yml`, `.dockerignore`), and establish fresh-clone green GitHub Actions CI (`.github/workflows/ci.yml`) with zero local binary dependencies.
+- **Key Deliverables & Results:**
+  1. *Redis Streams Shadow Scoring Worker (`src/serving/shadow_stream.py` + `tests/test_shadow_replay.py`):*
+     - Pinned `redis>=5.0.0` and `feedparser>=6.0.0` in `requirements.txt` and `pyproject.toml`.
+     - Built async shadow worker supporting two production operational modes (strictly non-executing, 0 live orders):
+       * `--mode live`: Periodically polls public Binance hourly klines (SOL, AVAX, LINK) + Tier-1 RSS feeds (CoinDesk, CoinTelegraph), ingests normalized UTC events into Redis Streams (`market:bars`, `news:raw`), applies 4-stage noise filtering + `OnlineFeatureState`, calls `POST /v1/score` and 6h causal delayed `POST /v1/feedback` on the FastAPI microservice, and outputs structured JSON shadow telemetry.
+       * `--mode replay`: Replays historical or synthetic aligned bars through Redis Streams (automatically falling back to an in-memory queue if local Redis is unavailable), executing incremental scoring and causal delayed ACI feedback.
+     - Added `tests/test_shadow_replay.py`:
+       * Verifies 4-stage noise filtering (rejects clickbait regex & untrusted domains; links SOL/AVAX/LINK and macro entities).
+       * Verifies 25-bar end-to-end replay via ASGI `app.router.lifespan_context`: processes 25 bars (75 score requests across 3 assets, 57 delayed feedbacks), achieves 0 degraded fallbacks, updates ACI alpha levels causally, records live drift monitor observations, and verifies `/metrics` counters.
+  2. *Dockerization & Compose (`Dockerfile` + `docker-compose.yml` + `.dockerignore`):*
+     - Slim CPU `Dockerfile` (`python:3.11-slim`, non-root user `appuser`, pinned dependencies, exposed port 8000, `HEALTHCHECK` querying `/health`). Strictly NO `KMP_DUPLICATE_LIB_OK=TRUE`.
+     - `docker-compose.yml` orchestrating:
+       * `redis:7-alpine` (in-memory caching with healthcheck `redis-cli ping`).
+       * `inference-service` (mounts `./artifacts/onnx` read-only, port 8000, dependent on healthy redis).
+       * `shadow-worker` (runs shadow worker in replay mode, dependent on healthy inference service and redis).
+     - `.dockerignore` comprehensively blocks all caches, git, venvs, and local binaries (`*.parquet`, `*.pt`, `*.pkl`, `*.onnx`).
+  3. *Fresh-Clone Green GitHub Actions CI (`.github/workflows/ci.yml`):*
+     - Registered `@pytest.mark.requires_local_artifacts` in `pyproject.toml`.
+     - Marked tests dependent on local gitignored binaries (`test_no_leakage.py`, `test_e2e_inference_parity.py`, `test_serving_api.py`, `test_train_serve_feature_and_scoring_parity`).
+     - Hardened tests for fresh-clone portability (`test_cpcv_integrity.py` fallback to synthetic timestamps; `test_online_feature_state_synthetic_math` testing `OnlineFeatureState` on 50 synthetic bars).
+     - Automated CI workflow `.github/workflows/ci.yml` running on Ubuntu + Python 3.11 for `main` and `feat/*`:
+       * `ruff check apex_multimodal_risk/`
+       * `pytest apex_multimodal_risk/tests/ -m "not requires_local_artifacts" -v`
+  4. *Verification & Dual Test Suite Results:*
+     - Fresh-Clone CI suite (`not requires_local_artifacts`): **17 passed, 17 deselected in 6.21s (100% green)** with zero binary files required.
+     - Full Local suite (with local artifacts): **34 passed in 12.72s (100% green)**.
+     - `ruff check apex_multimodal_risk/`: **All checks passed! (0 errors)**.
+     - Frozen champion `research/apex_v45_champion.py` strictly untouched.
+     - Zero binary artifacts staged in git.
+- **Verdict & Next Step:** `[PASSED / SPRINT 4B COMPLETE]` - Redis Streams shadow scoring, production Docker containerization, and fresh-clone GitHub Actions CI fully operational and verified green. Ready for final review.

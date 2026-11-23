@@ -37,6 +37,7 @@ def setup_parity_data():
     return eval_panel, news_df, serving_meta, sess
 
 
+@pytest.mark.requires_local_artifacts
 def test_train_serve_feature_and_scoring_parity(setup_parity_data):
     """
     Feeds 500 consecutive historical bars step-by-step through OnlineFeatureState.
@@ -142,3 +143,33 @@ def test_train_serve_feature_and_scoring_parity(setup_parity_data):
     assert max_mkt_diff < 1e-6, f"16 market features exceeded 1e-6 tolerance: {max_mkt_diff}"
     assert max_nlp_diff < 1e-5, f"NLP gated features exceeded 1e-5 tolerance: {max_nlp_diff}"
     assert max_p_diff < 1e-4, f"p_crash_cal exceeded 1e-4 tolerance: {max_p_diff}"
+
+
+def test_online_feature_state_synthetic_math():
+    """Verify OnlineFeatureState executes step() on synthetic OHLCV bars without local artifacts."""
+    universe = ["SOLUSDT", "AVAXUSDT", "LINKUSDT"]
+    state = OnlineFeatureState(universe=universe)
+    rng = np.random.default_rng(42)
+    dates = pd.date_range("2024-01-01", periods=50, freq="1h", tz="UTC")
+    prices = {"SOLUSDT": 100.0, "AVAXUSDT": 30.0, "LINKUSDT": 15.0}
+
+    for t in dates:
+        bdict = {}
+        for sym in universe:
+            ret = rng.normal(0, 0.01)
+            prices[sym] *= np.exp(ret)
+            bdict[sym] = {
+                "close": prices[sym],
+                "open": prices[sym] * 0.999,
+                "high": prices[sym] * 1.005,
+                "low": prices[sym] * 0.995,
+                "volume": float(rng.uniform(1e5, 5e5)),
+                "funding_rate": float(rng.normal(0.0001, 0.0002)),
+                "open_interest": float(rng.uniform(1e7, 2e7)),
+                "garch_cond_vol": 2.0,
+            }
+        vecs = state.step(t, bdict)
+        assert len(vecs) == len(universe)
+        for sym in universe:
+            assert vecs[sym].shape == (20,)
+            assert not np.isnan(vecs[sym]).any()

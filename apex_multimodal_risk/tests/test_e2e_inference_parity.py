@@ -24,6 +24,8 @@ from apex_multimodal_risk.src.utils import PROJECT_ROOT
 from fastapi.testclient import TestClient
 from sentence_transformers import SentenceTransformer
 
+pytestmark = pytest.mark.requires_local_artifacts
+
 
 @pytest.fixture(scope="module")
 def client():

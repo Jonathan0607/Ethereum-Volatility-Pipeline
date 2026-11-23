@@ -16,6 +16,8 @@ import pytest
 from apex_multimodal_risk.src.serving.app import app
 from fastapi.testclient import TestClient
 
+pytestmark = pytest.mark.requires_local_artifacts
+
 
 @pytest.fixture(scope="module")
 def client():

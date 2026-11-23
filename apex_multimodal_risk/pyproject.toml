@@ -22,7 +22,9 @@ dependencies = [
     "numpy>=1.24.0",
     "ruff>=0.9.0",
     "prometheus_client>=0.20.0",
-    "scipy>=1.12.0"
+    "scipy>=1.12.0",
+    "redis>=5.0.0",
+    "feedparser>=6.0.0"
 ]
 
 [tool.ruff]
@@ -44,4 +46,7 @@ ignore = [
 
 [tool.pytest.ini_options]
 pythonpath = ["..", "."]
+markers = [
+    "requires_local_artifacts: tests requiring local gitignored parquet or onnx models (skipped in fresh-clone CI)",
+]
 

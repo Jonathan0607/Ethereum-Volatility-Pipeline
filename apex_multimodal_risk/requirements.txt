@@ -27,3 +27,6 @@ onnxscript
 ruff>=0.9.0
 prometheus_client>=0.20.0
 scipy>=1.12.0
+redis>=5.0.0
+feedparser>=6.0.0
+
