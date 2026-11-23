@@ -1,23 +1,57 @@
-# Python cache
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
 
-# Virtual Environment
-venv/
+# C++ Build artifacts
+*.o
+*.obj
+build/
+
+# Secrets and Credentials
 .env
+.env.*
+*.pem
+*.key
+*.crt
+*.cert
+*credential*.json
+*secret*.json
+secrets/
 
-# Data
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Logs and databases
+*.log
+logs/
+*.db
+*.sqlite
+*.sqlite3
+
+# Data and large binary artifacts
 data/
-
-# Generated Artifacts (The Pipeline Output)
 *.pth
 *.npy
 *.png
 *.pkl
-*.json
 best_params.txt
+archive/
 
-archive
+# Frontend builds & caches
+frontend/.next/
+frontend/node_modules/
+node_modules/
 
-# Mac System files
+# OS-specific files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
