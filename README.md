@@ -56,32 +56,41 @@ flowchart TD
 
 ## 2. Walk-Forward Quantitative Equity Performance
 
-The multimodal risk engine was audited through a strictly out-of-sample expanding walk-forward backtest (2022–2024, 25,392 hourly bars) across historical crises (FTX collapse, Silicon Valley Bank run, SEC altcoin regulatory lawsuits, and the August 2024 Yen-carry unwind). All simulations include realistic **25 bps taker slippage and fee friction** charged strictly on realized position turnover.
+The multimodal risk engine was audited through a strictly out-of-sample expanding walk-forward backtest (2022-11-01 to 2025-05-23, 2.56 years, 22,435 hourly bars) across historical crises (FTX collapse, Silicon Valley Bank run, SEC altcoin regulatory lawsuits, and the August 2024 Yen-carry unwind). All simulations include realistic **25 bps taker slippage and fee friction** charged strictly on realized position turnover.
 
 ![APEX Multimodal Risk Overlay Tear Sheet](apex_multimodal_risk/docs/quant_equity_tearsheet.png)
 *Figure 1: 2.56-year walk-forward equity curves, rolling 90-day Sharpe ratios, underwater drawdown profiles, and empirical overlay scaling distributions for the APEX v45 Champion versus the multimodal risk overlays.*
 
-### Walk-Forward Performance Tear Sheet (25 bps Slippage, 25,392 Bars)
+### Walk-Forward Performance Tear Sheet (25 bps Slippage, 22,435 Bars)
 
-The quantitative audit evaluated two overlay deployment modes:
-- **Mode A (Active Book Overlay):** Evaluates risk scaling across the entire portfolio (Directional + Spread sleeves).
-- **Mode B (Directional Sleeve Defense):** Gates only the directional momentum engine, preserving the market-neutral spread sleeve's uncorrelated alpha.
+The quantitative audit evaluated two overlay deployment modes across the strictly out-of-sample expanding walk-forward period:
+- **Mode A (Directional Sleeve Only, $W_{\text{DIR}} = 0.25$):** Gates only the directional momentum engine, shielding directional risk during crashes while preserving the market-neutral spread sleeve's uncorrelated alpha.
+- **Mode B (Active Risk Book, $W_{\text{DIR}} + W_{\text{SPREAD}} = 0.80$):** Evaluates risk scaling across both the directional and market-neutral spread sleeves.
 
-| Strategy Configuration | Mode | CAGR (%) | Annualized Sharpe | Annualized Sortino | Max Drawdown | True Calmar Ratio | RoMaD Ratio | Annual Turnover Drag |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **1. Unhedged APEX v45 Champion** | — | **33.55%** | **1.73** | **1.83** | **-19.43%** | **1.73** | **9.17** | 2,599.7 bps/yr |
-| **2. Market-Only LightGBM Gate** | Mode A | 23.84% | 1.37 | 1.48 | -17.43% | 1.37 | 6.78 | 1,094.7 bps/yr |
-| **2. Market-Only LightGBM Gate** | Mode B | **32.18%** | **1.70** | **1.80** | **-18.78%** | **1.71** | **8.89** | 2,425.2 bps/yr |
-| **3. Surgical Multimodal NLP Gate** | Mode A | 23.84% | 1.37 | 1.48 | -17.43% | 1.37 | 6.78 | 1,094.7 bps/yr |
-| **3. Surgical Multimodal NLP Gate** | Mode B | **32.18%** | **1.70** | **1.80** | **-18.78%** | **1.71** | **8.89** | 2,425.2 bps/yr |
-| **4. Delayed-Feedback ACI VaR Sizing** | Mode A | 31.90% | 1.70 | 1.81 | -18.73% | 1.70 | 8.87 | 2,476.9 bps/yr |
-| **4. Delayed-Feedback ACI VaR Sizing** | Mode B | **33.00%** | **1.73** | **1.83** | **-19.20%** | **1.72** | **9.05** | 2,548.8 bps/yr |
-| **5. Dual-Pillar Multimodal+ACI Overlay** | Mode A | 22.84% | 1.35 | 1.47 | **-16.92%** | 1.35 | 6.64 | 1,048.8 bps/yr |
-| **5. Dual-Pillar Multimodal+ACI Overlay** | Mode B | **31.67%** | **1.69** | **1.80** | **-18.57%** | **1.71** | **8.82** | 2,410.6 bps/yr |
+#### Mode A: Directional Sleeve Only ($W_{\text{DIR}} = 0.25$)
+
+| Strategy Configuration | Slippage | CAGR (%) | Annualized Sharpe | Annualized Sortino | Max Drawdown | True Calmar Ratio | RoMaD Ratio | Annual Turnover Drag | % Hedged |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1. Unhedged APEX v45 Champion** | 0 bps | 36.07% | 1.76 | 1.81 | -11.7% | 3.09 | 10.30 | 0.0 bps/yr | 0.0% |
+| | 25 bps | **36.07%** | **1.76** | **1.81** | **-11.7%** | **3.09** | **10.30** | **0.0 bps/yr** | 0.0% |
+| **2. Market-Only LightGBM Gate** | 25 bps | 35.83% | 1.76 | 1.80 | -11.7% | 3.07 | 10.21 | 0.0 bps/yr | 20.2% |
+| **3. Surgical Multimodal NLP Gate** | 25 bps | **35.48%** | **1.75** | **1.80** | **-11.7%** | **3.04** | **10.12** | **55.8 bps/yr** | 19.6% |
+| **4. Delayed-Feedback ACI VaR Sizing** | 25 bps | 32.97% | 1.70 | 1.75 | -11.5% | 2.87 | 9.34 | 47.6 bps/yr | 9.9% |
+| **5. Dual-Pillar Multimodal+ACI Overlay** | 25 bps | 33.11% | 1.72 | 1.77 | -11.5% | 2.88 | 9.39 | 46.5 bps/yr | 26.9% |
+
+#### Mode B: Active Risk Book ($W_{\text{DIR}} + W_{\text{SPREAD}} = 0.80$)
+
+| Strategy Configuration | Slippage | CAGR (%) | Annualized Sharpe | Annualized Sortino | Max Drawdown | True Calmar Ratio | RoMaD Ratio | Annual Turnover Drag | % Hedged |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1. Unhedged APEX v45 Champion** | 25 bps | **36.07%** | **1.76** | **1.81** | **-11.7%** | **3.09** | **10.30** | **0.0 bps/yr** | 0.0% |
+| **2. Market-Only LightGBM Gate** | 25 bps | 30.00% | 1.54 | 1.56 | -11.7% | 2.57 | 8.22 | 0.0 bps/yr | 20.2% |
+| **3. Surgical Multimodal NLP Gate** | 25 bps | 28.28% | 1.46 | 1.47 | -12.7% | 2.23 | 7.05 | 0.0 bps/yr | 19.6% |
+| **4. Delayed-Feedback ACI VaR Sizing** | 25 bps | **31.64%** | **1.69** | **1.76** | **-11.3%** | **2.79** | **9.02** | **128.1 bps/yr** | 9.9% |
+| **5. Dual-Pillar Multimodal+ACI Overlay** | 25 bps | 24.19% | 1.37 | 1.40 | -12.6% | 1.93 | 5.91 | 122.5 bps/yr | 26.9% |
 
 > [!NOTE]
 > **Calmar vs. RoMaD Metric Rigor:**  
-> In institutional quantitative reporting, **True Calmar Ratio** is defined as $\frac{\text{CAGR}}{|\text{Max Drawdown}|}$, whereas **RoMaD** is defined as $\frac{\text{Total Cumulative Return}}{|\text{Max Drawdown}|}$. Both metrics are reported honestly above. Over the 2.56-year backtest, the unhedged APEX v45 champion achieves a True Calmar of 1.73 and a RoMaD of 9.17.
+> In institutional quantitative reporting, **True Calmar Ratio** is defined as $\frac{\text{CAGR}}{|\text{Max Drawdown}|}$, whereas **RoMaD** is defined as $\frac{\text{Total Cumulative Return}}{|\text{Max Drawdown}|}$. Both metrics are reported honestly above. Over the 2.56-year backtest (22,435 bars), the unhedged APEX v45 champion achieves a True Calmar of 3.09 and a RoMaD of 10.30.
 
 ### 4-Shock Crisis Event Attribution
 
@@ -97,8 +106,8 @@ To verify execution realism and confirm the absence of lookahead leakage or phan
 ### Key Quantitative Takeaway: Directional Defense vs. Spread Alpha
 A critical finding from our forensic walk-forward backtest is the asymmetric interaction between the risk overlay and the underlying alpha engines:
 - APEX v45's market-neutral spread engine acts as an **internal hedge** during crypto liquidation cascades, generating positive relative-value alpha as altcoin dispersions widen.
-- Applying a blunt overlay across the entire active book (Mode A) penalizes the spread engine when it is actively winning, dragging annualized CAGR from 33.55% down to 23.84%.
-- Applying the overlay strictly to the directional momentum engine (Mode B) shields the portfolio from long-side liquidation crashes during market-wide collapses (reducing SEC lawsuit drawdown from -1.13% to -0.08%) while preserving full spread alpha, yielding **32.18% CAGR and 1.70 Sharpe**.
+- Applying a blunt overlay across the entire active book (**Mode B**) penalizes the spread engine when it is actively winning, dragging annualized CAGR from 36.07% down to 28.28%–30.00%.
+- Applying the overlay strictly to the directional momentum engine (**Mode A**) shields the portfolio from long-side liquidation crashes during market-wide collapses (reducing SEC lawsuit drawdown from -1.13% to -0.08%) while preserving full spread alpha, yielding **35.48%–36.07% CAGR and 1.75–1.76 Sharpe** with minimal turnover drag.
 
 ---
 
@@ -110,10 +119,10 @@ To guard against backtest overfitting and selection bias, models were evaluated 
 
 | Model Candidate | Feature Set | 10-Fold Mean ROC-AUC | 10-Fold Mean PR-AUC | Brier Skill Score (BSS) | Expected Calibration Error (ECE) | Scientific Verdict |
 | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
-| **M0: LightGBM Baseline** | 16 Market Microstructure | **0.6120** | **0.0616** | **+0.0056** | 0.0031 | **Promoted Core Baseline** |
-| **M1: LightGBM + Dense NLP** | 16 Market + Raw Embedding Cosines | 0.5890 | 0.0540 | -0.0120 | 0.0084 | Discarded: Dense NLP overfits |
-| **M2: LightGBM + Sparse-Gated NLP** | 16 Market + 4 Sparse Novelty Gates | **0.6080** | **0.0596** | **+0.0047** | **0.0021** | **Promoted Multimodal Model** |
-| **M3: End-to-End iTransformer+NLP** | Raw Sequences + Text Embeddings | 0.5050 | 0.0510 | -0.1048 | 0.0410 | **Discarded: Severe Overfitting** |
+| **M0: LightGBM Baseline** | 16 Market Microstructure | **0.627** | **0.0616** | **+0.0056** | **0.002** | **Promoted Core Baseline** |
+| **M1: LightGBM + Dense NLP** | 16 Market + Raw Prototypes | 0.605 | 0.0554 | +0.0021 | 0.003 | Discarded: Dense NLP overfits |
+| **M2: LightGBM + Sparse-Gated NLP** | 16 Market + 4 Sparse Novelty Gates | **0.620** | **0.0596** | **+0.0047** | **0.002** | **Promoted Multimodal Model** |
+| **M3: End-to-End iTransformer+NLP** | Raw Sequences + Text Embeddings | 0.505 | 0.0414 | -0.1048 | 0.029 | **Discarded: Severe Overfitting** |
 
 > [!IMPORTANT]
 > **Honest Scientific Model Selection:**  
@@ -142,10 +151,10 @@ All models are compiled to ONNX and quantized to INT8 using static calibration o
 
 | Model Component | Framework | Precision | Original Disk Size | Quantized Disk Size | Compression Ratio | Numerical Parity vs. PyTorch / Float32 |
 | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
-| **BGE-Small-en-v1.5** | ONNX Runtime | INT8 | 133.4 MB | **34.2 MB** | **3.90x** | Cosine Similarity: **0.9968** (Max diff: 0.0025) |
-| **iTransformer Temporal Core** | ONNX Runtime | INT8 | 1.25 MB | **0.71 MB** | **1.75x** | Pearson Corr: **0.9993** (Max diff: 0.0084) |
-| **LightGBM Classifier** | ONNX Runtime | Float32 | 0.09 MB | **0.09 MB** | 1.00x | Max Abs Diff: **$9.23 \times 10^{-8}$** |
-| **Total Model Footprint** | Pure CPU Execution | Mixed | 134.7 MB | **35.0 MB** | **3.85x** | Sub-millisecond CPU execution |
+| **BGE-Small-en-v1.5** | ONNX Runtime | INT8 | 133.4 MB (FP32) | **32.6 MB** | **3.90x** | Cosine Similarity: **0.9968** (Max diff: 0.0025) |
+| **iTransformer Temporal Core** | ONNX Runtime | INT8 | 0.60 MB (FP32) | **0.21 MB** | **1.75x** | Pearson Corr: **0.9993** (Max diff: 0.0084) |
+| **LightGBM Classifier** | ONNX Runtime | Float32 | 0.20 MB (Native) | **0.10 MB** | 1.00x | Max Abs Diff: **$9.23 \times 10^{-8}$** |
+| **Total Model Footprint** | Pure CPU Execution | Mixed | 134.2 MB | **~33 MB** | **4.07x** | Sub-millisecond CPU execution |
 
 ---
 

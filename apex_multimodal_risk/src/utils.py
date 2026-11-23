@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-import duckdb
 import pandas as pd
 import yaml
 
@@ -59,8 +58,10 @@ def load_config(config_path: str | None = None) -> dict[str, Any]:
     return config
 
 
-def get_duckdb_connection(db_path: str | None = None) -> duckdb.DuckDBPyConnection:
+def get_duckdb_connection(db_path: str | None = None) -> Any:
     """Returns an in-memory or file-backed DuckDB connection with UTC timezone enforced."""
+    import duckdb
+
     if db_path is None:
         con = duckdb.connect(database=":memory:")
     else:
@@ -88,7 +89,7 @@ def enforce_utc_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def read_parquet_utc(
-    path: str | Path, con: duckdb.DuckDBPyConnection | None = None, order_by: str | None = None
+    path: str | Path, con: Any = None, order_by: str | None = None
 ) -> pd.DataFrame:
     """Reads Parquet via DuckDB and guarantees all datetime columns are strictly UTC."""
     p = Path(path)

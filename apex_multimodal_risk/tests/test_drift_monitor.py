@@ -12,12 +12,14 @@ import numpy as np
 import pytest
 
 from apex_multimodal_risk.src.serving.drift_monitor import CORE_DRIFT_FEATURES, DriftMonitor
-from apex_multimodal_risk.src.utils import PROJECT_ROOT
+from apex_multimodal_risk.src.utils import PACKAGE_ROOT, PROJECT_ROOT
 
 
 @pytest.fixture
 def monitor():
     baseline_path = PROJECT_ROOT / "apex_multimodal_risk/configs/drift_baseline.json"
+    if not baseline_path.exists():
+        baseline_path = PACKAGE_ROOT / "configs/drift_baseline.json"
     assert baseline_path.exists(), f"Baseline config {baseline_path} must exist."
     return DriftMonitor(baseline_path=baseline_path, window_size=500, min_eval_samples=20)
 

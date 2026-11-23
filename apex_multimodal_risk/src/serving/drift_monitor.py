@@ -73,6 +73,8 @@ class DriftMonitor:
 
         if baseline_path is None:
             baseline_path = PROJECT_ROOT / "apex_multimodal_risk/configs/drift_baseline.json"
+            if not Path(baseline_path).exists():
+                baseline_path = Path(__file__).resolve().parent.parent.parent / "configs/drift_baseline.json"
         self.baseline_path = Path(baseline_path)
 
         self.baseline_features: dict[str, dict[str, Any]] = {}

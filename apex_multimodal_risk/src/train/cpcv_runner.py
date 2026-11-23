@@ -129,8 +129,22 @@ def generate_cpcv_splits(
         train_ts = train_cand_ts[valid_train_mask]
 
         # 4. Verify absolute minimum distance
-        test_secs = pd.to_datetime(test_ts).astype("int64").to_numpy() // 10**9
-        train_secs = pd.to_datetime(train_ts).astype("int64").to_numpy() // 10**9
+        test_secs = (
+            pd.to_datetime(test_ts, utc=True)
+            .tz_convert("UTC")
+            .tz_localize(None)
+            .astype("datetime64[s]")
+            .astype("int64")
+            .to_numpy()
+        )
+        train_secs = (
+            pd.to_datetime(train_ts, utc=True)
+            .tz_convert("UTC")
+            .tz_localize(None)
+            .astype("datetime64[s]")
+            .astype("int64")
+            .to_numpy()
+        )
 
         pos = np.searchsorted(test_secs, train_secs)
         diffs = []

@@ -66,8 +66,22 @@ def test_minimum_504_hour_gap(panel_timestamps):
         ), f"Split {s.split_id} minimum gap {s.min_gap_hours} < 504.0 hours!"
 
         # Exhaustive verification of pairwise distances
-        test_secs = pd.to_datetime(s.test_timestamps).astype("int64").to_numpy() // 10**9
-        train_secs = pd.to_datetime(s.train_timestamps).astype("int64").to_numpy() // 10**9
+        test_secs = (
+            pd.to_datetime(s.test_timestamps, utc=True)
+            .tz_convert("UTC")
+            .tz_localize(None)
+            .astype("datetime64[s]")
+            .astype("int64")
+            .to_numpy()
+        )
+        train_secs = (
+            pd.to_datetime(s.train_timestamps, utc=True)
+            .tz_convert("UTC")
+            .tz_localize(None)
+            .astype("datetime64[s]")
+            .astype("int64")
+            .to_numpy()
+        )
 
         pos = np.searchsorted(test_secs, train_secs)
         for i, p in enumerate(pos):

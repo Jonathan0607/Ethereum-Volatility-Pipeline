@@ -18,6 +18,9 @@ jobs:
   lint-and-test:
     name: Lint & Lean Unit Tests (Fresh Clone)
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: "."
+      APEX_ALLOW_MOCK_MODELS: "1"
 
     steps:
       - name: Check out repository

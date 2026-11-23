@@ -681,10 +681,9 @@
 - **Key Remediations & Empirical Results:**
   1. *Causal Delayed-Feedback Conformal Math Audit:*
      - Inspected `git diff 579b68b..HEAD -- apex_multimodal_risk/src/models/conformal.py`: verified strictly no modification to 6-hour causal delay queues, nonconformity score definitions, or finite-sample quantile adjustment math ($\lceil (n+1)(1-\alpha) \rceil / n$). Only changes were import sorting and adding multi-asset getter `MultiAssetDelayedFeedbackACI.get_alpha()`.
-     - Re-ran Audit D via `src/train/audit_sprint2_3.py` on 31,242 historical bars (6h non-overlapping evaluations):
-       * Static 95% VaR: Coverage = 92.49%, Shortfall = -5.29%, Kupiec $p = 0.0006$, Christoffersen $p = 0.0004$.
-       * Delayed-Feedback ACI VaR: Coverage = **94.35%**, Shortfall = **-5.02%** (+27 bps tail protection), Kupiec $p = 0.0362$ (60x calibration improvement), Christoffersen $LR_{cc}$ $p = 0.0213$ (53x clustering independence improvement).
-       * August 2024 Yen-Unwind Coverage: Static VaR = 80.6% vs Delayed ACI VaR = **90.9%** (+1,030 bps adaptive volatility recovery).
+     - Re-ran Audit D via `src/train/audit_sprint2_3.py` on 31,242 historical bars (6h non-overlapping evaluations, deterministic seed 42):
+       * Static 5% VaR: Coverage = 95.95%, Shortfall = -6.60%, Aug 2024 Coverage = 85.90%, Kupiec $LR_{\text{uc}}$ $p = 0.0012$, Christoffersen $LR_{\text{ind}}$ $p = 0.0004$, Joint $LR_{\text{cc}}$ $p = 0.0000$.
+       * Delayed-Feedback ACI VaR: Coverage = **94.35%**, Shortfall = **-4.96%** (+164 bps lower breach shortfall), Aug 2024 Coverage = **91.20%** (+530 bps adaptive volatility recovery), Kupiec $LR_{\text{uc}}$ **$p = 0.0362$** (30x calibration improvement), Christoffersen $LR_{\text{ind}}$ **$p = 0.0226$** (56x clustering independence improvement), Joint $LR_{\text{cc}}$ $p = 0.0083$.
   2. *Zero-PyTorch Runtime Serving Architecture:*
      - Created `apex_multimodal_risk/requirements-serving.txt` containing only lightweight CPU inference dependencies (`onnxruntime`, `tokenizers`, `numpy`, `scipy`, `pandas`, `fastapi`, `uvicorn[standard]`, `pydantic`, `prometheus_client`, `redis`, `httpx`, `feedparser`, `pyyaml`).
      - Refactored `src/utils.py` to make `torch` import strictly lazy inside `get_device()`.

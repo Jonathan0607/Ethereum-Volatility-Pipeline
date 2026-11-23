@@ -338,6 +338,8 @@ def run_audit_d() -> dict[str, Any]:
     s_vec = np.array(scaler.stds_, dtype=np.float32).reshape(1, 1, -1)
 
     device = get_device()
+    torch.manual_seed(42)
+    np.random.seed(42)
     m3_oos = iTransformerOnlyModel(
         lookback_len=48,
         num_variates=len(MARKET_NUMERICAL_COLS),

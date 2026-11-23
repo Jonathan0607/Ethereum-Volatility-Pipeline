@@ -15,10 +15,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pyarrow.parquet as pq
 import pytest
 
 from apex_multimodal_risk.src.utils import PROJECT_ROOT, load_config, read_parquet_utc
+
+try:
+    import pyarrow.parquet as pq
+except ImportError:
+    pq = None
 
 pytestmark = pytest.mark.requires_local_artifacts
 
