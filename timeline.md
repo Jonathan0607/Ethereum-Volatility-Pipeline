@@ -46,7 +46,7 @@
 ## 🧪 Experiment Registry
 
 ### EXP-001: Sprint 1 — News Ingestion, 4-Stage Noise Funnel & Causal Alignment
-- **Date & Branch/Commit:** 2026-11-22 | `feat/multimodal-risk-mle`
+- **Date & Branch/Commit:** 2026-11-22 | `feat/multimodal-risk-mle` @ `0b64b5d`
 - **Hypothesis / Objective:** Validate that raw crypto sentiment news (`ExponentialScience/DLT-Sentiment-News`) can be ingested without future lookahead, filtered through a strict 4-stage noise rejection funnel (domain allowlist, clickbait regex, rolling 6h semantic deduplication with `bge-small-en-v1.5`), and aligned to 36k+ hourly market bars (SOL, AVAX, LINK) with zero causal leakage.
 - **Implementation Summary:** Built decoupled `apex_multimodal_risk/` pipeline with DuckDB + Parquet storage and Apple Silicon MPS hardware acceleration. Implemented `ingest_news.py` (with simulated 120s causal ingestion delay), `noise_filter.py` (Tier 1/Tier 2 domain allowlist, clickbait stripper, rolling 6h cosine similarity > 0.85 semantic dedup, entity linking for SOL/AVAX/LINK/MACRO, and weak-supervision risk categorization), and `align_targets.py` (rolling 24h news mapping, 7-day trailing news centroid, cosine novelty score, 6h forward drawdown, and volatility-gated tail crash binary indicator). Automated verification suite in `test_no_leakage.py`.
 - **Metrics & Audit Results:**
