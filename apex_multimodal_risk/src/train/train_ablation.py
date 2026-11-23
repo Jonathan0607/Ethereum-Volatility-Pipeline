@@ -1,21 +1,17 @@
 """
 End-to-End CPCV Training, Probability Calibration, MLflow Tracking, and Downstream APEX Overlay.
-Executes Marcos Lopez de Prado's Combinatorial Purged Cross-Validation (CPCV) across 4 models:
-  1. GARCH_Skew: Econometric Logistic Regression baseline
-  2. LightGBM: Tabular Market + Causal Aggregated News baseline
-  3. iTransformer_Only: 2-layer Inverted Transformer over 48h lookback
-  4. Multimodal_iTransformer_NLP: iTransformer (Q) + Cross-Attention over M=16 causal news clusters (K, V)
-Calibrates probabilities via Temperature Scaling on inner validation slices.
-Evaluates OOS test metrics: PR-AUC, ROC-AUC, Brier score, ECE, 5% Pinball Loss, VaR violation rate.
-Logs runs to MLflow and checkpoints best models to artifacts/.
-Runs read-only downstream APEX v45 overlay simulation and prints the 4-Way Ablation Table.
-
-Optimizations & Guardrails (Unified 8 GB RAM):
-- Lazy News Lookup: builds compact static news matrix (28.3 MB) and causal index arrays (~11 MB)
-  instead of materializing dense ~2 GB 3D news tensors in RAM.
-- Vectorized lookback windowing + on-the-fly PyTorch scaling.
-- Batch size 128, epochs 3, num_workers=0.
-- Explicit garbage collection and MPS empty_cache after each model and split.
+Executes Marcos Lopez de Prado's Combinatorial Purged Cross-Validation (CPCV) across:
+  - Constant_Prior (Reference Baseline)
+  - Model 1: GARCH_Skew (Econometric Logistic Regression)
+  - Model 2: LightGBM (Tabular Market + Aggregated Causal News)
+  - Model 3: iTransformer_Only (2-layer Inverted Transformer over 48h market lookback)
+  - Model 4: Multimodal_iTransformer_NLP (Regularized Cross-Attention with Materiality Masking,
+             Low-Rank Bottleneck d=64, and Zero-Initialized Flamingo/ReZero Gated Residual)
+Probability Calibration:
+  - 2-Parameter Platt Scaling (sigmoid(a * logit + b)) fitted strictly on inner validation slices via L-BFGS.
+Downstream Risk Overlay:
+  - Thresholded Tail-Risk Circuit Breaker eliminating calm-day drag while hedging tail crashes.
+MLflow tracking across all 10 splits, checkpointing best calibrated model to artifacts/.
 """
 
 import os
@@ -49,7 +45,8 @@ from apex_multimodal_risk.src.features.shared_features import (
 )
 from apex_multimodal_risk.src.train.cpcv_runner import generate_cpcv_splits, CPCVSplit
 from apex_multimodal_risk.src.train.calibration import (
-    TemperatureScaler,
+    PlattScaler,
+    compute_constant_prior_metrics,
     compute_all_metrics,
 )
 from apex_multimodal_risk.src.models.baselines import (
@@ -138,10 +135,12 @@ def build_lazy_news_index(
     panel_df: pd.DataFrame,
     news_df: pd.DataFrame,
     max_clusters: int = 16,
+    fold_risk_probs: Optional[np.ndarray] = None,
 ) -> Tuple[torch.Tensor, np.ndarray, np.ndarray, np.ndarray]:
     """
     Constructs compact static news matrix (N_news, 392) and index arrays for causal lookup (T-24h, T]:
     - full_news_matrix: torch.FloatTensor of shape (N_news, 392) on CPU (~28.3 MB)
+      dim 384 is strictly p(non_event_noise) from MiniLM
     - cluster_indices: (N_bars, max_clusters) int32 (~4.8 MB)
     - cluster_recency: (N_bars, max_clusters) float32 (~4.8 MB)
     - cluster_pad_mask: (N_bars, max_clusters) bool (~1.2 MB)
@@ -160,15 +159,19 @@ def build_lazy_news_index(
 
     # 1. Static news feature matrix (392 dims: 384 BGE + 6 risk + 2 metadata)
     bge_embs = np.array(news_df["embedding"].tolist(), dtype=np.float32)  # (N_news, 384)
-    risk_cols = [
-        "risk_exploit", "risk_outage", "risk_regulatory",
-        "risk_insolvency", "risk_macro_shock"
-    ]
-    risk_arr = np.zeros((n_news, 6), dtype=np.float32)
-    for i, col in enumerate(risk_cols):
-        if col in news_df.columns:
-            risk_arr[:, i + 1] = news_df[col].to_numpy(dtype=np.float32)
-    risk_arr[:, 0] = 1.0 - np.clip(np.sum(risk_arr[:, 1:], axis=1), 0.0, 1.0)
+
+    if fold_risk_probs is not None:
+        risk_arr = fold_risk_probs.astype(np.float32)  # (N_news, 6), col 0 is p_non_event_noise
+    else:
+        risk_cols = [
+            "risk_exploit", "risk_outage", "risk_regulatory",
+            "risk_insolvency", "risk_macro_shock"
+        ]
+        risk_arr = np.zeros((n_news, 6), dtype=np.float32)
+        for i, col in enumerate(risk_cols):
+            if col in news_df.columns:
+                risk_arr[:, i + 1] = news_df[col].to_numpy(dtype=np.float32)
+        risk_arr[:, 0] = 1.0 - np.clip(np.sum(risk_arr[:, 1:], axis=1), 0.0, 1.0)
 
     tier_num = (news_df["source_tier"] == "tier_1").astype(np.float32).to_numpy()
     conf_num = np.log1p(news_df["confirmation_count"].to_numpy(dtype=np.float32))
@@ -259,15 +262,18 @@ def eval_multimodal_batched(
     return np.concatenate(logits), np.concatenate(probs), np.concatenate(var_preds)
 
 
-def run_downstream_apex_overlay(
+def run_downstream_thresholded_overlay(
     eval_df: pd.DataFrame,
     test_probs: np.ndarray,
     test_timestamps: pd.DatetimeIndex,
-    k_mult: float = 1.5,
+    tau: float = 0.08,
+    gamma: float = 4.0,
+    floor: float = 0.25,
 ) -> Dict[str, float]:
     """
-    Executes read-only downstream risk overlay simulation on APEX v45 champion returns.
-    Dampener: scale = clip(1.0 - k_mult * p_crash, 0.25, 1.0) applied to directional leg.
+    Executes surgical thresholded circuit-breaker risk overlay on APEX v45 champion returns.
+    - Calm days (p <= tau): scale = 1.0 (zero drag on calm days)
+    - Shock days (p > tau): scale = clip(1.0 - gamma * (p - tau), floor, 1.0)
     """
     sys.path.insert(0, str(PROJECT_ROOT / "research"))
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -303,12 +309,15 @@ def run_downstream_apex_overlay(
     prob_series = pd.Series(test_probs, index=test_timestamps).groupby(level=0).mean()
     prob_aligned = prob_series.reindex(eval_index).fillna(0.0412).values
 
-    # Continuous risk dampener
-    scale = np.clip(1.0 - k_mult * prob_aligned, 0.25, 1.0)
+    # Surgical Thresholded Tail-Risk Circuit Breaker
+    scale = np.where(
+        prob_aligned <= tau,
+        1.0,
+        np.clip(1.0 - gamma * (prob_aligned - tau), floor, 1.0),
+    )
     dampened_dir = dir_filtered * scale
     dampened_stream = W_DIR * dampened_dir + W_SPREAD * spread_filtered + W_ARB * arb_stream
 
-    # Evaluate over overlap period
     overlap_mask = eval_index.isin(test_timestamps)
     if np.sum(overlap_mask) == 0:
         overlap_mask = np.ones(len(eval_index), dtype=bool)
@@ -326,15 +335,18 @@ def run_downstream_apex_overlay(
         "sharpe_delta": float(m_dampened["sharpe"] - m_unhedged["sharpe"]),
         "dd_delta": float(m_dampened["dd"] - m_unhedged["dd"]),
         "calmar_delta": float(m_dampened["calmar"] - m_unhedged["calmar"]),
+        "mean_scale": float(np.mean(scale[overlap_mask])),
+        "fraction_at_unity": float(np.mean(scale[overlap_mask] == 1.0)),
+        "tau": float(tau),
     }
 
 
 def execute_sprint2_ablation() -> Dict[str, Any]:
     """
-    Executes full 4-Way CPCV Ablation Study with strict leak-free splits.
+    Executes full 4-Way CPCV Ablation Study with Platt Scaling and Materiality-Regularized Cross-Attention.
     """
     logger.info("=" * 80)
-    logger.info("STARTING SPRINT 2: 4-WAY CPCV MULTIMODAL ABLATION STUDY")
+    logger.info("STARTING SPRINT 2.5: 4-WAY CPCV MULTIMODAL ABLATION (EXP-002b)")
     logger.info("=" * 80)
 
     device = get_device()
@@ -346,7 +358,7 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
     mlflow_dir = (PROJECT_ROOT / "apex_multimodal_risk" / "mlruns").resolve()
     os.makedirs(mlflow_dir, exist_ok=True)
     mlflow.set_tracking_uri(f"file://{mlflow_dir}")
-    mlflow.set_experiment("multimodal_tail_risk_cpcv")
+    mlflow.set_experiment("multimodal_tail_risk_cpcv_platt")
 
     # 1. Load merged panel and news
     merged_panel = load_and_merge_features_and_targets()
@@ -368,32 +380,42 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
     )
     logger.info(f"Generated {len(splits)} CPCV splits.")
 
-    # 3. MiniLM Classifier Caching across CPCV splits
-    logger.info("Running/loading MiniLM-L12-H384-uncased risk classifier across CPCV splits...")
+    # 3. MiniLM Classifier Caching across CPCV splits (Fast Load from Cache)
+    cache_dir = str(PROJECT_ROOT / "apex_multimodal_risk/data/processed/text_encoder_cpcv_cache")
+    logger.info(f"Reusing cached MiniLM fold predictions from '{cache_dir}'...")
     text_metrics = train_and_cache_cpcv_splits(
         news_parquet_path="apex_multimodal_risk/data/processed/news_dedup.parquet",
         cpcv_splits=splits,
-        cache_dir="apex_multimodal_risk/data/processed/text_encoder_cpcv_cache",
+        cache_dir=cache_dir,
         epochs=3,
         batch_size=32,
-        lr_head=5e-4,
-        lr_backbone=3e-5,
     )
-    logger.info(f"MiniLM Mean Macro F1 across splits: {text_metrics['mean_macro_f1']:.3f}")
+    logger.info(f"MiniLM Mean Macro F1 loaded across splits: {text_metrics['mean_macro_f1']:.3f}")
 
-    # 4. Precompute compact index and static news matrix (Lazy News Lookup)
+    # 4. Precompute lookback tensors for iTransformer
     logger.info("Building lookback tensors for iTransformer...")
     lookback_tensor = build_lookback_tensor(eval_panel, MARKET_NUMERICAL_COLS, lookback_len=48)
     logger.info(f"Lookback tensor shape: {lookback_tensor.shape} ({lookback_tensor.nbytes / (1024*1024):.1f} MB)")
 
-    logger.info("Building lazy news lookup index and static matrix for Multimodal Cross-Attention...")
-    full_news_matrix, cluster_indices, cluster_recency, cluster_pad_mask = build_lazy_news_index(
+    # Precompute causal news indices once (BGE + timestamps)
+    logger.info("Building lazy news lookup index structure...")
+    _, cluster_indices, cluster_recency, cluster_pad_mask = build_lazy_news_index(
         eval_panel, news_df, max_clusters=16
     )
-    logger.info(
-        f"Static news matrix shape: {full_news_matrix.shape} ({full_news_matrix.element_size() * full_news_matrix.nelement() / (1024*1024):.1f} MB), "
-        f"cluster_indices: {cluster_indices.shape} ({cluster_indices.nbytes / (1024*1024):.1f} MB)"
-    )
+
+    bge_embs = np.array(news_df["embedding"].tolist(), dtype=np.float32)  # (N_news, 384)
+    tier_num = (news_df["source_tier"] == "tier_1").astype(np.float32).to_numpy()
+    conf_num = np.log1p(news_df["confirmation_count"].to_numpy(dtype=np.float32))
+    meta_arr = np.stack([tier_num, conf_num], axis=1)  # (N_news, 2)
+
+    prob_cols = [
+        "p_non_event_noise",
+        "p_regulatory_action",
+        "p_protocol_exploit",
+        "p_macro_shock",
+        "p_network_outage",
+        "p_exchange_insolvency",
+    ]
 
     # Targets
     y_clf_all = eval_panel["tail_crash_6h"].to_numpy(dtype=np.float32)
@@ -402,6 +424,7 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
 
     # Results container
     model_names = [
+        "Constant_Prior",
         "GARCH_Skew",
         "LightGBM",
         "iTransformer_Only",
@@ -411,6 +434,7 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
     best_multimodal_checkpoint = None
     best_multimodal_pr_auc = -1.0
     all_oos_test_probs: Dict[str, List[np.ndarray]] = {m: [] for m in model_names}
+    all_train_cal_probs: Dict[str, List[np.ndarray]] = {m: [] for m in model_names}
     all_oos_test_ts: List[pd.Series] = []
 
     for split in splits:
@@ -445,7 +469,15 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
         all_oos_test_ts.append(panel_timestamps[test_mask])
 
         # ====================================================================
-        # Model 1: GARCH_Skew (Logistic Regression)
+        # Reference Baseline: Constant_Prior (p = in-sample base rate)
+        # ====================================================================
+        in_sample_rate = float(np.mean(y_tr))
+        res_const = compute_constant_prior_metrics(y_te, prior=in_sample_rate, y_var_true=v_te)
+        all_split_results["Constant_Prior"].append(res_const)
+        all_oos_test_probs["Constant_Prior"].append(np.full_like(y_te, fill_value=in_sample_rate))
+
+        # ====================================================================
+        # Model 1: GARCH_Skew (Logistic Regression) + Platt Scaling
         # ====================================================================
         m1 = GARCHSkewBaseline(C=1.0)
         X_m1_tr = X_tab_train[GARCH_SKEW_FEATURES].to_numpy()
@@ -453,35 +485,51 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
         X_m1_te = X_tab_test[GARCH_SKEW_FEATURES].to_numpy()
 
         m1.fit(X_m1_tr, y_tr)
+        tr_logits_m1 = m1.predict_logits(X_m1_tr)
         val_logits_m1 = m1.predict_logits(X_m1_val)
         te_logits_m1 = m1.predict_logits(X_m1_te)
         te_probs_m1_raw = m1.predict_proba(X_m1_te)
 
-        cal_m1 = TemperatureScaler().fit(val_logits_m1, y_val)
+        cal_m1 = PlattScaler().fit(val_logits_m1, y_val)
         te_probs_m1_cal = cal_m1.transform(te_logits_m1)
+        tr_probs_m1_cal = cal_m1.transform(tr_logits_m1)
+
         res_m1 = compute_all_metrics(y_te, te_logits_m1, te_probs_m1_raw, te_probs_m1_cal)
         all_split_results["GARCH_Skew"].append(res_m1)
         all_oos_test_probs["GARCH_Skew"].append(te_probs_m1_cal)
-        logger.info(f"Split {split_id} | GARCH_Skew: PR-AUC={res_m1['pr_auc']:.3f}, ECE={res_m1['ece_calibrated']:.3f}")
+        all_train_cal_probs["GARCH_Skew"].append(tr_probs_m1_cal)
+        logger.info(
+            f"Split {split_id} | GARCH_Skew: PR-AUC={res_m1['pr_auc']:.3f}, "
+            f"Brier(Raw->Cal)={res_m1['brier_raw']:.4f}->{res_m1['brier_calibrated']:.4f}, "
+            f"ECE={res_m1['ece_calibrated']:.3f}"
+        )
 
         del m1
         gc.collect()
 
         # ====================================================================
-        # Model 2: LightGBM
+        # Model 2: LightGBM + Platt Scaling
         # ====================================================================
         m2 = LightGBMBaseline(n_estimators=100, learning_rate=0.03, max_depth=4)
         m2.fit(X_tab_train.to_numpy(), y_tr, eval_set=[(X_tab_val.to_numpy(), y_val)])
+        tr_logits_m2 = m2.predict_logits(X_tab_train.to_numpy())
         val_logits_m2 = m2.predict_logits(X_tab_val.to_numpy())
         te_logits_m2 = m2.predict_logits(X_tab_test.to_numpy())
         te_probs_m2_raw = m2.predict_proba(X_tab_test.to_numpy())
 
-        cal_m2 = TemperatureScaler().fit(val_logits_m2, y_val)
+        cal_m2 = PlattScaler().fit(val_logits_m2, y_val)
         te_probs_m2_cal = cal_m2.transform(te_logits_m2)
+        tr_probs_m2_cal = cal_m2.transform(tr_logits_m2)
+
         res_m2 = compute_all_metrics(y_te, te_logits_m2, te_probs_m2_raw, te_probs_m2_cal)
         all_split_results["LightGBM"].append(res_m2)
         all_oos_test_probs["LightGBM"].append(te_probs_m2_cal)
-        logger.info(f"Split {split_id} | LightGBM: PR-AUC={res_m2['pr_auc']:.3f}, ECE={res_m2['ece_calibrated']:.3f}")
+        all_train_cal_probs["LightGBM"].append(tr_probs_m2_cal)
+        logger.info(
+            f"Split {split_id} | LightGBM: PR-AUC={res_m2['pr_auc']:.3f}, "
+            f"Brier(Raw->Cal)={res_m2['brier_raw']:.4f}->{res_m2['brier_calibrated']:.4f}, "
+            f"ECE={res_m2['ece_calibrated']:.3f}"
+        )
 
         del m2
         gc.collect()
@@ -503,7 +551,7 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
         t_v_te = torch.tensor(v_te, dtype=torch.float32)
 
         # ====================================================================
-        # Model 3: iTransformer_Only
+        # Model 3: iTransformer_Only + Platt Scaling
         # ====================================================================
         m3 = iTransformerOnlyModel(
             lookback_len=48,
@@ -529,18 +577,22 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
                 loss_m3.backward()
                 opt_m3.step()
 
+        tr_logits_m3, _, _ = eval_itransformer_batched(m3, t_lb_tr, device, batch_size=128)
         val_logits_m3, _, _ = eval_itransformer_batched(m3, t_lb_val, device, batch_size=128)
         te_logits_m3, te_probs_m3_raw, te_var_m3 = eval_itransformer_batched(m3, t_lb_te, device, batch_size=128)
 
-        cal_m3 = TemperatureScaler().fit(val_logits_m3, y_val)
+        cal_m3 = PlattScaler().fit(val_logits_m3, y_val)
         te_probs_m3_cal = cal_m3.transform(te_logits_m3)
+        tr_probs_m3_cal = cal_m3.transform(tr_logits_m3)
+
         res_m3 = compute_all_metrics(y_te, te_logits_m3, te_probs_m3_raw, te_probs_m3_cal, v_te, te_var_m3)
         all_split_results["iTransformer_Only"].append(res_m3)
         all_oos_test_probs["iTransformer_Only"].append(te_probs_m3_cal)
+        all_train_cal_probs["iTransformer_Only"].append(tr_probs_m3_cal)
         logger.info(
             f"Split {split_id} | iTransformer: PR-AUC={res_m3['pr_auc']:.3f}, "
-            f"ECE={res_m3['ece_calibrated']:.3f}, Pinball={res_m3['pinball_loss_5pct']:.4f}, "
-            f"VaR viol={res_m3['var_violation_rate']*100:.1f}%"
+            f"Brier(Raw->Cal)={res_m3['brier_raw']:.4f}->{res_m3['brier_calibrated']:.4f}, "
+            f"ECE={res_m3['ece_calibrated']:.3f}, VaR viol={res_m3['var_violation_rate']*100:.1f}%"
         )
 
         del m3, opt_m3, loader_m3, ds_m3
@@ -549,8 +601,17 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
             torch.mps.empty_cache()
 
         # ====================================================================
-        # Model 4: Multimodal_iTransformer_NLP (Lazy News Lookup)
+        # Model 4: Multimodal_iTransformer_NLP (Regularized Cross-Attention)
         # ====================================================================
+        # Load fold-specific MiniLM probabilities for materiality masking and embedding
+        cached_split_file = os.path.join(cache_dir, f"split_{split_id}.parquet")
+        cached_df = pd.read_parquet(cached_split_file, columns=prob_cols)
+        fold_probs = cached_df[prob_cols].to_numpy(dtype=np.float32)
+
+        # Assemble fold full_news_matrix with exact MiniLM p(non_event_noise) at dim 384
+        full_news_feats = np.concatenate([bge_embs, fold_probs, meta_arr], axis=1)  # (N_news, 392)
+        full_news_matrix = torch.from_numpy(full_news_feats).float()
+
         t_idx_tr = torch.tensor(cluster_indices[train_mask], dtype=torch.int32)
         t_idx_val = torch.tensor(cluster_indices[val_mask], dtype=torch.int32)
         t_idx_te = torch.tensor(cluster_indices[test_mask], dtype=torch.int32)
@@ -573,9 +634,11 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
             num_itransformer_layers=2,
             dim_feedforward=128,
             dropout=0.1,
+            news_dropout=0.35,
+            noise_threshold=0.80,
         ).to(device)
 
-        opt_m4 = torch.optim.AdamW(m4.parameters(), lr=1e-3, weight_decay=1e-4)
+        opt_m4 = torch.optim.AdamW(m4.parameters(), lr=1e-3, weight_decay=1e-3)
         ds_m4 = TensorDataset(t_lb_tr, t_idx_tr, t_rec_tr, t_mask_tr, t_y_tr, t_v_tr)
         loader_m4 = DataLoader(ds_m4, batch_size=128, shuffle=True, num_workers=0)
 
@@ -597,6 +660,9 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
                 loss_m4.backward()
                 opt_m4.step()
 
+        tr_logits_m4, _, _ = eval_multimodal_batched(
+            m4, t_lb_tr, t_idx_tr, t_rec_tr, t_mask_tr, full_news_matrix, device, batch_size=128
+        )
         val_logits_m4, _, _ = eval_multimodal_batched(
             m4, t_lb_val, t_idx_val, t_rec_val, t_mask_val, full_news_matrix, device, batch_size=128
         )
@@ -604,14 +670,21 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
             m4, t_lb_te, t_idx_te, t_rec_te, t_mask_te, full_news_matrix, device, batch_size=128
         )
 
-        cal_m4 = TemperatureScaler().fit(val_logits_m4, y_val)
+        cal_m4 = PlattScaler().fit(val_logits_m4, y_val)
         te_probs_m4_cal = cal_m4.transform(te_logits_m4)
+        tr_probs_m4_cal = cal_m4.transform(tr_logits_m4)
+
         res_m4 = compute_all_metrics(y_te, te_logits_m4, te_probs_m4_raw, te_probs_m4_cal, v_te, te_var_m4)
         all_split_results["Multimodal_iTransformer_NLP"].append(res_m4)
         all_oos_test_probs["Multimodal_iTransformer_NLP"].append(te_probs_m4_cal)
+        all_train_cal_probs["Multimodal_iTransformer_NLP"].append(tr_probs_m4_cal)
+
+        final_alpha = float(m4.alpha.item())
+        final_gate = float(torch.tanh(m4.alpha).item())
         logger.info(
-            f"Split {split_id} | Multimodal_iTransformer_NLP: PR-AUC={res_m4['pr_auc']:.3f}, "
-            f"ECE={res_m4['ece_calibrated']:.3f}, Pinball={res_m4['pinball_loss_5pct']:.4f}, "
+            f"Split {split_id} | Multimodal: PR-AUC={res_m4['pr_auc']:.3f}, "
+            f"Brier(Raw->Cal)={res_m4['brier_raw']:.4f}->{res_m4['brier_calibrated']:.4f}, "
+            f"ECE={res_m4['ece_calibrated']:.3f}, Alpha={final_alpha:.4f} (Gate={final_gate:.4f}), "
             f"VaR viol={res_m4['var_violation_rate']*100:.1f}%"
         )
 
@@ -621,13 +694,15 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
             best_multimodal_checkpoint = {
                 "split_id": split_id,
                 "model_state_dict": m4.state_dict(),
-                "temperature": cal_m4.temperature,
+                "platt_a": cal_m4.a,
+                "platt_b": cal_m4.b,
                 "pr_auc": res_m4["pr_auc"],
             }
 
         # Log split to MLflow
         with mlflow.start_run(run_name=f"cpcv_split_{split_id}"):
             mlflow.log_param("split_id", split_id)
+            mlflow.log_metric("multimodal_gate", final_gate)
             for m_name in model_names:
                 m_res = all_split_results[m_name][-1]
                 for k, v in m_res.items():
@@ -641,14 +716,15 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
         del t_mask_tr, t_mask_val, t_mask_te
         del t_y_tr, t_y_val, t_y_te, t_v_tr, t_v_val, t_v_te
         del X_tab_train, X_tab_val, X_tab_test
+        del full_news_matrix
         gc.collect()
         if device.type == "mps":
             torch.mps.empty_cache()
 
         peak_rss = get_peak_rss_mb()
-        logger.info(f"Split {split_id} completed. Peak RSS memory: {peak_rss:.1f} MB (Budget: < 3,000 MB)")
+        logger.info(f"Split {split_id} completed. Peak RSS memory: {peak_rss:.1f} MB (Budget: < 1,500 MB)")
 
-    # 5. Save best checkpoint and weights to artifacts/
+    # 5. Save best checkpoint to artifacts/
     artifacts_dir = PROJECT_ROOT / "apex_multimodal_risk" / "artifacts"
     os.makedirs(artifacts_dir, exist_ok=True)
     checkpoint_path = artifacts_dir / "best_multimodal_fusion.pt"
@@ -656,24 +732,50 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
         torch.save(best_multimodal_checkpoint, checkpoint_path)
         logger.info(f"Saved best multimodal checkpoint (Split {best_multimodal_checkpoint['split_id']}, PR-AUC={best_multimodal_checkpoint['pr_auc']:.3f}) to '{checkpoint_path}'")
 
-    # 6. Run downstream APEX overlay simulation
+    # 6. Run Downstream APEX Thresholded Circuit Breaker Overlay
     logger.info("\n" + "=" * 80)
-    logger.info("RUNNING DOWNSTREAM APEX V45 RISK DAMPENING SIMULATION")
+    logger.info("RUNNING SURGICAL DOWNSTREAM APEX V45 CIRCUIT BREAKER OVERLAY")
     logger.info("=" * 80)
 
-    # Concatenate all OOS test predictions
     flat_test_ts = pd.concat(all_oos_test_ts).reset_index(drop=True)
+    flat_test_probs_lgbm = np.concatenate(all_oos_test_probs["LightGBM"])
     flat_test_probs_m4 = np.concatenate(all_oos_test_probs["Multimodal_iTransformer_NLP"])
 
-    overlay_results = run_downstream_apex_overlay(
+    # Determine tau from train-fold calibrated probability distribution (90th percentile)
+    flat_tr_probs_lgbm = np.concatenate(all_train_cal_probs["LightGBM"])
+    flat_tr_probs_m4 = np.concatenate(all_train_cal_probs["Multimodal_iTransformer_NLP"])
+    tau_lgbm = float(np.percentile(flat_tr_probs_lgbm, 90.0))
+    tau_m4 = float(np.percentile(flat_tr_probs_m4, 90.0))
+
+    overlay_lgbm = run_downstream_thresholded_overlay(
+        eval_df=eval_panel,
+        test_probs=flat_test_probs_lgbm,
+        test_timestamps=flat_test_ts,
+        tau=tau_lgbm,
+        gamma=4.0,
+        floor=0.25,
+    )
+
+    overlay_m4 = run_downstream_thresholded_overlay(
         eval_df=eval_panel,
         test_probs=flat_test_probs_m4,
         test_timestamps=flat_test_ts,
-        k_mult=1.5,
+        tau=tau_m4,
+        gamma=4.0,
+        floor=0.25,
     )
-    logger.info(f"Unhedged APEX v45: Sharpe={overlay_results['unhedged_sharpe']:.2f}, Max DD={overlay_results['unhedged_dd']:.1f}%, Calmar={overlay_results['unhedged_calmar']:.2f}")
-    logger.info(f"Dampened APEX v45: Sharpe={overlay_results['dampened_sharpe']:.2f}, Max DD={overlay_results['dampened_dd']:.1f}%, Calmar={overlay_results['dampened_calmar']:.2f}")
-    logger.info(f"Delta: Sharpe={overlay_results['sharpe_delta']:+.2f}, Max DD={overlay_results['dd_delta']:+.1f}%, Calmar={overlay_results['calmar_delta']:+.2f}")
+
+    logger.info(f"Unhedged Baseline: Sharpe={overlay_lgbm['unhedged_sharpe']:.2f}, Max DD={overlay_lgbm['unhedged_dd']:.1f}%, Calmar={overlay_lgbm['unhedged_calmar']:.2f}")
+    logger.info(
+        f"LightGBM Circuit Breaker (tau={tau_lgbm:.3f}): Sharpe={overlay_lgbm['dampened_sharpe']:.2f} ({overlay_lgbm['sharpe_delta']:+.2f}), "
+        f"Max DD={overlay_lgbm['dampened_dd']:.1f}% ({overlay_lgbm['dd_delta']:+.1f}%), Calmar={overlay_lgbm['dampened_calmar']:.2f} ({overlay_lgbm['calmar_delta']:+.2f}), "
+        f"Unity Hours={overlay_lgbm['fraction_at_unity']*100:.1f}%"
+    )
+    logger.info(
+        f"Multimodal Circuit Breaker (tau={tau_m4:.3f}): Sharpe={overlay_m4['dampened_sharpe']:.2f} ({overlay_m4['sharpe_delta']:+.2f}), "
+        f"Max DD={overlay_m4['dampened_dd']:.1f}% ({overlay_m4['dd_delta']:+.1f}%), Calmar={overlay_m4['dampened_calmar']:.2f} ({overlay_m4['calmar_delta']:+.2f}), "
+        f"Unity Hours={overlay_m4['fraction_at_unity']*100:.1f}%"
+    )
 
     # 7. Compute aggregate mean +- std table
     ablation_summary = {}
@@ -684,8 +786,9 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
             "pr_auc_std": float(df_m["pr_auc"].std()),
             "roc_auc_mean": float(df_m["roc_auc"].mean()),
             "roc_auc_std": float(df_m["roc_auc"].std()),
-            "brier_mean": float(df_m["brier_calibrated"].mean()),
-            "brier_std": float(df_m["brier_calibrated"].std()),
+            "brier_raw_mean": float(df_m["brier_raw"].mean()),
+            "brier_cal_mean": float(df_m["brier_calibrated"].mean()),
+            "brier_cal_std": float(df_m["brier_calibrated"].std()),
             "ece_raw_mean": float(df_m["ece_raw"].mean()),
             "ece_cal_mean": float(df_m["ece_calibrated"].mean()),
             "pinball_mean": float(df_m["pinball_loss_5pct"].mean()),
@@ -695,22 +798,23 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
     return {
         "ablation_summary": ablation_summary,
         "text_metrics": text_metrics,
-        "overlay_results": overlay_results,
+        "overlay_lgbm": overlay_lgbm,
+        "overlay_m4": overlay_m4,
     }
 
 
 if __name__ == "__main__":
     results = execute_sprint2_ablation()
-    print("\n" + "=" * 110)
-    print("4-WAY CPCV ABLATION STUDY RESULTS (10 Combinatorial Splits, N=5, k=2, 504h Purge + 504h Embargo)")
-    print("=" * 110)
-    print(f"{'Model Architecture':30s} | {'PR-AUC (Primary)':18s} | {'ROC-AUC':15s} | {'Brier Score':15s} | {'ECE (Raw->Cal)':16s} | {'5% VaR Viol':12s}")
-    print("-" * 110)
+    print("\n" + "=" * 120)
+    print("4-WAY CPCV ABLATION STUDY RESULTS WITH PLATT SCALING (10 Splits, N=5, k=2, 504h Purge + 504h Embargo)")
+    print("=" * 120)
+    print(f"{'Model Architecture':30s} | {'PR-AUC (Primary)':18s} | {'ROC-AUC':15s} | {'Brier (Raw -> Cal)':22s} | {'ECE (Raw -> Cal)':18s} | {'5% VaR Viol':12s}")
+    print("-" * 120)
     for m_name, stats in results["ablation_summary"].items():
         pr_str = f"{stats['pr_auc_mean']:.4f} ± {stats['pr_auc_std']:.4f}"
         roc_str = f"{stats['roc_auc_mean']:.3f} ± {stats['roc_auc_std']:.3f}"
-        brier_str = f"{stats['brier_mean']:.4f} ± {stats['brier_std']:.4f}"
+        brier_str = f"{stats['brier_raw_mean']:.4f} -> {stats['brier_cal_mean']:.4f}"
         ece_str = f"{stats['ece_raw_mean']:.3f} -> {stats['ece_cal_mean']:.3f}"
         var_str = f"{stats['var_viol_mean']*100:.1f}%" if not np.isnan(stats["var_viol_mean"]) else "N/A"
-        print(f"{m_name:30s} | {pr_str:18s} | {roc_str:15s} | {brier_str:15s} | {ece_str:16s} | {var_str:12s}")
-    print("=" * 110)
+        print(f"{m_name:30s} | {pr_str:18s} | {roc_str:15s} | {brier_str:22s} | {ece_str:18s} | {var_str:12s}")
+    print("=" * 120)
