@@ -177,6 +177,9 @@ def apply_stage3_semantic_dedup(
     
     # Primary deduplicated stories for inference feed
     dedup_df = df[~df["is_duplicate"]].copy().reset_index(drop=True)
+    # Strictly causal: as-of primary story ingestion time, base confirmation count is 1
+    # Prevents retrospective mutation when duplicate stories arrive up to 6 hours later
+    dedup_df["confirmation_count"] = 1
     duplicates_dropped = int(is_duplicate.sum())
     
     logger.info(
