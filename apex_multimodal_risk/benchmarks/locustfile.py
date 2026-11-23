@@ -1,34 +1,72 @@
 """
-Headless Locust Load Benchmark for APEX Multimodal Risk Microservice.
+Headless Locust Load Benchmark for APEX Multimodal Risk Microservice (EXP-003e).
 Supports TWO profiles:
 - Profile 1 (Cold / Worst-Case Unique Headlines): 100% unique synthetic headlines, testing raw throughput without cache hits.
-- Profile 2 (Realistic Production Shared-Macro Load): 70% market-only, 25% breaking shared headlines (high cache hits), 5% feedback.
+- Profile 2 (Realistic Production Shared-Macro Load): 70% market-only, 25% headlines sampled from a 250-headline realistic pool
+  (mixing shared broadcast macro breaking news + asset-specific micro news), 5% causal delayed-feedback.
 """
 
 import os
 import uuid
 import random
+from typing import List
 import numpy as np
 from locust import HttpUser, task, between
 
 ASSETS = ["SOLUSDT", "ETHUSDT", "BTCUSDT", "AVAXUSDT", "LINKUSDT"]
 
-SHARED_CRISIS_HEADLINES = [
-    "Major exchange halts crypto withdrawals citing severe liquidity deficit",
-    "Smart contract exploit drains 75M from leading DeFi lending protocol",
-    "SEC announces immediate enforcement action and subpoena for crypto market makers",
-    "Validators report sudden consensus stalling causing mainnet transaction halt",
-    "Federal Reserve raises rates unexpectedly causing global risk-off selloff",
-    "Whale wallet dumps 50,000 ETH onto spot markets triggering cascading liquidations",
-    "Stablecoin depegs to 0.82 following mass collateral liquidation spiral",
+# ---------------------------------------------------------------------------
+# Realistic 250-Headline Pool (50 Crisis Macro + 50 Normal Macro + 150 Asset Micro)
+# ---------------------------------------------------------------------------
+CRISIS_TEMPLATES = [
+    "Major crypto exchange halts all token withdrawals citing severe liquidity deficit in collateral pool",
+    "Smart contract reentrancy exploit drains 75M from leading cross-chain lending protocol",
+    "SEC issues immediate enforcement subpoenas to top institutional crypto market makers",
+    "Validators report sudden consensus stalling causing mainnet block production halt",
+    "Federal Reserve announces emergency rate hike triggering cross-asset margin liquidations",
+    "Whale wallet dumps 50,000 ETH on spot books causing cascading perpetual liquidations",
+    "Algorithmic stablecoin depegs to 0.84 following liquidity drain in primary curve pool",
+    "CFTC files civil enforcement action alleging unregistered derivatives trading and fraud",
+    "Leading digital asset market maker reports 200M unexpected loss from counterparty default",
+    "Critical oracle latency failure leads to bad debt accumulation across decentralized exchanges",
+]
+SHARED_CRISIS_HEADLINES: List[str] = [
+    f"{CRISIS_TEMPLATES[i % len(CRISIS_TEMPLATES)]} [macro-shock-{i+1:02d}]" for i in range(50)
 ]
 
-SHARED_NORMAL_HEADLINES = [
-    "Ethereum layer 2 transactions reach new daily active address high",
-    "Solana ecosystem hackathon concludes with record developer participation",
-    "Bitcoin institutional inflows surge across ETF products this week",
-    "DeFi governance forum votes in favor of protocol parameter upgrade",
+NORMAL_MACRO_TEMPLATES = [
+    "Institutional ETF products record net inflows surpassing 850M this trading week",
+    "Layer 2 daily active addresses reach new all-time high amid global scaling adoption",
+    "Global crypto liquidity metrics turn positive as central banks ease bank reserve ratios",
+    "Institutional prime broker onboards 40 new systematic hedge fund clients this quarter",
+    "Decentralized spot exchange aggregate volume overtakes centralized trading venues",
+    "Cross-chain settlement volume sets record with zero protocol security vulnerabilities",
+    "Bipartisan digital asset regulatory framework bill advances through key Senate committee",
+    "Venture capital deployment in Web3 infrastructure rebounds 45% quarter over quarter",
+    "Global asset management firm submits revised application for multi-asset staking ETF",
+    "Leading payment processing network settles 10B in merchant stablecoin transactions",
 ]
+SHARED_NORMAL_HEADLINES: List[str] = [
+    f"{NORMAL_MACRO_TEMPLATES[i % len(NORMAL_MACRO_TEMPLATES)]} [macro-flow-{i+1:02d}]" for i in range(50)
+]
+
+SHARED_BROADCAST_MACRO = SHARED_CRISIS_HEADLINES + SHARED_NORMAL_HEADLINES  # 100 headlines
+
+ASSET_TOPICS = [
+    "core development team releases client performance optimization upgrade",
+    "governance council approves annual treasury diversification grant allocation",
+    "staking participation rate reaches new record percentage of circulating supply",
+    "ecosystem foundation announces developer incentive grant program",
+    "network throughput hits sustained TPS milestone following protocol upgrade",
+    "institutional staking node operators onboard multi-party computation security",
+]
+ASSET_SPECIFIC_HEADLINES: List[str] = []
+for sym in ["SOL", "ETH", "BTC", "AVAX", "LINK"]:
+    for top in ASSET_TOPICS:
+        for v in range(5):
+            ASSET_SPECIFIC_HEADLINES.append(f"{sym} ecosystem: {top} [release-{v+1}]")  # 150 headlines
+
+TOTAL_HEADLINES_POOL = SHARED_BROADCAST_MACRO + ASSET_SPECIFIC_HEADLINES  # Exactly 250 distinct headlines
 
 PROFILE = os.environ.get("LOCUST_PROFILE", "profile2").lower()
 
@@ -47,7 +85,7 @@ if PROFILE == "profile1":
                 "asset": asset,
                 "market_window": dummy_window,
                 "headline": unique_headline,
-                "timeout_ms": 150.0,
+                "timeout_ms": 250.0,
             }
             with self.client.post("/v1/score", json=payload, catch_response=True) as resp:
                 if resp.status_code == 200:
@@ -61,7 +99,7 @@ if PROFILE == "profile1":
 
 else:
     class Profile2ProductionUser(HttpUser):
-        """Realistic production workload: 70% market-only, 25% shared headlines, 5% causal feedback."""
+        """Realistic production workload: 70% market-only, 25% headlines (250-pool), 5% causal feedback."""
         wait_time = between(0.005, 0.025)
 
         @task(14)
@@ -84,10 +122,15 @@ else:
                     resp.failure(f"Status {resp.status_code}: {resp.text}")
 
         @task(5)
-        def score_shared_headline(self):
+        def score_headline(self):
             asset = random.choice(ASSETS)
             dummy_window = np.random.randn(48, 16).tolist()
-            headline = random.choice(SHARED_CRISIS_HEADLINES if random.random() < 0.7 else SHARED_NORMAL_HEADLINES)
+            # 70% shared macro broadcast (high cross-asset sharing), 30% asset-specific long-tail
+            if random.random() < 0.70:
+                headline = random.choice(SHARED_BROADCAST_MACRO)
+            else:
+                headline = random.choice(ASSET_SPECIFIC_HEADLINES)
+
             payload = {
                 "asset": asset,
                 "market_window": dummy_window,

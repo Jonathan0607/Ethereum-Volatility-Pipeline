@@ -49,25 +49,32 @@ class BoundedLRUCache:
         misses: List[Tuple[int, str]] = []
         with self.lock:
             for idx, key in enumerate(keys):
-                if key in self.cache:
-                    self.cache.move_to_end(key)
-                    hits[idx] = self.cache[key]
+                # Ensure key is a non-empty, stripped headline string (never count empty or whitespace keys)
+                if not key or not isinstance(key, str) or not key.strip():
+                    continue
+                clean_key = key.strip()
+                if clean_key in self.cache:
+                    self.cache.move_to_end(clean_key)
+                    hits[idx] = self.cache[clean_key]
                     self.hits_count += 1
                 else:
-                    misses.append((idx, key))
+                    misses.append((idx, clean_key))
                     self.misses_count += 1
         return hits, misses
 
     def set_many(self, items: List[Tuple[str, np.ndarray]]):
         with self.lock:
             for key, val in items:
-                if key in self.cache:
-                    self.cache.move_to_end(key)
-                    self.cache[key] = val
+                if not key or not isinstance(key, str) or not key.strip():
+                    continue
+                clean_key = key.strip()
+                if clean_key in self.cache:
+                    self.cache.move_to_end(clean_key)
+                    self.cache[clean_key] = val
                 else:
                     if len(self.cache) >= self.maxsize:
                         self.cache.popitem(last=False)
-                    self.cache[key] = val
+                    self.cache[clean_key] = val
 
     def size(self) -> int:
         with self.lock:
@@ -188,6 +195,7 @@ class HealthResponse(BaseModel):
     cache_hits: int = 0
     cache_misses: int = 0
     cache_hit_rate: float = 0.0
+    headline_cache_queries: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +217,7 @@ class DynamicMicroBatcher:
     def __init__(
         self,
         max_batch_size: int = 16,
-        max_wait_ms: float = 4.0,
+        max_wait_ms: float = 2.0,
     ):
         self.max_batch_size = max_batch_size
         self.max_wait_ms = max_wait_ms
@@ -501,7 +509,7 @@ async def lifespan(app: FastAPI):
     logger.info("Initialized MultiAssetDelayedFeedbackACI manager (delay=6h, alpha=0.05)")
 
     # 5. Start dynamic micro-batcher
-    state.micro_batcher = DynamicMicroBatcher(max_batch_size=16, max_wait_ms=4.0)
+    state.micro_batcher = DynamicMicroBatcher(max_batch_size=16, max_wait_ms=2.0)
     state.micro_batcher.start()
 
     yield
@@ -553,6 +561,7 @@ async def health_check():
         cache_hits=c_stats["hits"],
         cache_misses=c_stats["misses"],
         cache_hit_rate=c_stats["hit_rate"],
+        headline_cache_queries=c_stats["hits"] + c_stats["misses"],
     )
 
 

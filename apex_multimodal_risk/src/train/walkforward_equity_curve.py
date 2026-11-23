@@ -607,13 +607,44 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
         processed, dataset, UNIVERSE, eval_index, n, gate_mask=gate_mask_s3
     )
 
-    # Gross exposures for gated engines
-    gross_dir_s2 = np.sum([np.abs(pos_dir_s2[s]) for s in UNIVERSE], axis=0) * macro_regime
-    gross_sp_s2 = np.sum([np.abs(pos_sp_s2[s]) for s in UNIVERSE], axis=0) * macro_regime
+    # Gross exposures and bar-by-bar realized turnover per sleeve
+    eff_dir_base = {s: pos_dir_base[s] * macro_regime for s in UNIVERSE}
+    base_turn_dir = np.sum([np.abs(np.diff(np.concatenate(([0.0], eff_dir_base[s])))) for s in UNIVERSE], axis=0)
 
-    gross_dir_s3 = np.sum([np.abs(pos_dir_s3[s]) for s in UNIVERSE], axis=0) * macro_regime
-    gross_sp_s3 = np.sum([np.abs(pos_sp_s3[s]) for s in UNIVERSE], axis=0) * macro_regime
-    gross_book_s3 = (W_DIR * gross_dir_s3 + W_SPREAD * gross_sp_s3) / (W_DIR + W_SPREAD)
+    eff_dir_s2 = {s: pos_dir_s2[s] * macro_regime for s in UNIVERSE}
+    turn_dir_s2 = np.sum([np.abs(np.diff(np.concatenate(([0.0], eff_dir_s2[s])))) for s in UNIVERSE], axis=0)
+    inc_turn_dir_s2 = np.maximum(0.0, turn_dir_s2 - base_turn_dir)
+
+    eff_dir_s3 = {s: pos_dir_s3[s] * macro_regime for s in UNIVERSE}
+    turn_dir_s3 = np.sum([np.abs(np.diff(np.concatenate(([0.0], eff_dir_s3[s])))) for s in UNIVERSE], axis=0)
+    inc_turn_dir_s3 = np.maximum(0.0, turn_dir_s3 - base_turn_dir)
+
+    eff_dir_s4 = {s: scale_s4 * pos_dir_base[s] * macro_regime for s in UNIVERSE}
+    turn_dir_s4 = np.sum([np.abs(np.diff(np.concatenate(([0.0], eff_dir_s4[s])))) for s in UNIVERSE], axis=0)
+    inc_turn_dir_s4 = np.maximum(0.0, turn_dir_s4 - base_turn_dir)
+
+    eff_dir_s5 = {s: scale_s4 * pos_dir_s3[s] * macro_regime for s in UNIVERSE}
+    turn_dir_s5 = np.sum([np.abs(np.diff(np.concatenate(([0.0], eff_dir_s5[s])))) for s in UNIVERSE], axis=0)
+    inc_turn_dir_s5 = np.maximum(0.0, turn_dir_s5 - base_turn_dir)
+
+    eff_sp_base = {s: pos_sp_base[s] * macro_regime for s in UNIVERSE}
+    base_turn_sp = np.sum([np.abs(np.diff(np.concatenate(([0.0], eff_sp_base[s])))) for s in UNIVERSE], axis=0)
+
+    eff_sp_s2 = {s: pos_sp_s2[s] * macro_regime for s in UNIVERSE}
+    turn_sp_s2 = np.sum([np.abs(np.diff(np.concatenate(([0.0], eff_sp_s2[s])))) for s in UNIVERSE], axis=0)
+    inc_turn_sp_s2 = np.maximum(0.0, turn_sp_s2 - base_turn_sp)
+
+    eff_sp_s3 = {s: pos_sp_s3[s] * macro_regime for s in UNIVERSE}
+    turn_sp_s3 = np.sum([np.abs(np.diff(np.concatenate(([0.0], eff_sp_s3[s])))) for s in UNIVERSE], axis=0)
+    inc_turn_sp_s3 = np.maximum(0.0, turn_sp_s3 - base_turn_sp)
+
+    eff_sp_s4 = {s: scale_s4 * pos_sp_base[s] * macro_regime for s in UNIVERSE}
+    turn_sp_s4 = np.sum([np.abs(np.diff(np.concatenate(([0.0], eff_sp_s4[s])))) for s in UNIVERSE], axis=0)
+    inc_turn_sp_s4 = np.maximum(0.0, turn_sp_s4 - base_turn_sp)
+
+    eff_sp_s5 = {s: scale_s4 * pos_sp_s3[s] * macro_regime for s in UNIVERSE}
+    turn_sp_s5 = np.sum([np.abs(np.diff(np.concatenate(([0.0], eff_sp_s5[s])))) for s in UNIVERSE], axis=0)
+    inc_turn_sp_s5 = np.maximum(0.0, turn_sp_s5 - base_turn_sp)
 
     # Crisis episodes
     crisis_episodes = {
@@ -649,62 +680,43 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
         hedged_s1 = np.zeros(n, dtype=bool)
         strat_dict["1. Unhedged APEX v45 Champion"] = (ret_s1_0, inc_turn_s1, hedged_s1)
 
-        # S2: Market-Only LightGBM Gate (True Entry Gating)
+        # S2: Market-Only LightGBM Gate (True Entry Gating with Bar-by-Bar Re-entry Turnover)
         if is_mode_dir:
             ret_s2_0 = W_DIR * (dir_ret_s2 * macro_regime) + W_SPREAD * spread_filtered_base + W_ARB * arb_stream
+            inc_turn_s2 = inc_turn_dir_s2 * W_DIR
         else:
             ret_s2_0 = W_DIR * (dir_ret_s2 * macro_regime) + W_SPREAD * (sp_ret_s2 * macro_regime) + W_ARB * arb_stream
-        # True entry gating suppresses trades: overlay turnover <= base turnover -> inc_turn = 0.0
-        inc_turn_s2 = np.zeros(n)
+            inc_turn_s2 = inc_turn_dir_s2 * W_DIR + inc_turn_sp_s2 * W_SPREAD
         hedged_s2 = gate_mask_s2
         strat_dict["2. Market-Only LightGBM Gate"] = (ret_s2_0, inc_turn_s2, hedged_s2)
 
-        # S3: Surgical Multimodal NLP Gate (True Entry Gating)
+        # S3: Surgical Multimodal NLP Gate (True Entry Gating with Bar-by-Bar Re-entry Turnover)
         if is_mode_dir:
             ret_s3_0 = W_DIR * (dir_ret_s3 * macro_regime) + W_SPREAD * spread_filtered_base + W_ARB * arb_stream
+            inc_turn_s3 = inc_turn_dir_s3 * W_DIR
         else:
             ret_s3_0 = W_DIR * (dir_ret_s3 * macro_regime) + W_SPREAD * (sp_ret_s3 * macro_regime) + W_ARB * arb_stream
-        inc_turn_s3 = np.zeros(n)
+            inc_turn_s3 = inc_turn_dir_s3 * W_DIR + inc_turn_sp_s3 * W_SPREAD
         hedged_s3 = gate_mask_s3
         strat_dict["3. Surgical Multimodal NLP Gate"] = (ret_s3_0, inc_turn_s3, hedged_s3)
 
         # S4: Delayed-Feedback ACI VaR Sizing
-        # Incremental turnover strictly on realized position delta
         if is_mode_dir:
-            gross_active = gross_dir_base
-            eff_pos_s4 = scale_s4 * gross_active
-            base_turn = np.abs(np.diff(np.concatenate(([0.0], gross_active))))
-            overlay_turn = np.abs(np.diff(np.concatenate(([0.0], eff_pos_s4))))
-            inc_turn_s4 = np.maximum(0.0, overlay_turn - base_turn) * W_DIR
             ret_s4_0 = W_DIR * (dir_filtered_base * scale_s4) + W_SPREAD * spread_filtered_base + W_ARB * arb_stream
+            inc_turn_s4 = inc_turn_dir_s4 * W_DIR
         else:
-            gross_active = gross_book_base
-            eff_pos_s4 = scale_s4 * gross_active
-            base_turn = np.abs(np.diff(np.concatenate(([0.0], gross_active))))
-            overlay_turn = np.abs(np.diff(np.concatenate(([0.0], eff_pos_s4))))
-            inc_turn_s4 = np.maximum(0.0, overlay_turn - base_turn) * (W_DIR + W_SPREAD)
             ret_s4_0 = scale_s4 * (W_DIR * dir_filtered_base + W_SPREAD * spread_filtered_base) + W_ARB * arb_stream
-
+            inc_turn_s4 = inc_turn_dir_s4 * W_DIR + inc_turn_sp_s4 * W_SPREAD
         hedged_s4 = scale_s4 < 0.999
         strat_dict["4. Delayed-Feedback ACI VaR Sizing"] = (ret_s4_0, inc_turn_s4, hedged_s4)
 
         # S5: Dual-Pillar Multimodal + ACI Overlay
-        # Combines Surgical NLP Gate (S3) with ACI VaR Sizing (S4)
         if is_mode_dir:
-            gross_active_s5 = gross_dir_s3
-            eff_pos_s5 = scale_s4 * gross_active_s5
-            base_turn = np.abs(np.diff(np.concatenate(([0.0], gross_active_s5))))
-            overlay_turn = np.abs(np.diff(np.concatenate(([0.0], eff_pos_s5))))
-            inc_turn_s5 = np.maximum(0.0, overlay_turn - base_turn) * W_DIR
             ret_s5_0 = W_DIR * (dir_ret_s3 * macro_regime * scale_s4) + W_SPREAD * spread_filtered_base + W_ARB * arb_stream
+            inc_turn_s5 = inc_turn_dir_s5 * W_DIR
         else:
-            gross_active_s5 = gross_book_s3
-            eff_pos_s5 = scale_s4 * gross_active_s5
-            base_turn = np.abs(np.diff(np.concatenate(([0.0], gross_active_s5))))
-            overlay_turn = np.abs(np.diff(np.concatenate(([0.0], eff_pos_s5))))
-            inc_turn_s5 = np.maximum(0.0, overlay_turn - base_turn) * (W_DIR + W_SPREAD)
             ret_s5_0 = scale_s4 * (W_DIR * dir_ret_s3 * macro_regime + W_SPREAD * sp_ret_s3 * macro_regime) + W_ARB * arb_stream
-
+            inc_turn_s5 = inc_turn_dir_s5 * W_DIR + inc_turn_sp_s5 * W_SPREAD
         hedged_s5 = (scale_s4 < 0.999) | gate_mask_s3
         strat_dict["5. Dual-Pillar Multimodal+ACI Overlay"] = (ret_s5_0, inc_turn_s5, hedged_s5)
 
@@ -747,7 +759,7 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
 
     for mode_name, data in all_mode_results.items():
         print("\n" + "=" * 145)
-        print(f"EXP-003d: STRICTLY OUT-OF-SAMPLE QUANT TEAR SHEET TABLE ({mode_name.upper()})")
+        print(f"EXP-003e: STRICTLY OUT-OF-SAMPLE QUANT TEAR SHEET TABLE ({mode_name.upper()})")
         print("Coverage: 2022-11-01 to 2025-05-23 (2.56 Years, 22,435 Bars, Quarterly Refits, 168h Embargo)")
         print("=" * 145)
         print(f"{'Strategy Sleeve':38s} | {'Slippage':8s} | {'CAGR %':8s} | {'Code Cal':8s} | {'True Cal':8s} | {'Sharpe':8s} | {'Sortino':8s} | {'MaxDD %':8s} | {'WorstBar':8s} | {'Turn Drag':9s} | {'% Hedged':8s}")
@@ -774,7 +786,7 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
     # 8. Print Crisis Attribution Table
     for mode_name, data in all_mode_results.items():
         print("\n" + "=" * 135)
-        print(f"EXP-003d: 4-SHOCK CRISIS ATTRIBUTION ({mode_name.upper()} Under 25 bps Slippage)")
+        print(f"EXP-003e: 4-SHOCK CRISIS ATTRIBUTION ({mode_name.upper()} Under 25 bps Slippage)")
         print("=" * 135)
         print(f"{'Strategy Sleeve':36s} | {'FTX Collapse (Nov 22)':22s} | {'SVB / USDC (Mar 23)':22s} | {'SEC Lawsuit (Jun 23)':22s} | {'Aug 2024 Unwind':22s}")
         print("-" * 135)
