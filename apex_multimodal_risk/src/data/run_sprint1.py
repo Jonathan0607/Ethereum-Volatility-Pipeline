@@ -61,11 +61,17 @@ def run_pipeline() -> dict:
         
     print("\n[4] CAUSAL MARKET ALIGNMENT & FORWARD TARGETS")
     print("-" * 65)
-    print(f"  Market-News Overlap Period:     {align_audit['overlap_start']} to {align_audit['overlap_end']}")
-    print(f"  Total Aligned Hourly Records:   {align_audit['total_aligned_rows']:,}")
-    print("\n  Tail Crash (6h) Base Rates (Threshold: < -2.0 * 24h Realized Vol):")
+    print(f"  Market-News Overlap Period (UTC): {align_audit['overlap_start']} to {align_audit['overlap_end']}")
+    print(f"  Total Aligned Hourly Records:     {align_audit['total_aligned_rows']:,}")
+    print("\n  Tail Crash (6h) Base Rates with Horizon Scaling (threshold: < -m * sqrt(6) * vol_72h):")
     for asset, stats in align_audit["base_rates"].items():
-        print(f"    - {asset:<10}: Base Rate = {stats['base_rate']:>6.2%} ({stats['positive_count']:,} / {stats['total_valid']:,} valid bars)")
+        m_used = stats['multiplier_used']
+        print(f"    - {asset:<10} [LOCKED mult={m_used:.2f}]: Base Rate = {stats['base_rate']:>6.2%} ({stats['positive_count']:,} / {stats['total_valid']:,} valid bars)")
+        
+    print("\n  Multiplier Sensitivity Comparison (Horizon-Scaled sqrt(6) * vol_72h):")
+    for asset, mult_dict in align_audit.get("multiplier_sweeps", {}).items():
+        rates_str = " | ".join([f"m={m:.2f}: {s['base_rate']:.2%}" for m, s in mult_dict.items()])
+        print(f"    - {asset:<10}: {rates_str}")
         
     print(f"\nPipeline completed in {elapsed:.2f} seconds.")
     print("=" * 80 + "\n")

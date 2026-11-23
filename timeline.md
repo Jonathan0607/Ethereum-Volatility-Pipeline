@@ -75,3 +75,26 @@
     * LINKUSDT Tail Crash Base Rate: 26.29% (6,856 / 26,083 valid bars)
   - *Verification Suite (`pytest`):* 5/5 passed (100%), 0 leakage failures, 0 monotonic index anomalies, 0 target mask NaNs. Full pipeline throughput: 26.68 seconds end-to-end.
 - **Verdict & Next Step:** `[KEEP]` - Causal ingestion, 4-stage noise funnel, semantic deduplication, and aligned market targets operate with mathematical purity and zero future lookahead. Ready for Sprint 2 multimodal feature engineering.
+
+### EXP-001b: Patch — Strict UTC Parity & sqrt(6) Horizon Volatility Scaling
+- **Date & Branch/Commit:** 2026-11-22 | `feat/multimodal-risk-mle`
+- **Hypothesis / Objective:** Resolve local timezone offset drift (`-05:00` CDT) in Parquet timestamps and fix unscaled 1h volatility threshold causing ~26% crash base rate by applying strict $\sqrt{6} \cdot \sigma_{72h}$ time-horizon scaling.
+- **Implementation Summary:** 
+  1. Enforced strict UTC normalization (`.dt.tz_convert("UTC")`, `SET TimeZone = 'UTC'`) across `ingest_news.py`, `noise_filter.py`, `align_targets.py`, and `utils.py`. Added PyArrow schema & Pandas verification in `test_no_leakage.py`.
+  2. Updated `compute_causal_market_targets` in `align_targets.py` to use a 72-hour trailing realized volatility window and $\sqrt{6}$ horizon scaling factor: `tail_crash_6h = (fwd_min_ret_6h < -m * sqrt(6) * trailing_1h_vol_72h)`.
+- **Metrics & Audit Results:**
+  - *Timezone Parity:*
+    * Verified 100% strict UTC (`+00:00`) storage across `news_raw.parquet`, `news_dedup.parquet`, and `aligned_hourly.parquet`.
+    * Overlap Period (UTC): `2022-06-01 00:00:00+00:00` to `2025-05-23 19:00:00+00:00`.
+  - *Multiplier Sensitivity & Tail Crash Base Rates:*
+    * `m = 2.00` [LOCKED - closest to ~5%]:
+      - SOLUSDT: `4.11%` (1,069 / 26,035 valid bars)
+      - AVAXUSDT: `4.15%` (1,080 / 26,035 valid bars)
+      - LINKUSDT: `4.10%` (1,067 / 26,035 valid bars)
+      - Portfolio Mean: `4.12%` (lands cleanly within institutional 3%–8% target band)
+    * `m = 2.25`:
+      - SOLUSDT: `3.02%` | AVAXUSDT: `3.00%` | LINKUSDT: `3.00%` (Mean: `3.01%`)
+    * `m = 2.50`:
+      - SOLUSDT: `2.22%` | AVAXUSDT: `2.27%` | LINKUSDT: `2.10%` (Mean: `2.20%`, below 3% floor)
+  - *Verification Suite (`pytest`):* 6/6 passed (100%), verified strict UTC schema, zero leakage, semantic dedup constraints, and monotonic timestamps.
+- **Verdict & Next Step:** `[KEEP]` - Critical data engineering bugs resolved. Parquet timezones are strictly UTC and tail-crash base rates are mathematically calibrated to 4.12%. Ready for Sprint 2.

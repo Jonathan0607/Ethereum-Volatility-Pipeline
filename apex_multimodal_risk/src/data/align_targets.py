@@ -3,7 +3,9 @@ Causal Alignment & Target Construction Module.
 Aligns hourly market OHLCV + funding + OI data with deduplicated news clusters.
 Enforces zero lookahead: T - 24h < ingested_at <= T.
 Calculates 7-day rolling trailing news centroids and embedding novelty scores.
-Constructs forward 6h tail crash and worst-case drawdown targets.
+Constructs forward 6h tail crash and worst-case drawdown targets with sqrt(6) horizon scaling:
+  tail_crash_6h = (fwd_min_ret_6h < -tail_vol_multiplier * sqrt(6) * trailing_1h_vol_72h)
+Guarantees strict UTC timestamps (+00:00) across all columns.
 Persists data/processed/aligned_hourly.parquet via DuckDB.
 """
 
@@ -16,29 +18,41 @@ import numpy as np
 import pandas as pd
 import duckdb
 
-from apex_multimodal_risk.src.utils import setup_logger, load_config, PROJECT_ROOT
+from apex_multimodal_risk.src.utils import (
+    setup_logger,
+    load_config,
+    get_duckdb_connection,
+    enforce_utc_columns,
+    read_parquet_utc,
+    PROJECT_ROOT,
+)
 
 logger = setup_logger("align_targets")
 
 
 def load_market_data(pkl_path: str) -> Dict[str, pd.DataFrame]:
-    """Loads read-only market data dictionary (SOL, AVAX, LINK)."""
+    """Loads read-only market data dictionary (SOL, AVAX, LINK) with strict UTC index."""
     if not os.path.isabs(pkl_path):
         pkl_path = str(PROJECT_ROOT / pkl_path)
     logger.info(f"Loading audited market data from '{pkl_path}' (read-only)...")
     with open(pkl_path, "rb") as f:
         data = pickle.load(f)
+        
+    for sym in data:
+        data[sym] = enforce_utc_columns(data[sym])
     return data
 
 
 def compute_causal_market_targets(
     df: pd.DataFrame,
-    trailing_vol_lookback: int = 24,
+    trailing_vol_lookback: int = 72,
     forward_horizon: int = 6,
     tail_vol_multiplier: float = 2.0,
 ) -> pd.DataFrame:
     """
-    Computes causal trailing 24h realized volatility and forward 6h drawdown targets.
+    Computes causal trailing 72h realized volatility and forward 6h drawdown targets.
+    Scales 1h volatility by sqrt(6) to match the 6-hour forward horizon:
+      threshold = -tail_vol_multiplier * sqrt(6) * trailing_1h_vol_72h
     Strictly causal: vol at bar T uses only prices <= T.
     Forward targets use prices strictly in [T+1, T+forward_horizon].
     """
@@ -46,9 +60,10 @@ def compute_causal_market_targets(
     close = df["close"]
     ret_1h = close.pct_change()
     
-    # Trailing 24h realized volatility: sample std of 1h returns over bars [T-23h, T]
-    trailing_vol = ret_1h.rolling(window=trailing_vol_lookback, min_periods=trailing_vol_lookback).std()
-    df["trailing_24h_realized_vol"] = trailing_vol
+    # Trailing 72h realized volatility of 1h returns
+    trailing_1h_vol_72h = ret_1h.rolling(window=trailing_vol_lookback, min_periods=trailing_vol_lookback).std()
+    df["trailing_1h_vol_72h"] = trailing_1h_vol_72h
+    df["trailing_24h_realized_vol"] = ret_1h.rolling(window=24, min_periods=24).std()
     
     # Forward minimum cumulative return over the next forward_horizon hours:
     # R_{T, T+h} = (Close_{T+h} - Close_T) / Close_T
@@ -61,12 +76,16 @@ def compute_causal_market_targets(
     fwd_min_ret = fwd_rets_df.min(axis=1)
     df["fwd_min_ret_6h"] = fwd_min_ret
     
-    # Tail crash: minimum forward return is worse than -tail_vol_multiplier * trailing_vol
-    crash_condition = fwd_min_ret < (-tail_vol_multiplier * trailing_vol)
+    # Horizon scaling: 6h volatility scales by sqrt(6)
+    horizon_scale = np.sqrt(float(forward_horizon))
+    scaled_vol = horizon_scale * trailing_1h_vol_72h
+    
+    # Tail crash: minimum forward return < -tail_vol_multiplier * sqrt(6) * trailing_1h_vol_72h
+    crash_condition = fwd_min_ret < (-tail_vol_multiplier * scaled_vol)
     df["tail_crash_6h"] = np.where(crash_condition, 1, 0)
     
-    # Target validity mask (False for initial warm-up and last forward_horizon bars)
-    df["target_valid"] = (~trailing_vol.isna()) & (~fwd_min_ret.isna())
+    # Target validity mask (False for initial 72h warm-up and last forward_horizon bars)
+    df["target_valid"] = (~trailing_1h_vol_72h.isna()) & (~fwd_min_ret.isna())
     
     return df
 
@@ -84,10 +103,10 @@ def align_news_to_bars(
     Computes trailing 7-day centroid strictly from clusters <= T and novelty score.
     """
     n_bars = len(market_df)
-    bar_timestamps = market_df.index
+    bar_timestamps = pd.to_datetime(market_df.index, utc=True)
     bar_secs = (bar_timestamps.astype("int64") // 10**9).to_numpy()
     
-    # News timestamps and embeddings
+    # News timestamps and embeddings (strictly UTC)
     ingested_dt = pd.to_datetime(news_df["ingested_at"], utc=True)
     news_secs = (ingested_dt.astype("int64") // 10**9).to_numpy()
     embs = np.array(news_df["embedding"].to_list(), dtype=np.float32)
@@ -189,23 +208,26 @@ def align_causal_targets(config_path: Optional[str] = None) -> Tuple[pd.DataFram
         aligned_parquet_path = str(PROJECT_ROOT / aligned_parquet_path)
     os.makedirs(os.path.dirname(aligned_parquet_path), exist_ok=True)
     
-    logger.info(f"Loading deduplicated news from '{news_parquet_path}' via DuckDB...")
-    con = duckdb.connect()
-    news_df = con.execute(f"SELECT * FROM '{news_parquet_path}' ORDER BY ingested_at ASC").df()
-    con.close()
+    logger.info(f"Loading deduplicated news from '{news_parquet_path}' via DuckDB (UTC enforced)...")
+    news_df = read_parquet_utc(news_parquet_path, order_by="ingested_at ASC")
     
-    # Overlap range determination
+    # Overlap range determination strictly in UTC
     min_market_date = min(df.index.min() for df in market_data.values())
     max_market_date = max(df.index.max() for df in market_data.values())
     min_news_date = news_df["ingested_at"].min()
     max_news_date = news_df["ingested_at"].max()
+    
+    min_market_date = pd.to_datetime(min_market_date, utc=True)
+    max_market_date = pd.to_datetime(max_market_date, utc=True)
+    min_news_date = pd.to_datetime(min_news_date, utc=True)
+    max_news_date = pd.to_datetime(max_news_date, utc=True)
     
     overlap_start = max(min_market_date, min_news_date).floor("h")
     overlap_end = min(max_market_date, max_news_date).floor("h")
     
     logger.info(f"Market data date range: {min_market_date} to {max_market_date}")
     logger.info(f"News dataset date range: {min_news_date} to {max_news_date}")
-    logger.info(f"Overlap date range for alignment: {overlap_start} to {overlap_end}")
+    logger.info(f"Overlap date range for alignment (UTC): {overlap_start} to {overlap_end}")
     
     asset_entity_map = {
         "SOLUSDT": "entity_sol",
@@ -215,6 +237,11 @@ def align_causal_targets(config_path: Optional[str] = None) -> Tuple[pd.DataFram
     
     aligned_dfs = []
     base_rates = {}
+    multiplier_sweeps = {}
+    
+    target_mult = float(align_cfg.get("tail_vol_multiplier", 2.0))
+    vol_lookback = int(align_cfg.get("trailing_vol_lookback_hours", 72))
+    fwd_horizon = int(align_cfg.get("forward_horizon_hours", 6))
     
     for sym in align_cfg["assets"]:
         if sym not in market_data:
@@ -227,13 +254,28 @@ def align_causal_targets(config_path: Optional[str] = None) -> Tuple[pd.DataFram
         # Filter to overlap range
         df_sym = df_sym.loc[(df_sym.index >= overlap_start) & (df_sym.index <= overlap_end)].copy()
         
-        # Compute targets
+        # Compute targets with horizon scaling
         df_sym = compute_causal_market_targets(
             df_sym,
-            trailing_vol_lookback=align_cfg.get("trailing_vol_lookback_hours", 24),
-            forward_horizon=align_cfg.get("forward_horizon_hours", 6),
-            tail_vol_multiplier=align_cfg.get("tail_vol_multiplier", 2.0),
+            trailing_vol_lookback=vol_lookback,
+            forward_horizon=fwd_horizon,
+            tail_vol_multiplier=target_mult,
         )
+        
+        # Multiplier sensitivity audit for user reporting
+        mult_stats = {}
+        close = df_sym["close"]
+        vol_72h = df_sym["trailing_1h_vol_72h"]
+        fwd_min = df_sym["fwd_min_ret_6h"]
+        scale = np.sqrt(float(fwd_horizon))
+        valid_mask = (~vol_72h.isna()) & (~fwd_min.isna())
+        
+        for m in [2.0, 2.25, 2.5]:
+            c_m = (fwd_min < (-m * scale * vol_72h)).astype(int)
+            r_m = float(c_m[valid_mask].mean())
+            cnt_m = int(c_m[valid_mask].sum())
+            mult_stats[m] = {"base_rate": r_m, "positive_count": cnt_m}
+        multiplier_sweeps[sym] = mult_stats
         
         # Align news
         entity_col = asset_entity_map.get(sym, "entity_macro")
@@ -246,7 +288,7 @@ def align_causal_targets(config_path: Optional[str] = None) -> Tuple[pd.DataFram
         )
         
         df_aligned["asset"] = sym
-        df_aligned["timestamp"] = df_aligned.index
+        df_aligned["timestamp"] = pd.to_datetime(df_aligned.index, utc=True)
         aligned_dfs.append(df_aligned)
         
         valid_targets = df_aligned.loc[df_aligned["target_valid"], "tail_crash_6h"]
@@ -255,24 +297,30 @@ def align_causal_targets(config_path: Optional[str] = None) -> Tuple[pd.DataFram
             "base_rate": rate,
             "positive_count": int(valid_targets.sum()),
             "total_valid": len(valid_targets),
+            "multiplier_used": target_mult,
         }
-        logger.info(f"{sym} Tail Crash (6h) Base Rate: {rate:.2%} ({int(valid_targets.sum()):,} / {len(valid_targets):,} bars)")
+        logger.info(
+            f"{sym} Tail Crash (6h, mult={target_mult:.2f}*sqrt({fwd_horizon})) Base Rate: {rate:.2%} "
+            f"({int(valid_targets.sum()):,} / {len(valid_targets):,} bars)"
+        )
         
     panel_df = pd.concat(aligned_dfs, axis=0).reset_index(drop=True)
     panel_df = panel_df.sort_values(by=["timestamp", "asset"]).reset_index(drop=True)
+    panel_df = enforce_utc_columns(panel_df)
     
     # Persist aligned panel dataset via DuckDB
     logger.info(f"Persisting {len(panel_df):,} aligned rows to '{aligned_parquet_path}' via DuckDB...")
-    con = duckdb.connect()
+    con = get_duckdb_connection()
     con.register("aligned_hourly_df", panel_df)
     con.execute(f"COPY aligned_hourly_df TO '{aligned_parquet_path}' (FORMAT PARQUET, COMPRESSION ZSTD)")
     con.close()
     
     audit_summary = {
-        "overlap_start": str(overlap_start),
-        "overlap_end": str(overlap_end),
+        "overlap_start": overlap_start.strftime("%Y-%m-%d %H:%M:%S+00:00"),
+        "overlap_end": overlap_end.strftime("%Y-%m-%d %H:%M:%S+00:00"),
         "total_aligned_rows": len(panel_df),
         "base_rates": base_rates,
+        "multiplier_sweeps": multiplier_sweeps,
     }
     logger.info("Causal alignment and target generation complete.")
     return panel_df, audit_summary

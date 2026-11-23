@@ -18,7 +18,14 @@ import pandas as pd
 import duckdb
 from sentence_transformers import SentenceTransformer
 
-from apex_multimodal_risk.src.utils import setup_logger, load_config, get_device, PROJECT_ROOT
+from apex_multimodal_risk.src.utils import (
+    setup_logger,
+    load_config,
+    get_device,
+    get_duckdb_connection,
+    enforce_utc_columns,
+    PROJECT_ROOT,
+)
 
 logger = setup_logger("noise_filter")
 
@@ -277,9 +284,10 @@ def apply_4stage_noise_funnel(config_path: Optional[str] = None) -> Tuple[pd.Dat
     os.makedirs(os.path.dirname(proc_path), exist_ok=True)
     
     logger.info(f"Loading raw news from '{raw_path}' via DuckDB...")
-    con = duckdb.connect()
+    con = get_duckdb_connection()
     raw_df = con.execute(f"SELECT * FROM '{raw_path}' ORDER BY published_at ASC").df()
     con.close()
+    raw_df = enforce_utc_columns(raw_df)
     
     # Stage 1: Allowlist
     s1_df, audit1 = apply_stage1_source_filter(raw_df, config)
@@ -289,10 +297,11 @@ def apply_4stage_noise_funnel(config_path: Optional[str] = None) -> Tuple[pd.Dat
     s3_df, audit3 = apply_stage3_semantic_dedup(s2_df, config)
     # Stage 4: Entity Linker & Weak Labels
     final_df, audit4 = apply_stage4_entity_and_weak_risk(s3_df, config)
+    final_df = enforce_utc_columns(final_df)
     
     # Save processed deduplicated news with embeddings to Parquet via DuckDB
     logger.info(f"Persisting {len(final_df):,} deduplicated clusters to '{proc_path}' via DuckDB...")
-    con = duckdb.connect()
+    con = get_duckdb_connection()
     con.register("dedup_news_df", final_df)
     con.execute(f"COPY dedup_news_df TO '{proc_path}' (FORMAT PARQUET, COMPRESSION ZSTD)")
     con.close()

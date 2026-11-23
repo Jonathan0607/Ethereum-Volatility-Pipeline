@@ -80,6 +80,6 @@ causal_alignment:
   news_lookback_hours: 24
   trailing_centroid_days: 7
   forward_horizon_hours: 6
-  trailing_vol_lookback_hours: 24
+  trailing_vol_lookback_hours: 72
   tail_vol_multiplier: 2.0
   aligned_parquet_path: "apex_multimodal_risk/data/processed/aligned_hourly.parquet"

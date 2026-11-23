@@ -15,7 +15,13 @@ import pandas as pd
 from datasets import load_dataset
 import duckdb
 
-from apex_multimodal_risk.src.utils import setup_logger, load_config, PROJECT_ROOT
+from apex_multimodal_risk.src.utils import (
+    setup_logger,
+    load_config,
+    get_duckdb_connection,
+    enforce_utc_columns,
+    PROJECT_ROOT,
+)
 
 logger = setup_logger("ingest_news")
 
@@ -74,8 +80,9 @@ def ingest_historical_news(config_path: Optional[str] = None) -> pd.DataFrame:
     
     # Parse timestamp strictly as UTC
     logger.info("Enforcing UTC timestamps and applying causal 120s ingestion delay...")
-    df["published_at"] = pd.to_datetime(df["timestamp"], utc=True)
-    df["ingested_at"] = df["published_at"] + pd.Timedelta(seconds=causal_delay_sec)
+    df["published_at"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("UTC")
+    df["ingested_at"] = (df["published_at"] + pd.Timedelta(seconds=causal_delay_sec)).dt.tz_convert("UTC")
+    df = enforce_utc_columns(df)
     
     # Extract domain
     df["domain"] = df["source_url"].apply(extract_root_domain)
@@ -98,7 +105,7 @@ def ingest_historical_news(config_path: Optional[str] = None) -> pd.DataFrame:
     
     # Persist via DuckDB
     logger.info(f"Persisting {len(df):,} normalized records to '{raw_parquet_path}' using DuckDB...")
-    con = duckdb.connect()
+    con = get_duckdb_connection()
     con.register("raw_news_df", df)
     con.execute(f"COPY raw_news_df TO '{raw_parquet_path}' (FORMAT PARQUET, COMPRESSION ZSTD)")
     con.close()
