@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apex_multimodal_risk"
+version = "0.1.0"
+description = "Decoupled Multi-Modal Tail Risk Overlay for APEX Quantitative Engine"
+authors = [{ name = "APEX Team" }]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.2.0",
+    "duckdb>=1.0.0",
+    "pyarrow>=15.0.0",
+    "datasets>=2.18.0",
+    "transformers>=4.38.0",
+    "sentence-transformers>=2.5.0",
+    "pyyaml>=6.0",
+    "pytest>=8.0.0",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0"
+]

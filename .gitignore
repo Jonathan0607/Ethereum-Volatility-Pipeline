@@ -34,7 +34,9 @@ logs/
 *.sqlite3
 
 # Data and large binary artifacts
-data/
+/data/
+apex_multimodal_risk/data/
+*.parquet
 *.pth
 *.npy
 *.png
