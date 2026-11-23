@@ -91,7 +91,8 @@ class GARCHSkewBaseline:
 class LightGBMBaseline:
     """
     Model 2: Tabular Market + Causal Aggregated News Baseline.
-    Gradient-boosted decision trees with depth regularization and balanced class weighting.
+    Gradient-boosted decision trees with depth regularization.
+    Supports unweighted binary logloss or balanced class weighting.
     """
 
     def __init__(
@@ -102,6 +103,11 @@ class LightGBMBaseline:
         num_leaves: int = 15,
         subsample: float = 0.8,
         colsample_bytree: float = 0.8,
+        min_child_samples: int = 20,
+        reg_lambda: float = 0.0,
+        scale_pos_weight: float = 1.0,
+        class_weight: Optional[str] = None,
+        is_unbalance: bool = False,
         random_state: int = 42,
     ):
         self.model = lgb.LGBMClassifier(
@@ -111,7 +117,11 @@ class LightGBMBaseline:
             num_leaves=num_leaves,
             subsample=subsample,
             colsample_bytree=colsample_bytree,
-            class_weight="balanced",
+            min_child_samples=min_child_samples,
+            reg_lambda=reg_lambda,
+            scale_pos_weight=scale_pos_weight,
+            class_weight=class_weight,
+            is_unbalance=is_unbalance,
             random_state=random_state,
             n_jobs=-1,
             verbose=-1,

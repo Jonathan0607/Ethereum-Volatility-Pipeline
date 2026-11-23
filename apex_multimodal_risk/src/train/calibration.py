@@ -36,25 +36,41 @@ class PlattScaler:
     - Minimizes negative log-likelihood / cross-entropy.
     """
 
-    def __init__(self):
+    def __init__(self, lambda_reg: float = 1.0):
         self.a: float = 1.0
         self.b: float = 0.0
+        self.lambda_reg: float = lambda_reg
 
     def fit(self, logits: np.ndarray, y_true: np.ndarray) -> "PlattScaler":
-        logits = np.asarray(logits, dtype=np.float64).reshape(-1, 1)
-        y = np.asarray(y_true, dtype=np.int32).ravel()
+        logits = np.asarray(logits, dtype=np.float64).ravel()
+        y = np.asarray(y_true, dtype=np.float64).ravel()
 
         if len(np.unique(y)) < 2:
             self.a = 1.0
             self.b = -3.15  # approx logit of 0.0412
             return self
 
-        # Unpenalized LogisticRegression with L-BFGS solver
-        clf = LogisticRegression(solver="lbfgs", max_iter=200, C=1e5)
-        clf.fit(logits, y)
+        # Regularized L-BFGS: NLL + lambda * ((a - 1)^2 + b^2) to prevent overfit on small validation blocks
+        from scipy.optimize import minimize
 
-        self.a = float(clf.coef_[0, 0])
-        self.b = float(clf.intercept_[0])
+        def loss_fn(params):
+            a, b = params
+            pred_z = np.clip(a * logits + b, -30.0, 30.0)
+            p = 1.0 / (1.0 + np.exp(-pred_z))
+            eps = 1e-15
+            p = np.clip(p, eps, 1.0 - eps)
+            nll = -np.mean(y * np.log(p) + (1.0 - y) * np.log(1.0 - p))
+            reg = self.lambda_reg * ((a - 1.0) ** 2 + b ** 2)
+            return nll + reg
+
+        res = minimize(
+            loss_fn,
+            [1.0, 0.0],
+            method="L-BFGS-B",
+            bounds=[(0.01, 5.0), (-5.0, 5.0)],
+        )
+        self.a = float(res.x[0])
+        self.b = float(res.x[1])
 
         # Enforce positive slope to prevent ranking inversion
         if self.a <= 0.0:
