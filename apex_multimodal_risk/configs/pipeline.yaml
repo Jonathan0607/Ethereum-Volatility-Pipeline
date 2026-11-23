@@ -1,0 +1,97 @@
+# ==============================================================================
+# APEX MULTIMODAL RISK OVERLAY: PIPELINE CONFIGURATION
+# ==============================================================================
+
+news_ingestion:
+  dataset_name: "ExponentialScience/DLT-Sentiment-News"
+  causal_delay_seconds: 120
+  raw_parquet_path: "apex_multimodal_risk/data/raw/news_raw.parquet"
+
+noise_filter:
+  allowlist_domains:
+    tier_1:
+      - "reuters.com"
+      - "bloomberg.com"
+      - "sec.gov"
+      - "coindesk.com"
+      - "theblock.co"
+      - "theblockcrypto.com"
+      - "blockworks.co"
+      - "dlnews.com"
+      - "wsj.com"
+      - "ft.com"
+    tier_2:
+      - "cointelegraph.com"
+      - "decrypt.co"
+      - "cryptoslate.com"
+      - "cryptobriefing.com"
+      - "beincrypto.com"
+      - "bitcoinist.com"
+      - "newsbtc.com"
+      - "cryptopotato.com"
+      - "u.today"
+      - "dailyhodl.com"
+      - "zycrypto.com"
+      - "ambcrypto.com"
+      - "cryptoglobe.com"
+      - "finbold.com"
+      - "dailycoin.com"
+      - "forkast.news"
+      - "coinpaprika.com"
+      - "en.ethereumworldnews.com"
+
+  clickbait_regex:
+    - "\\bprice\\s+prediction\\b"
+    - "\\bcould\\s+hit(?:\\s*\\$)?\\b"
+    - "\\b100x\\b"
+    - "\\bto\\s+the\\s+moon\\b"
+    - "\\bweekly\\s+recap\\b"
+    - "\\btop\\s+5\\b"
+    - "\\bsponsored\\b"
+    - "\\bpress\\s+release\\b"
+
+  deduplication:
+    model_name: "BAAI/bge-small-en-v1.5"
+    embedding_dim: 384
+    normalize_embeddings: true
+    similarity_threshold: 0.85
+    window_hours: 6.0
+    processed_parquet_path: "apex_multimodal_risk/data/processed/news_dedup.parquet"
+
+  entity_linking:
+    sol: "\\b(sol|solana)\\b"
+    avax: "\\b(avax|avalanche)\\b"
+    link: "\\b(link|chainlink)\\b"
+    macro: "\\b(btc|bitcoin|eth|ethereum|binance|cz|ftx|sbf|sec|gensler|fed|federal\\s+reserve|powell|cpi|fomc|inflation|rate\\s+hike|rate\\s+cut|treasury|liquidity|usdt|tether)\\b"
+
+  risk_classes:
+    protocol_exploit: "\\b(hack|hacked|exploit|exploited|drain|drained|flash\\s+loan|bridge\\s+attack|stolen|compromised|vulnerability|vulnerable|rug\\s+pull|smart\\s+contract\\s+bug)\\b"
+    network_outage: "\\b(outage|downtime|halt|halted|network\\s+halt|stall|stalled|degraded|block\\s+production\\s+stopped|congestion|offline)\\b"
+    regulatory_action: "\\b(sec|cftc|doj|lawsuit|sue|sued|suing|subpoena|indicted|indictment|enforcement|regulatory|regulator|banned|ban|sanction|sanctioned|wells\\s+notice)\\b"
+    exchange_insolvency: "\\b(insolvency|insolvent|bankrupt|bankruptcy|chapter\\s+11|halt\\s+withdrawals|paused?\\s+withdrawals?|freeze\\s+withdrawals?|bank\\s+run|restructuring|liquidation\\s+cascade)\\b"
+    macro_shock: "\\b(fomc|fed|cpi|inflation|rate\\s+hike|rate\\s+cut|jerome\\s+powell|emergency\\s+meeting|banking\\s+crisis|recession|tariff|systemic\\s+risk|interest\\s+rate\\s+decision)\\b"
+
+causal_alignment:
+  market_data_path: "data/true_historical_dataset_4yr.pkl"
+  assets:
+    - "SOLUSDT"
+    - "AVAXUSDT"
+    - "LINKUSDT"
+  news_lookback_hours: 24
+  trailing_centroid_days: 7
+  forward_horizon_hours: 6
+  trailing_vol_lookback_hours: 72
+  tail_vol_multiplier: 2.0
+  aligned_parquet_path: "apex_multimodal_risk/data/processed/aligned_hourly.parquet"
+
+text_encoder:
+  model_name: "microsoft/MiniLM-L12-H384-uncased"
+  max_length: 48
+  batch_size: 32
+  epochs: 3
+  freeze_bottom_layers: 10
+  lr_head: 5.0e-4
+  lr_backbone: 3.0e-5
+  weight_decay: 0.01
+  grad_clip: 1.0
+  cache_dir: "apex_multimodal_risk/data/processed/text_encoder_cpcv_cache"

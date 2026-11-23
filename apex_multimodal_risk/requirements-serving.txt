@@ -1,0 +1,14 @@
+# Lean CPU Serving Dependencies ONLY (Zero PyTorch, Zero LightGBM, Zero MLflow, Zero Datasets)
+onnxruntime>=1.17.0
+tokenizers>=0.15.0
+numpy>=1.24.0
+scipy>=1.12.0
+pandas>=2.0.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+pydantic>=2.6.0
+prometheus_client>=0.20.0
+redis>=5.0.0
+httpx>=0.27.0
+feedparser>=6.0.0
+pyyaml>=6.0

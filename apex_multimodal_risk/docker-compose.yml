@@ -1,0 +1,61 @@
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: apex-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  inference-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: apex-inference-service
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./artifacts/onnx:/app/apex_multimodal_risk/artifacts/onnx:ro
+      - ./configs:/app/apex_multimodal_risk/configs:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  shadow-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: apex-shadow-worker
+    command: [
+      "python", "-m", "apex_multimodal_risk.src.serving.shadow_stream",
+      "--mode", "replay",
+      "--bars", "50",
+      "--service-url", "http://inference-service:8000",
+      "--redis-url", "redis://redis:6379/0"
+    ]
+    environment:
+      - SERVICE_URL=http://inference-service:8000
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      inference-service:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: on-failure

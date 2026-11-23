@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apex_multimodal_risk"
+version = "0.1.0"
+description = "Decoupled Multi-Modal Tail Risk Overlay for APEX Quantitative Engine"
+authors = [{ name = "APEX Team" }]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.2.0",
+    "duckdb>=1.0.0",
+    "pyarrow>=15.0.0",
+    "datasets>=2.18.0",
+    "transformers>=4.38.0",
+    "sentence-transformers>=2.5.0",
+    "pyyaml>=6.0",
+    "pytest>=8.0.0",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "ruff>=0.9.0",
+    "prometheus_client>=0.20.0",
+    "scipy>=1.12.0",
+    "redis>=5.0.0",
+    "feedparser>=6.0.0"
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",   # Line length handled by formatter
+    "B008",   # Do not perform function call in argument defaults (FastAPI Depends)
+    "W293",   # Blank line contains whitespace
+    "E701",   # Multiple statements on one line (colon)
+    "E702",   # Multiple statements on one line (semicolon)
+    "E402",   # Module level import not at top of file (dynamic sys.path insertion)
+    "B007",   # Loop control variable not used within loop body
+    "B905",   # zip() without strict= parameter
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["..", "."]
+markers = [
+    "requires_local_artifacts: tests requiring local gitignored parquet or onnx models (skipped in fresh-clone CI)",
+]
+

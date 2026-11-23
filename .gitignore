@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.ruff_cache/
 
 # C++ Build artifacts
 *.o
@@ -34,13 +35,25 @@ logs/
 *.sqlite3
 
 # Data and large binary artifacts
-data/
+/data/
+apex_multimodal_risk/data/
+*.parquet
+*.pt
 *.pth
+*.ckpt
 *.npy
 *.png
+!apex_multimodal_risk/docs/quant_equity_tearsheet.png
 *.pkl
+*.onnx
+*.onnx.data
 best_params.txt
 archive/
+mlruns/
+apex_multimodal_risk/mlruns/
+apex_multimodal_risk/artifacts/
+benchmarks/results/
+apex_multimodal_risk/benchmarks/results/
 
 # Frontend builds & caches
 frontend/.next/
