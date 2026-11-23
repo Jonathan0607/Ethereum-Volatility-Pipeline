@@ -49,6 +49,81 @@ def kupiec_pof_test(
     return p_val, p_hat, x
 
 
+def christoffersen_tests(
+    y_true: np.ndarray,
+    var_pred: np.ndarray,
+    alpha: float = 0.05,
+) -> Dict[str, Any]:
+    """
+    Computes Kupiec Unconditional Coverage (LR_uc), Christoffersen Independence (LR_ind),
+    and Christoffersen Conditional Coverage (LR_cc) Likelihood Ratio Tests.
+    Also computes Mean Realized Shortfall on violation bars.
+    """
+    y = np.asarray(y_true, dtype=np.float64).ravel()
+    v = np.asarray(var_pred, dtype=np.float64).ravel()
+    hits = (y < v).astype(np.int32)
+    T = len(hits)
+    N = int(np.sum(hits))
+    p = N / T if T > 0 else 0.0
+
+    # 1. Kupiec LR_uc
+    if N == 0:
+        LR_uc = -2.0 * np.log((1.0 - alpha) ** T + 1e-15)
+    elif N == T:
+        LR_uc = -2.0 * np.log(alpha ** T + 1e-15)
+    else:
+        ll_null = (T - N) * np.log(1.0 - alpha) + N * np.log(alpha)
+        ll_alt = (T - N) * np.log(1.0 - p) + N * np.log(p)
+        LR_uc = -2.0 * (ll_null - ll_alt)
+    p_uc = float(1.0 - stats.chi2.cdf(max(0.0, LR_uc), df=1))
+
+    # 2. Christoffersen Independence LR_ind
+    t00 = int(np.sum((hits[:-1] == 0) & (hits[1:] == 0)))
+    t01 = int(np.sum((hits[:-1] == 0) & (hits[1:] == 1)))
+    t10 = int(np.sum((hits[:-1] == 1) & (hits[1:] == 0)))
+    t11 = int(np.sum((hits[:-1] == 1) & (hits[1:] == 1)))
+
+    pi01 = t01 / (t00 + t01) if (t00 + t01) > 0 else 0.0
+    pi11 = t11 / (t10 + t11) if (t10 + t11) > 0 else 0.0
+    pi = (t01 + t11) / (t00 + t01 + t10 + t11) if (t00 + t01 + t10 + t11) > 0 else 0.0
+
+    ll_0 = (t00 + t10) * np.log(max(1e-12, 1.0 - pi)) + (t01 + t11) * np.log(max(1e-12, pi))
+    ll_1 = 0.0
+    if t00 > 0: ll_1 += t00 * np.log(max(1e-12, 1.0 - pi01))
+    if t01 > 0: ll_1 += t01 * np.log(max(1e-12, pi01))
+    if t10 > 0: ll_1 += t10 * np.log(max(1e-12, 1.0 - pi11))
+    if t11 > 0: ll_1 += t11 * np.log(max(1e-12, pi11))
+
+    LR_ind = -2.0 * (ll_0 - ll_1)
+    p_ind = float(1.0 - stats.chi2.cdf(max(0.0, LR_ind), df=1))
+
+    # 3. Conditional Coverage LR_cc
+    LR_cc = LR_uc + LR_ind
+    p_cc = float(1.0 - stats.chi2.cdf(max(0.0, LR_cc), df=2))
+
+    # 4. Shortfall metrics
+    violation_returns = y[hits == 1]
+    mean_shortfall = float(np.mean(violation_returns)) if len(violation_returns) > 0 else 0.0
+    mean_breach = float(np.mean(v[hits == 1] - violation_returns)) if len(violation_returns) > 0 else 0.0
+
+    return {
+        "T": T,
+        "violations": N,
+        "violation_rate": p,
+        "coverage": 1.0 - p,
+        "LR_uc": float(LR_uc),
+        "p_uc": p_uc,
+        "LR_ind": float(LR_ind),
+        "p_ind": p_ind,
+        "LR_cc": float(LR_cc),
+        "p_cc": p_cc,
+        "pi01": float(pi01),
+        "pi11": float(pi11),
+        "mean_realized_shortfall": mean_shortfall,
+        "mean_breach_magnitude": mean_breach,
+    }
+
+
 class DelayedFeedbackACI:
     """
     Single-asset Delayed-Feedback Adaptive Conformal Inference Wrapper.

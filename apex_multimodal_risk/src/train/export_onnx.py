@@ -335,12 +335,22 @@ def export_lightgbm_risk(
     n_feats = len(feature_names)
 
     initial_type = [("features", FloatTensorType([None, n_feats]))]
-    onnx_model = onnxmltools.convert_lightgbm(lgbm_model, initial_types=initial_type, target_opset=15)
+    onnx_model = onnxmltools.convert_lightgbm(lgbm_model, initial_types=initial_type, target_opset=15, zipmap=False)
+    onnx_model.graph.output[0].type.tensor_type.shape.dim[0].dim_param = "batch_size"
 
     onnx_path = export_dir / "lightgbm_risk.onnx"
     with open(onnx_path, "wb") as f:
         f.write(onnx_model.SerializeToString())
     logger.info(f"Saved LightGBM ONNX: {onnx_path} ({onnx_path.stat().st_size / (1024*1024):.2f} MB)")
+
+    # Load iTransformer variate scaler means and stds
+    itr_ckpt_path = PROJECT_ROOT / "apex_multimodal_risk/artifacts/best_itransformer_var.pt"
+    scaler_means = []
+    scaler_stds = []
+    if itr_ckpt_path.exists():
+        itr_ckpt = torch.load(itr_ckpt_path, map_location="cpu", weights_only=False)
+        scaler_means = [float(x) for x in itr_ckpt.get("scaler_means", [])]
+        scaler_stds = [float(x) for x in itr_ckpt.get("scaler_stds", [])]
 
     # Serialize serving metadata for microservice
     metadata = {
@@ -355,6 +365,8 @@ def export_lightgbm_risk(
         "aci_delay_hours": 6,
         "aci_window_size": 500,
         "aci_gamma": 0.01,
+        "scaler_means": scaler_means,
+        "scaler_stds": scaler_stds,
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
     }
     meta_path = export_dir / "serving_metadata.json"
@@ -370,12 +382,10 @@ def export_lightgbm_risk(
     raw_lgb = lgbm_model.predict_proba(test_X)[:, 1]
     # ONNX predict
     onnx_out = sess.run(None, {"features": test_X})
-    # ONNX output is [labels, probabilities_dicts_or_tensor]
+    # ONNX output with zipmap=False is [labels, probabilities_tensor of shape (N, 2)]
     if isinstance(onnx_out[1], list):
-        # List of dicts {0: p0, 1: p1}
         onnx_probs = np.array([d[1] for d in onnx_out[1]])
     else:
-        # Tensor of shape (N, 2)
         onnx_probs = onnx_out[1][:, 1]
 
     max_prob_diff = float(np.max(np.abs(raw_lgb - onnx_probs)))

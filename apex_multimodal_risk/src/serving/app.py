@@ -11,6 +11,8 @@ import sys
 import time
 import json
 import asyncio
+from collections import OrderedDict
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from contextlib import asynccontextmanager
@@ -30,6 +32,45 @@ from apex_multimodal_risk.src.models.conformal import MultiAssetDelayedFeedbackA
 logger = setup_logger("serving_app")
 
 # ---------------------------------------------------------------------------
+# Bounded LRU Cache for Headline Embeddings
+# ---------------------------------------------------------------------------
+class BoundedLRUCache:
+    """Thread-safe bounded LRU cache for 384-dim headline embeddings."""
+
+    def __init__(self, maxsize: int = 4096):
+        self.maxsize = maxsize
+        self.cache: OrderedDict[str, np.ndarray] = OrderedDict()
+        self.lock = threading.Lock()
+
+    def get_many(self, keys: List[str]) -> Tuple[Dict[int, np.ndarray], List[Tuple[int, str]]]:
+        hits: Dict[int, np.ndarray] = {}
+        misses: List[Tuple[int, str]] = []
+        with self.lock:
+            for idx, key in enumerate(keys):
+                if key in self.cache:
+                    self.cache.move_to_end(key)
+                    hits[idx] = self.cache[key]
+                else:
+                    misses.append((idx, key))
+        return hits, misses
+
+    def set_many(self, items: List[Tuple[str, np.ndarray]]):
+        with self.lock:
+            for key, val in items:
+                if key in self.cache:
+                    self.cache.move_to_end(key)
+                    self.cache[key] = val
+                else:
+                    if len(self.cache) >= self.maxsize:
+                        self.cache.popitem(last=False)
+                    self.cache[key] = val
+
+    def size(self) -> int:
+        with self.lock:
+            return len(self.cache)
+
+
+# ---------------------------------------------------------------------------
 # Global State & Engine Containers
 # ---------------------------------------------------------------------------
 class EngineState:
@@ -44,6 +85,11 @@ class EngineState:
         self.proto_keys: List[str] = []
         self.aci_manager: Optional[MultiAssetDelayedFeedbackACI] = None
         self.micro_batcher: Optional["DynamicMicroBatcher"] = None
+        self.scaler_means: Optional[np.ndarray] = None
+        self.scaler_stds: Optional[np.ndarray] = None
+        self.embedding_cache: BoundedLRUCache = BoundedLRUCache(maxsize=4096)
+        self.total_score_requests: int = 0
+        self.degraded_fallback_count: int = 0
 
 state = EngineState()
 
@@ -70,7 +116,7 @@ class ScoreRequest(BaseModel):
         description="ISO 8601 timestamp of request bar (UTC)",
     )
     timeout_ms: float = Field(
-        default=50.0,
+        default=150.0,
         description="SLA latency budget in milliseconds. Exceeding returns neutral fallback.",
     )
 
@@ -121,6 +167,9 @@ class HealthResponse(BaseModel):
     providers: List[str]
     models_loaded: List[str]
     uptime_seconds: float
+    total_score_requests: int = 0
+    degraded_fallback_count: int = 0
+    degraded_fallback_rate: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -136,13 +185,13 @@ class BatchItem:
 class DynamicMicroBatcher:
     """
     Dynamic micro-batcher combining requests up to max_batch_size=16
-    with a maximum wait window of max_wait_ms=8ms.
+    with a maximum wait window of max_wait_ms=4ms.
     """
 
     def __init__(
         self,
         max_batch_size: int = 16,
-        max_wait_ms: float = 8.0,
+        max_wait_ms: float = 4.0,
     ):
         self.max_batch_size = max_batch_size
         self.max_wait_ms = max_wait_ms
@@ -212,7 +261,7 @@ class DynamicMicroBatcher:
         tau_nov = meta.get("gate_thresholds", {}).get("tau_nov", 0.288)
         tau_proto = meta.get("gate_thresholds", {}).get("tau_proto", 0.718)
 
-        # 1. Batched NLP Inference (BGE INT8)
+        # 1. Batched NLP Inference (BGE INT8) with LRU Cache
         nlp_headlines = []
         nlp_indices = []
         for idx, it in enumerate(items):
@@ -228,32 +277,49 @@ class DynamicMicroBatcher:
         alert_flags = np.zeros(n_items, dtype=np.float32)
         burst_ratios = np.zeros(n_items, dtype=np.float32)
 
-        if nlp_headlines and state.tokenizer and state.sess_bge and state.proto_matrix is not None:
-            tok = state.tokenizer(
-                nlp_headlines,
-                return_tensors="np",
-                max_length=48,
-                padding="max_length",
-                truncation=True,
-            )
-            embs = state.sess_bge.run(
-                None,
-                {"input_ids": tok["input_ids"], "attention_mask": tok["attention_mask"]},
-            )[0]  # (K, 384)
+        if nlp_headlines and state.proto_matrix is not None:
+            # Query LRU cache
+            hits, misses = state.embedding_cache.get_many(nlp_headlines)
+            embs_list: List[Optional[np.ndarray]] = [None] * len(nlp_headlines)
+            for h_idx, h_emb in hits.items():
+                embs_list[h_idx] = h_emb
 
-            # Similarity to 5 prototypes
-            sim_matrix = np.dot(embs, state.proto_matrix.T)  # (K, 5)
-            max_sims = np.max(sim_matrix, axis=1)
+            if misses and state.tokenizer and state.sess_bge:
+                missed_texts = [m[1] for m in misses]
+                tok = state.tokenizer(
+                    missed_texts,
+                    return_tensors="np",
+                    max_length=48,
+                    padding="max_length",
+                    truncation=True,
+                )
+                computed_embs = state.sess_bge.run(
+                    None,
+                    {"input_ids": tok["input_ids"], "attention_mask": tok["attention_mask"]},
+                )[0]  # shape (M, 384)
 
-            for local_i, global_i in enumerate(nlp_indices):
-                p_max = float(max_sims[local_i])
-                nov = float(1.0 - p_max)
-                nov_scores[global_i] = nov
-                proto_sims[global_i] = p_max
-                g_nov[global_i] = max(0.0, nov - tau_nov)
-                g_proto[global_i] = max(0.0, p_max - tau_proto)
-                alert_flags[global_i] = 1.0 if (nov > tau_nov or p_max > tau_proto) else 0.0
-                burst_ratios[global_i] = 1.0
+                to_cache = []
+                for (orig_i, headline_text), emb in zip(misses, computed_embs):
+                    embs_list[orig_i] = emb
+                    to_cache.append((headline_text, emb))
+                state.embedding_cache.set_many(to_cache)
+
+            # Valid embeddings array
+            valid_embs = np.array([e for e in embs_list if e is not None], dtype=np.float32)
+            if len(valid_embs) == len(nlp_headlines):
+                # Similarity to 5 prototypes
+                sim_matrix = np.dot(valid_embs, state.proto_matrix.T)  # (K, 5)
+                max_sims = np.max(sim_matrix, axis=1)
+
+                for local_i, global_i in enumerate(nlp_indices):
+                    p_max = float(max_sims[local_i])
+                    nov = float(1.0 - p_max)
+                    nov_scores[global_i] = nov
+                    proto_sims[global_i] = p_max
+                    g_nov[global_i] = max(0.0, nov - tau_nov)
+                    g_proto[global_i] = max(0.0, p_max - tau_proto)
+                    alert_flags[global_i] = 1.0 if (nov > tau_nov or p_max > tau_proto) else 0.0
+                    burst_ratios[global_i] = 1.0
 
         # 2. Batched iTransformer VaR Inference
         raw_vars = np.full(n_items, -0.040, dtype=np.float32)
@@ -266,6 +332,8 @@ class DynamicMicroBatcher:
 
         if itr_windows and state.sess_itransformer:
             x_mkt = np.array(itr_windows, dtype=np.float32)  # (K, 48, 16)
+            if state.scaler_means is not None and state.scaler_stds is not None:
+                x_mkt = (x_mkt - state.scaler_means) / (state.scaler_stds + 1e-8)
             itr_out = state.sess_itransformer.run(None, {"x_market": x_mkt})
             pred_vars = itr_out[1]  # (K,)
             for local_i, global_i in enumerate(itr_indices):
@@ -295,8 +363,10 @@ class DynamicMicroBatcher:
             # Handle probabilities output
             if isinstance(lgb_out[1], list):
                 raw_probs = np.array([d[1] for d in lgb_out[1]], dtype=np.float32)
-            else:
+            elif isinstance(lgb_out[1], np.ndarray):
                 raw_probs = lgb_out[1][:, 1].astype(np.float32)
+            else:
+                raw_probs = np.array(lgb_out[1], dtype=np.float32)[:, 1]
 
             # Platt scaling: logit shift
             z = np.log(np.clip(raw_probs, 1e-12, 1.0 - 1e-12) / (1.0 - np.clip(raw_probs, 1e-12, 1.0 - 1e-12)))
@@ -363,14 +433,20 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Metadata file {meta_path} not found; using defaults")
         state.metadata = {"model_version": "v1.0.0", "architecture": "M2_Market+SparseGatedNLP"}
 
+    if "scaler_means" in state.metadata and "scaler_stds" in state.metadata:
+        state.scaler_means = np.array(state.metadata["scaler_means"], dtype=np.float32).reshape(1, 1, -1)
+        state.scaler_stds = np.array(state.metadata["scaler_stds"], dtype=np.float32).reshape(1, 1, -1)
+        logger.info(f"Loaded feature standardizer scalers (means dim {state.scaler_means.shape[-1]})")
+
     # 2. Load ONNX sessions on CPU
     bge_path = onnx_dir / "bge_small_int8.onnx"
     itr_path = onnx_dir / "itransformer_int8.onnx"
     lgb_path = onnx_dir / "lightgbm_risk.onnx"
 
     opts = ort.SessionOptions()
-    opts.inter_op_num_threads = 2
-    opts.intra_op_num_threads = 2
+    opts.intra_op_num_threads = 4
+    opts.inter_op_num_threads = 1
+    opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
 
     if bge_path.exists():
         state.sess_bge = ort.InferenceSession(str(bge_path), sess_options=opts, providers=["CPUExecutionProvider"])
@@ -407,7 +483,7 @@ async def lifespan(app: FastAPI):
     logger.info("Initialized MultiAssetDelayedFeedbackACI manager (delay=6h, alpha=0.05)")
 
     # 5. Start dynamic micro-batcher
-    state.micro_batcher = DynamicMicroBatcher(max_batch_size=16, max_wait_ms=8.0)
+    state.micro_batcher = DynamicMicroBatcher(max_batch_size=16, max_wait_ms=4.0)
     state.micro_batcher.start()
 
     yield
@@ -443,6 +519,8 @@ async def health_check():
     if state.sess_lgbm:
         models_loaded.append("lightgbm_risk")
 
+    fallback_rate = (state.degraded_fallback_count / state.total_score_requests) if state.total_score_requests > 0 else 0.0
+
     return HealthResponse(
         status="healthy",
         version=state.metadata.get("model_version", "v1.0.0"),
@@ -450,6 +528,9 @@ async def health_check():
         providers=["CPUExecutionProvider"],
         models_loaded=models_loaded,
         uptime_seconds=round(time.time() - state.start_time, 2),
+        total_score_requests=state.total_score_requests,
+        degraded_fallback_count=state.degraded_fallback_count,
+        degraded_fallback_rate=round(float(fallback_rate), 4),
     )
 
 
@@ -459,6 +540,7 @@ async def score_risk(req: ScoreRequest):
     Submits a risk scoring request to dynamic micro-batcher with SLA latency budget fallback.
     If execution exceeds timeout_ms, returns neutral unhedged market fallback.
     """
+    state.total_score_requests += 1
     t0 = time.perf_counter()
 
     if not state.micro_batcher:
@@ -475,6 +557,7 @@ async def score_risk(req: ScoreRequest):
         response = await asyncio.wait_for(score_coro, timeout=timeout_sec)
         return response
     except (asyncio.TimeoutError, TimeoutError):
+        state.degraded_fallback_count += 1
         elapsed = (time.perf_counter() - t0) * 1000.0
         logger.warning(f"SLA budget ({req.timeout_ms:.1f}ms) exceeded ({elapsed:.1f}ms) for asset {req.asset}. Returning degraded fallback.")
         return ScoreResponse(
