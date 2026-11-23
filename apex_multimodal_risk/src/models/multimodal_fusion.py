@@ -17,13 +17,12 @@ Combines:
 
 
 import torch
-from torch import nn
-
 from apex_multimodal_risk.src.models.itransformer import (
     InvertedTransformerBackbone,
     pinball_loss,
 )
 from apex_multimodal_risk.src.utils import setup_logger
+from torch import nn
 
 logger = setup_logger("multimodal_fusion")
 

@@ -22,8 +22,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sentence_transformers import SentenceTransformer
-
 from apex_multimodal_risk.src.features.shared_features import (
     MARKET_NUMERICAL_COLS,
     load_and_merge_features_and_targets,
@@ -41,6 +39,7 @@ from apex_multimodal_risk.src.utils import (
     read_parquet_utc,
     setup_logger,
 )
+from sentence_transformers import SentenceTransformer
 
 logger = setup_logger("exp002e_nlp_angles")
 

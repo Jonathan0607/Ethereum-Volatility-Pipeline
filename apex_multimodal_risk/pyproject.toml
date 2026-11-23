@@ -20,7 +20,9 @@ dependencies = [
     "pytest>=8.0.0",
     "pandas>=2.0.0",
     "numpy>=1.24.0",
-    "ruff>=0.9.0"
+    "ruff>=0.9.0",
+    "prometheus_client>=0.20.0",
+    "scipy>=1.12.0"
 ]
 
 [tool.ruff]
@@ -39,3 +41,7 @@ ignore = [
     "B007",   # Loop control variable not used within loop body
     "B905",   # zip() without strict= parameter
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["..", "."]
+

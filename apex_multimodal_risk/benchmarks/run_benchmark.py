@@ -15,7 +15,6 @@ from typing import Any
 
 import httpx
 import pandas as pd
-
 from apex_multimodal_risk.src.utils import PROJECT_ROOT, setup_logger
 
 logger = setup_logger("run_benchmark")

@@ -17,7 +17,6 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import pytest
-
 from apex_multimodal_risk.src.utils import PROJECT_ROOT, load_config, read_parquet_utc
 
 

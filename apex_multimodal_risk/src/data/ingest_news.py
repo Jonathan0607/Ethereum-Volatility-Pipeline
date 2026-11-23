@@ -11,8 +11,6 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import pandas as pd
-from datasets import load_dataset
-
 from apex_multimodal_risk.src.utils import (
     PROJECT_ROOT,
     enforce_utc_columns,
@@ -20,6 +18,7 @@ from apex_multimodal_risk.src.utils import (
     load_config,
     setup_logger,
 )
+from datasets import load_dataset
 
 logger = setup_logger("ingest_news")
 

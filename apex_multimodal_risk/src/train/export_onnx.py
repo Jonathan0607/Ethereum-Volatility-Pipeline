@@ -21,12 +21,11 @@ import onnxmltools
 import onnxruntime as ort
 import pandas as pd
 import torch
+from apex_multimodal_risk.src.models.itransformer import iTransformerOnlyModel
+from apex_multimodal_risk.src.utils import PROJECT_ROOT, setup_logger
 from onnxmltools.convert.common.data_types import FloatTensorType
 from onnxruntime.quantization import QuantType, quantize_dynamic
 from torch import nn
-
-from apex_multimodal_risk.src.models.itransformer import iTransformerOnlyModel
-from apex_multimodal_risk.src.utils import PROJECT_ROOT, setup_logger
 
 logger = setup_logger("export_onnx")
 

@@ -11,9 +11,8 @@ Dual Head:
 
 import torch
 import torch.nn.functional as F
-from torch import nn
-
 from apex_multimodal_risk.src.utils import setup_logger
+from torch import nn
 
 logger = setup_logger("itransformer")
 

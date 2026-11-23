@@ -10,6 +10,7 @@ Implements:
 
 
 import numpy as np
+from apex_multimodal_risk.src.utils import setup_logger
 from scipy.optimize import minimize_scalar
 from sklearn.metrics import (
     auc,
@@ -17,8 +18,6 @@ from sklearn.metrics import (
     precision_recall_curve,
     roc_auc_score,
 )
-
-from apex_multimodal_risk.src.utils import setup_logger
 
 logger = setup_logger("calibration")
 

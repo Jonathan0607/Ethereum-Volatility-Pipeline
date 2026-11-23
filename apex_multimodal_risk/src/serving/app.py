@@ -18,14 +18,63 @@ from typing import Any
 import numpy as np
 import onnxruntime as ort
 import pandas as pd
-from fastapi import FastAPI, HTTPException, status
+from apex_multimodal_risk.src.models.conformal import MultiAssetDelayedFeedbackACI
+from apex_multimodal_risk.src.serving.drift_monitor import DriftMonitor
+from apex_multimodal_risk.src.utils import PROJECT_ROOT, setup_logger
+from fastapi import FastAPI, HTTPException, Response, status
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
 from pydantic import BaseModel, Field, field_validator
 from transformers import AutoTokenizer
 
-from apex_multimodal_risk.src.models.conformal import MultiAssetDelayedFeedbackACI
-from apex_multimodal_risk.src.utils import PROJECT_ROOT, setup_logger
-
 logger = setup_logger("serving_app")
+
+# ---------------------------------------------------------------------------
+# Prometheus Telemetry Metrics
+# ---------------------------------------------------------------------------
+SCORE_REQUESTS_TOTAL = Counter(
+    "apex_score_requests_total",
+    "Total scoring requests by asset and regime",
+    ["asset", "risk_regime"],
+)
+DEGRADED_FALLBACK_TOTAL = Counter(
+    "apex_degraded_fallback_total",
+    "Total degraded fallback responses",
+)
+INFERENCE_LATENCY = Histogram(
+    "apex_inference_latency_seconds",
+    "Inference latency in seconds",
+    buckets=[0.002, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 1.0],
+)
+MICROBATCH_SIZE = Histogram(
+    "apex_microbatch_size",
+    "Dynamic micro-batch size processed",
+    buckets=[1, 2, 4, 8, 12, 16, 24, 32],
+)
+HEADLINE_CACHE_EVENTS = Counter(
+    "apex_headline_cache_events_total",
+    "Headline embedding cache events (hits and misses)",
+    ["result"],
+)
+ACI_ALPHA_LEVEL = Gauge(
+    "apex_aci_alpha_level",
+    "Current adaptive conformal inference quantile level",
+    ["asset"],
+)
+FEATURE_PSI = Gauge(
+    "apex_feature_psi",
+    "Population Stability Index of input feature",
+    ["feature"],
+)
+EMBEDDING_CENTROID_SHIFT = Gauge(
+    "apex_embedding_centroid_shift",
+    "7-day rolling embedding centroid cosine shift",
+)
 
 # ---------------------------------------------------------------------------
 # Bounded LRU Cache for Headline Embeddings
@@ -53,9 +102,11 @@ class BoundedLRUCache:
                     self.cache.move_to_end(clean_key)
                     hits[idx] = self.cache[clean_key]
                     self.hits_count += 1
+                    HEADLINE_CACHE_EVENTS.labels(result="hit").inc()
                 else:
                     misses.append((idx, clean_key))
                     self.misses_count += 1
+                    HEADLINE_CACHE_EVENTS.labels(result="miss").inc()
         return hits, misses
 
     def set_many(self, items: list[tuple[str, np.ndarray]]):
@@ -106,6 +157,7 @@ class EngineState:
         self.scaler_means: np.ndarray | None = None
         self.scaler_stds: np.ndarray | None = None
         self.embedding_cache: BoundedLRUCache = BoundedLRUCache(maxsize=4096)
+        self.drift_monitor: DriftMonitor | None = None
         self.total_score_requests: int = 0
         self.degraded_fallback_count: int = 0
 
@@ -276,6 +328,7 @@ class DynamicMicroBatcher:
         n_items = len(items)
         if n_items == 0:
             return
+        MICROBATCH_SIZE.observe(n_items)
 
         meta = state.metadata
         platt_a = meta.get("platt_a", 1.0)
@@ -394,6 +447,27 @@ class DynamicMicroBatcher:
             z = np.log(np.clip(raw_probs, 1e-12, 1.0 - 1e-12) / (1.0 - np.clip(raw_probs, 1e-12, 1.0 - 1e-12)))
             p_calibrated = 1.0 / (1.0 + np.exp(-(platt_a * z + platt_b)))
 
+        # Feed served features and headline embeddings to Drift Monitor
+        if state.drift_monitor:
+            features_to_record = []
+            embeddings_to_record = []
+            for idx, it in enumerate(items):
+                feat_dict = {
+                    "realized_vol_72h": float(X_batch[idx, 5]),
+                    "skew_72h": float(X_batch[idx, 8]),
+                    "funding_zscore": float(X_batch[idx, 11]),
+                    "oi_delta_48h": float(X_batch[idx, 12]),
+                    "embedding_novelty_score": float(nov_scores[idx]),
+                }
+                features_to_record.append(feat_dict)
+                emb = None
+                if idx in nlp_indices:
+                    local_idx = nlp_indices.index(idx)
+                    if local_idx < len(embs_list) and embs_list[local_idx] is not None:
+                        emb = embs_list[local_idx]
+                embeddings_to_record.append(emb)
+            state.drift_monitor.record_batch(features_to_record, embeddings_to_record)
+
         # 4. ACI Conformal VaR and Responses
         now_utc = pd.Timestamp.now(tz=UTC)
         for idx, it in enumerate(items):
@@ -432,6 +506,9 @@ class DynamicMicroBatcher:
                 degraded_fallback=False,
                 latency_ms=round(latency, 2),
             )
+            SCORE_REQUESTS_TOTAL.labels(asset=asset, risk_regime=regime).inc()
+            INFERENCE_LATENCY.observe(latency / 1000.0)
+            ACI_ALPHA_LEVEL.labels(asset=asset).set(alpha_t)
             it.future.set_result(resp)
 
 
@@ -507,6 +584,11 @@ async def lifespan(app: FastAPI):
     # 5. Start dynamic micro-batcher
     state.micro_batcher = DynamicMicroBatcher(max_batch_size=16, max_wait_ms=2.0)
     state.micro_batcher.start()
+
+    # 6. Initialize live distribution & embedding drift monitor
+    drift_base_path = PROJECT_ROOT / "apex_multimodal_risk/configs/drift_baseline.json"
+    state.drift_monitor = DriftMonitor(baseline_path=drift_base_path)
+    logger.info("Initialized DriftMonitor (configs/drift_baseline.json)")
 
     yield
 
@@ -586,6 +668,9 @@ async def score_risk(req: ScoreRequest):
     except TimeoutError:
         state.degraded_fallback_count += 1
         elapsed = (time.perf_counter() - t0) * 1000.0
+        DEGRADED_FALLBACK_TOTAL.inc()
+        SCORE_REQUESTS_TOTAL.labels(asset=req.asset, risk_regime="DEGRADED_FALLBACK").inc()
+        INFERENCE_LATENCY.observe(elapsed / 1000.0)
         logger.warning(f"SLA budget ({req.timeout_ms:.1f}ms) exceeded ({elapsed:.1f}ms) for asset {req.asset}. Returning degraded fallback.")
         return ScoreResponse(
             asset=req.asset,
@@ -627,13 +712,16 @@ async def submit_feedback(req: FeedbackRequest):
         )
 
         loss_val = float(step_res.get("loss", 0.0))
+        new_alpha = float(step_res["alpha_t"])
+        ACI_ALPHA_LEVEL.labels(asset=req.asset).set(new_alpha)
+
         return FeedbackResponse(
             asset=req.asset,
-            updated_alpha_t=round(float(step_res["alpha_t"]), 4),
+            updated_alpha_t=round(new_alpha, 4),
             buffer_size=int(step_res.get("buffer_len", len(state.aci_manager.get_engine(req.asset).residual_buffer))),
             loss_applied=True,
             violation=bool(loss_val > 0.5),
-            message=f"ACI feedback applied successfully for {req.asset}. New alpha_t={step_res['alpha_t']:.4f}.",
+            message=f"ACI feedback applied successfully for {req.asset}. New alpha_t={new_alpha:.4f}.",
         )
     except Exception as e:
         logger.exception(f"Error applying ACI feedback: {e}")
@@ -641,3 +729,37 @@ async def submit_feedback(req: FeedbackRequest):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"ACI causal error: {e!s}",
         ) from e
+
+
+@app.get("/v1/drift")
+async def get_drift_status():
+    """
+    Returns live distribution and embedding drift monitor status,
+    feature PSI values, 2-sample KS-test statistics, and centroid cosine shift.
+    """
+    if not state.drift_monitor:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Drift monitor not initialized.",
+        )
+
+    report = state.drift_monitor.evaluate()
+    # Update Prometheus gauges
+    for feat, f_data in report["features"].items():
+        FEATURE_PSI.labels(feature=feat).set(f_data["psi"])
+    EMBEDDING_CENTROID_SHIFT.set(report["embedding_centroid_shift"])
+    return report
+
+
+@app.get("/metrics")
+async def metrics():
+    """
+    Exposes standard Prometheus scrape metrics.
+    """
+    if state.drift_monitor:
+        report = state.drift_monitor.evaluate()
+        for feat, f_data in report["features"].items():
+            FEATURE_PSI.labels(feature=feat).set(f_data["psi"])
+        EMBEDDING_CENTROID_SHIFT.set(report["embedding_centroid_shift"])
+
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)

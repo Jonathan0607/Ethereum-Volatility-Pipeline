@@ -13,9 +13,8 @@ Tests:
 
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
-
 from apex_multimodal_risk.src.serving.app import app
+from fastapi.testclient import TestClient
 
 
 @pytest.fixture(scope="module")
@@ -163,3 +162,40 @@ def test_dynamic_micro_batching_concurrent(client):
         assert data["degraded_fallback"] is False
         assert 0.0 <= data["p_crash_cal"] <= 1.0
         assert data["latency_ms"] > 0.0
+
+
+def test_prometheus_metrics_endpoint(client):
+    """Test Prometheus metrics endpoint exposes all required counters, histograms and gauges."""
+    resp = client.get("/metrics")
+    assert resp.status_code == 200
+    text = resp.text
+
+    # Assert required metric names are present
+    assert "apex_score_requests_total" in text
+    assert "apex_degraded_fallback_total" in text
+    assert "apex_inference_latency_seconds" in text
+    assert "apex_microbatch_size" in text
+    assert "apex_headline_cache_events_total" in text
+    assert "apex_aci_alpha_level" in text
+    assert "apex_feature_psi" in text
+    assert "apex_embedding_centroid_shift" in text
+
+
+def test_drift_status_endpoint(client):
+    """Test GET /v1/drift returns report structure, feature PSIs, KS stats and centroid shift."""
+    resp = client.get("/v1/drift")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["status"] in ["OK", "WARN", "CRITICAL"]
+    assert "embedding_centroid_shift" in data
+    assert "features" in data
+
+    core_feats = ["realized_vol_72h", "skew_72h", "funding_zscore", "oi_delta_48h", "embedding_novelty_score"]
+    for feat in core_feats:
+        assert feat in data["features"]
+        f_info = data["features"][feat]
+        assert "psi" in f_info
+        assert "ks_statistic" in f_info
+        assert "ks_p_value" in f_info
+        assert "drift_detected" in f_info

@@ -8,9 +8,8 @@ Baseline Models for Tail Risk Forecasting.
 
 import lightgbm as lgb
 import numpy as np
-from sklearn.linear_model import LogisticRegression
-
 from apex_multimodal_risk.src.utils import setup_logger
+from sklearn.linear_model import LogisticRegression
 
 logger = setup_logger("baselines")
 

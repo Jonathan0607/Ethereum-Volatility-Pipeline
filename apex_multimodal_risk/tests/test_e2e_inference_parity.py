@@ -13,9 +13,6 @@ import pickle
 import numpy as np
 import pytest
 import torch
-from fastapi.testclient import TestClient
-from sentence_transformers import SentenceTransformer
-
 from apex_multimodal_risk.src.features.shared_features import (
     MARKET_NUMERICAL_COLS,
     load_and_merge_features_and_targets,
@@ -24,6 +21,8 @@ from apex_multimodal_risk.src.models.itransformer import iTransformerOnlyModel
 from apex_multimodal_risk.src.serving.app import app
 from apex_multimodal_risk.src.train.train_ablation import build_lookback_tensor
 from apex_multimodal_risk.src.utils import PROJECT_ROOT
+from fastapi.testclient import TestClient
+from sentence_transformers import SentenceTransformer
 
 
 @pytest.fixture(scope="module")

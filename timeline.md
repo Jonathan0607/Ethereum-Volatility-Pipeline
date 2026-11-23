@@ -670,3 +670,43 @@
      - Re-ran complete `pytest` test suite (`test_no_leakage.py`, `test_cpcv_integrity.py`, `test_conformal_causal.py`, `test_serving_api.py`, `test_e2e_inference_parity.py`): **24/24 passed (100% green)** in 10.53s.
      - Reconciled all EXP-003e figures in `timeline.md` against live script outputs: 0 contradictions, 100% bitwise matching across walk-forward backtest metrics, Locust latency percentiles (Profile 1 p99 180ms, Profile 2 p99 52ms with 0.00% fallbacks), and 4-shock crisis returns.
 - **Verdict & Next Step:** `[PASSED / REPO INTEGRITY VERIFIED]` - Zero defects remain across Sprints 1–3. Frozen champion `research/apex_v45_champion.py` untouched. Fully prepared for final review and Sprint 4.
+
+## [2026-11-23] - SPRINT 4A: Prometheus Telemetry, Strict Online Train-Serve Feature Parity & Live Drift Monitoring (`EXP-004a`)
+- **Git Branch:** `feat/multimodal-risk-mle`
+- **Scope & Objective:**
+  Execute Sprint 4A implementing Prometheus telemetry in FastAPI serving microservice, building a strictly causal incremental feature calculator (`OnlineFeatureState`), verifying train-serve parity across 500 consecutive historical hours, and deploying live feature distribution & embedding centroid drift monitoring.
+- **Key Deliverables & Results:**
+  1. *Prometheus Telemetry (`src/serving/app.py`):*
+     - Pinned `prometheus_client>=0.20.0` and `scipy>=1.12.0` in `requirements.txt` and `pyproject.toml`.
+     - Exposed standard scrape endpoint `GET /metrics` reporting:
+       * `apex_score_requests_total{asset, risk_regime}` (Counter)
+       * `apex_degraded_fallback_total` (Counter)
+       * `apex_inference_latency_seconds` (Histogram)
+       * `apex_microbatch_size` (Histogram)
+       * `apex_headline_cache_events_total{result="hit|miss"}` (Counter — non-empty headlines only)
+       * `apex_aci_alpha_level{asset}` (Gauge)
+       * `apex_feature_psi{feature}` (Gauges for 5 core features)
+       * `apex_embedding_centroid_shift` (Gauge)
+  2. *Strict Online Train-Serve Feature Parity (`src/features/shared_features.py` + `tests/test_train_serve_parity.py`):*
+     - Implemented stateful incremental feature engine `OnlineFeatureState`:
+       * 16 market features: log returns (1h, 6h, 24h, 72h), realized volatility (24h, 72h, 168h), GARCH/EWMA vol, return skewness (72h, 168h, 336h, causally shifted by 1 bar), funding rate 720h z-score (shifted 1 bar), open interest 48h delta & 720h z-score (shifted 1 bar), cross-asset dispersion and percentile rank.
+       * 4 gated NLP features: 7-day trailing news embedding centroid and cosine distance novelty, 5-prototype cosine similarities (24h max), sparse threshold gates (`tau_nov = 0.2880`, `tau_proto = 0.7179`), exogenous alert flag, and causal news burst ratio.
+     - Verified parity by feeding 500 consecutive historical hours (1,500 asset-bars) step-by-step:
+       * **16-Market Feature Abs Diff:** `0.0000000000e+00` (threshold $< 10^{-6}$ — exact machine precision match).
+       * **4-Gated NLP Feature Abs Diff:** `2.3841857910e-07` (threshold $< 10^{-5}$).
+       * **Calibrated $p_{\text{crash}}$ Abs Diff:** `0.0000000000e+00` through ONNX runtime + Platt calibration (threshold $< 10^{-4}$).
+  3. *Live Distribution & Embedding Drift Monitoring (`src/serving/drift_monitor.py` + `configs/drift_baseline.json` + `tests/test_drift_monitor.py`):*
+     - Created `src/serving/generate_drift_baseline.py` generating 10-quantile bin edges, expected proportions, and 500 reference samples for 5 core features (`realized_vol_72h`, `skew_72h`, `funding_zscore`, `oi_delta_48h`, `embedding_novelty_score`) plus the 384-dim normalized reference news embedding centroid saved to `configs/drift_baseline.json`.
+     - Implemented `DriftMonitor` evaluating rolling PSI, two-sample KS test (`scipy.stats.ks_2samp`), and 7-day embedding centroid cosine shift.
+     - Classifies drift status:
+       * `OK`: $\text{PSI} \le 0.10$ and $\text{shift} \le 0.15$.
+       * `WARN`: $\text{PSI} > 0.10$ or $\text{shift} > 0.15$.
+       * `CRITICAL`: $\text{PSI} > 0.25$ or $\text{shift} > 0.25$.
+     - Exposed real-time drift report via `GET /v1/drift`.
+     - Verified in `tests/test_drift_monitor.py`: in-distribution status == `OK` ($\text{max PSI} \le 0.10$), synthetic 5x volatility shock triggers status == `CRITICAL` ($\text{PSI} > 0.25$), inverted news embeddings trigger status == `CRITICAL` ($\text{shift} > 1.90$).
+  4. *Verification & Hygiene:*
+     - `ruff check apex_multimodal_risk/`: **All checks passed! (0 errors)**.
+     - `pytest apex_multimodal_risk/tests/`: **31/31 passed (100% green)** in 14.44s.
+     - Frozen champion `research/apex_v45_champion.py` strictly untouched.
+     - Zero binary artifacts staged in git (`configs/drift_baseline.json` is small text JSON).
+- **Verdict & Next Step:** `[PASSED / SPRINT 4A COMPLETE]` - Microservice telemetry, stateful incremental train-serve parity, and drift monitoring fully productionized. Ready for final review / Sprint 4B.

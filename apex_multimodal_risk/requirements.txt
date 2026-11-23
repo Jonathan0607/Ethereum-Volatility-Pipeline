@@ -25,3 +25,5 @@ locust>=2.24.0
 urllib3>=2.0.0
 onnxscript
 ruff>=0.9.0
+prometheus_client>=0.20.0
+scipy>=1.12.0

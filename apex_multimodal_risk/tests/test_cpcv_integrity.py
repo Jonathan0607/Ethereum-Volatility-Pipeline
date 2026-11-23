@@ -10,7 +10,6 @@ Verifies:
 import numpy as np
 import pandas as pd
 import pytest
-
 from apex_multimodal_risk.src.train.cpcv_runner import generate_cpcv_splits
 from apex_multimodal_risk.src.utils import PROJECT_ROOT, read_parquet_utc
 
