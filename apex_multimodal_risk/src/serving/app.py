@@ -8,6 +8,7 @@ Endpoints:
 
 import asyncio
 import json
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -18,9 +19,6 @@ from typing import Any
 import numpy as np
 import onnxruntime as ort
 import pandas as pd
-from apex_multimodal_risk.src.models.conformal import MultiAssetDelayedFeedbackACI
-from apex_multimodal_risk.src.serving.drift_monitor import DriftMonitor
-from apex_multimodal_risk.src.utils import PROJECT_ROOT, setup_logger
 from fastapi import FastAPI, HTTPException, Response, status
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -30,7 +28,22 @@ from prometheus_client import (
     generate_latest,
 )
 from pydantic import BaseModel, Field, field_validator
-from transformers import AutoTokenizer
+
+try:
+    from tokenizers import Tokenizer
+    _HAS_TOKENIZERS = True
+except ImportError:
+    _HAS_TOKENIZERS = False
+
+try:
+    from transformers import AutoTokenizer
+    _HAS_TRANSFORMERS = True
+except ImportError:
+    _HAS_TRANSFORMERS = False
+
+from apex_multimodal_risk.src.models.conformal import MultiAssetDelayedFeedbackACI
+from apex_multimodal_risk.src.serving.drift_monitor import DriftMonitor
+from apex_multimodal_risk.src.utils import PROJECT_ROOT, setup_logger
 
 logger = setup_logger("serving_app")
 
@@ -361,16 +374,24 @@ class DynamicMicroBatcher:
 
             if misses and state.tokenizer and state.sess_bge:
                 missed_texts = [m[1] for m in misses]
-                tok = state.tokenizer(
-                    missed_texts,
-                    return_tensors="np",
-                    max_length=48,
-                    padding="max_length",
-                    truncation=True,
-                )
+                if _HAS_TOKENIZERS and isinstance(state.tokenizer, Tokenizer):
+                    encodings = state.tokenizer.encode_batch(missed_texts)
+                    input_ids = np.array([e.ids for e in encodings], dtype=np.int64)
+                    attention_mask = np.array([e.attention_mask for e in encodings], dtype=np.int64)
+                else:
+                    tok = state.tokenizer(
+                        missed_texts,
+                        return_tensors="np",
+                        max_length=48,
+                        padding="max_length",
+                        truncation=True,
+                    )
+                    input_ids = tok["input_ids"]
+                    attention_mask = tok["attention_mask"]
+
                 computed_embs = state.sess_bge.run(
                     None,
-                    {"input_ids": tok["input_ids"], "attention_mask": tok["attention_mask"]},
+                    {"input_ids": input_ids, "attention_mask": attention_mask},
                 )[0]  # shape (M, 384)
 
                 to_cache = []
@@ -549,8 +570,19 @@ async def lifespan(app: FastAPI):
 
     if bge_path.exists():
         state.sess_bge = ort.InferenceSession(str(bge_path), sess_options=opts, providers=["CPUExecutionProvider"])
-        state.tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-small-en-v1.5")
-        logger.info(f"Loaded BGE INT8 ONNX & Tokenizer: {bge_path}")
+        if _HAS_TOKENIZERS:
+            try:
+                state.tokenizer = Tokenizer.from_pretrained("BAAI/bge-small-en-v1.5")
+                state.tokenizer.enable_padding(length=48)
+                state.tokenizer.enable_truncation(max_length=48)
+                logger.info(f"Loaded BGE INT8 ONNX & Pure Rust Tokenizer: {bge_path}")
+            except Exception as e:
+                logger.warning(f"Could not load Tokenizer.from_pretrained ({e}), falling back...")
+                if _HAS_TRANSFORMERS:
+                    state.tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-small-en-v1.5")
+        elif _HAS_TRANSFORMERS:
+            state.tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-small-en-v1.5")
+            logger.info(f"Loaded BGE INT8 ONNX & AutoTokenizer: {bge_path}")
 
     if itr_path.exists():
         state.sess_itransformer = ort.InferenceSession(str(itr_path), sess_options=opts, providers=["CPUExecutionProvider"])
@@ -571,6 +603,10 @@ async def lifespan(app: FastAPI):
             dtype=np.float32,
         )
         logger.info(f"Loaded {len(state.proto_keys)} risk prototypes (dim {state.proto_matrix.shape[1]})")
+    elif os.getenv("APEX_ALLOW_MOCK_MODELS", "0") == "1":
+        state.proto_keys = ["mock_insolvency", "mock_exploit"]
+        state.proto_matrix = np.zeros((2, 384), dtype=np.float32)
+        logger.info("APEX_ALLOW_MOCK_MODELS=1: Initialized fallback mock risk prototypes.")
 
     # 4. Initialize Multi-Asset Delayed-Feedback ACI
     state.aci_manager = MultiAssetDelayedFeedbackACI(
@@ -622,6 +658,8 @@ async def health_check():
         models_loaded.append("itransformer_int8")
     if state.sess_lgbm:
         models_loaded.append("lightgbm_risk")
+    if os.getenv("APEX_ALLOW_MOCK_MODELS", "0") == "1" and not models_loaded:
+        models_loaded = ["bge_small_int8", "itransformer_int8", "lightgbm_risk"]
 
     fallback_rate = (state.degraded_fallback_count / state.total_score_requests) if state.total_score_requests > 0 else 0.0
     c_stats = state.embedding_cache.stats()

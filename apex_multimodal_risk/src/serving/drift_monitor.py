@@ -17,8 +17,9 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from apex_multimodal_risk.src.utils import PROJECT_ROOT, setup_logger
 from scipy.stats import ks_2samp
+
+from apex_multimodal_risk.src.utils import PROJECT_ROOT, setup_logger
 
 logger = setup_logger("drift_monitor")
 

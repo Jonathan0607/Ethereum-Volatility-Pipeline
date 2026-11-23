@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   lint-and-test:
-    name: Lint & Unit Tests (Fresh Clone)
+    name: Lint & Lean Unit Tests (Fresh Clone)
     runs-on: ubuntu-latest
 
     steps:
@@ -28,19 +28,21 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
-          cache-dependency-path: "apex_multimodal_risk/requirements.txt"
+          cache-dependency-path: "apex_multimodal_risk/requirements-serving.txt"
 
-      - name: Install dependencies
+      - name: Install Lean CI Dependencies (< 45s, Zero PyTorch)
         run: |
           python -m pip install --upgrade pip
-          pip install -r apex_multimodal_risk/requirements.txt
+          pip install -r apex_multimodal_risk/requirements-serving.txt
+          pip install pytest ruff scikit-learn
 
       - name: Run Ruff Linter
         run: |
-          ruff check apex_multimodal_risk/
+          ruff check --config apex_multimodal_risk/pyproject.toml apex_multimodal_risk/
 
       - name: Run Pytest (Zero Local Artifacts)
         env:
           PYTHONPATH: .
+          APEX_ALLOW_MOCK_MODELS: "1"
         run: |
-          pytest apex_multimodal_risk/tests/ -m "not requires_local_artifacts" -v
+          pytest -c apex_multimodal_risk/pyproject.toml apex_multimodal_risk/tests/ -m "not requires_local_artifacts" -v

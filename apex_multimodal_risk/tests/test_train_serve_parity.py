@@ -13,16 +13,17 @@ import numpy as np
 import onnxruntime as ort
 import pandas as pd
 import pytest
+
 from apex_multimodal_risk.src.features.shared_features import (
     MARKET_NUMERICAL_COLS,
     OnlineFeatureState,
 )
-from apex_multimodal_risk.src.train.exp002e_nlp_angles import engineer_nlp_features_and_targets
 from apex_multimodal_risk.src.utils import PROJECT_ROOT, read_parquet_utc
 
 
 @pytest.fixture(scope="module")
 def setup_parity_data():
+    from apex_multimodal_risk.src.train.exp002e_nlp_angles import engineer_nlp_features_and_targets
     eval_panel, _ = engineer_nlp_features_and_targets()
     news_df = read_parquet_utc("apex_multimodal_risk/data/processed/news_dedup.parquet")
     news_df = news_df.sort_values("ingested_at").reset_index(drop=True)

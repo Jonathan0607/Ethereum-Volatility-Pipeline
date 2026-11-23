@@ -15,6 +15,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from sentence_transformers import SentenceTransformer
+
 from apex_multimodal_risk.src.utils import (
     PROJECT_ROOT,
     enforce_utc_columns,
@@ -23,7 +25,6 @@ from apex_multimodal_risk.src.utils import (
     load_config,
     setup_logger,
 )
-from sentence_transformers import SentenceTransformer
 
 logger = setup_logger("noise_filter")
 

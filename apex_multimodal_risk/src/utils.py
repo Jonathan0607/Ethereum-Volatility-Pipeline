@@ -10,7 +10,6 @@ from typing import Any
 
 import duckdb
 import pandas as pd
-import torch
 import yaml
 
 _env_root = os.environ.get("APEX_PROJECT_ROOT")
@@ -33,13 +32,15 @@ def setup_logger(name: str = "apex_risk", level: int = logging.INFO) -> logging.
     return logger
 
 
-def get_device() -> torch.device:
+def get_device():
     """
     Selects the optimal hardware acceleration device:
     1. Apple Silicon MPS (Metal Performance Shaders) if available.
     2. NVIDIA CUDA if available.
     3. CPU fallback.
     """
+    import torch
+
     if torch.backends.mps.is_available() and torch.backends.mps.is_built():
         return torch.device("mps")
     elif torch.cuda.is_available():

@@ -22,6 +22,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import numpy as np
+
 from apex_multimodal_risk.src.features.shared_features import load_and_merge_features_and_targets
 from apex_multimodal_risk.src.utils import PROJECT_ROOT, read_parquet_utc, setup_logger
 

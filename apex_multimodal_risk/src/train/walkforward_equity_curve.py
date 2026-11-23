@@ -47,6 +47,7 @@ import torch
 matplotlib.use("Agg")
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+
 from apex_multimodal_risk.src.features.shared_features import (
     MARKET_NUMERICAL_COLS,
 )

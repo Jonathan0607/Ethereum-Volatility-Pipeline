@@ -36,6 +36,7 @@ import httpx
 import numpy as np
 import pandas as pd
 import redis.asyncio as aioredis
+
 from apex_multimodal_risk.src.features.shared_features import OnlineFeatureState
 from apex_multimodal_risk.src.utils import PROJECT_ROOT, read_parquet_utc, setup_logger
 

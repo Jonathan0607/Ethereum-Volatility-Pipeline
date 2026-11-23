@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
+
 from apex_multimodal_risk.src.features.shared_features import (
     MARKET_NUMERICAL_COLS,
     CPCVStandardScaler,
@@ -167,9 +168,10 @@ def run_audit_c() -> dict[str, Any]:
     logger.info("RUNNING AUDIT C: E2E INFERENCE PARITY & WORST-CASE BAR AUDIT")
     logger.info("=" * 80)
 
-    from apex_multimodal_risk.src.serving.app import app
     from fastapi.testclient import TestClient
     from sentence_transformers import SentenceTransformer
+
+    from apex_multimodal_risk.src.serving.app import app
 
     df = load_and_merge_features_and_targets()
     eval_panel = df.loc[df["target_valid"]].copy().reset_index(drop=True)

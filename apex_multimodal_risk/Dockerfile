@@ -10,9 +10,9 @@ RUN useradd -m -u 1000 appuser
 
 WORKDIR /app
 
-# Copy dependency specification and install
-COPY requirements.txt /app/apex_multimodal_risk/requirements.txt
-RUN pip install --no-cache-dir -r /app/apex_multimodal_risk/requirements.txt
+# Copy lean serving dependency specification and install
+COPY requirements-serving.txt /app/apex_multimodal_risk/requirements-serving.txt
+RUN pip install --no-cache-dir -r /app/apex_multimodal_risk/requirements-serving.txt
 
 # Copy application source tree and configurations
 COPY . /app/apex_multimodal_risk/

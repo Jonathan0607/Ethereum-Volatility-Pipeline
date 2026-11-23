@@ -28,6 +28,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.metrics import auc, f1_score, precision_recall_curve
+from torch import nn
+from torch.utils.data import DataLoader, Dataset
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
 from apex_multimodal_risk.src.train.cpcv_runner import CPCVSplit
 from apex_multimodal_risk.src.utils import (
     PROJECT_ROOT,
@@ -35,10 +40,6 @@ from apex_multimodal_risk.src.utils import (
     get_device,
     setup_logger,
 )
-from sklearn.metrics import auc, f1_score, precision_recall_curve
-from torch import nn
-from torch.utils.data import DataLoader, Dataset
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 logger = setup_logger("text_encoder")
 

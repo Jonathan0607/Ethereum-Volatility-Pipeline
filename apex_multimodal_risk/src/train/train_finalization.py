@@ -20,6 +20,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
+from torch.utils.data import DataLoader, TensorDataset
+
 from apex_multimodal_risk.src.features.shared_features import (
     MARKET_NUMERICAL_COLS,
     CPCVStandardScaler,
@@ -47,7 +49,6 @@ from apex_multimodal_risk.src.utils import (
     read_parquet_utc,
     setup_logger,
 )
-from torch.utils.data import DataLoader, TensorDataset
 
 logger = setup_logger("train_finalization")
 

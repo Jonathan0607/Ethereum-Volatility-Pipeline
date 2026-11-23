@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+
 from apex_multimodal_risk.src.utils import (
     PROJECT_ROOT,
     enforce_utc_columns,

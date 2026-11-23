@@ -10,6 +10,7 @@ Tests:
 
 import numpy as np
 import pytest
+
 from apex_multimodal_risk.src.serving.drift_monitor import CORE_DRIFT_FEATURES, DriftMonitor
 from apex_multimodal_risk.src.utils import PROJECT_ROOT
 

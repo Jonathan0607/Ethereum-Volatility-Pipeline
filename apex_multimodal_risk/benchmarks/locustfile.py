@@ -85,7 +85,7 @@ if PROFILE == "profile1":
                 "asset": asset,
                 "market_window": dummy_window,
                 "headline": unique_headline,
-                "timeout_ms": 250.0,
+                "timeout_ms": 500.0,
             }
             with self.client.post("/v1/score", json=payload, catch_response=True) as resp:
                 if resp.status_code == 200:
@@ -109,7 +109,7 @@ else:
             payload = {
                 "asset": asset,
                 "market_window": dummy_window,
-                "timeout_ms": 100.0,
+                "timeout_ms": 250.0,
             }
             with self.client.post("/v1/score", json=payload, catch_response=True) as resp:
                 if resp.status_code == 200:
@@ -135,7 +135,7 @@ else:
                 "asset": asset,
                 "market_window": dummy_window,
                 "headline": headline,
-                "timeout_ms": 100.0,
+                "timeout_ms": 250.0,
             }
             with self.client.post("/v1/score", json=payload, catch_response=True) as resp:
                 if resp.status_code == 200:

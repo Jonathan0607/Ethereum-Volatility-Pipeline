@@ -13,6 +13,7 @@ Verifies:
 import asyncio
 
 import httpx
+
 from apex_multimodal_risk.src.serving.app import app, state
 from apex_multimodal_risk.src.serving.shadow_stream import (
     ShadowStreamWorker,

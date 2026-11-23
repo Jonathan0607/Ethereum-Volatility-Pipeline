@@ -13,8 +13,9 @@ Tests:
 
 import numpy as np
 import pytest
-from apex_multimodal_risk.src.serving.app import app
 from fastapi.testclient import TestClient
+
+from apex_multimodal_risk.src.serving.app import app
 
 pytestmark = pytest.mark.requires_local_artifacts
 
