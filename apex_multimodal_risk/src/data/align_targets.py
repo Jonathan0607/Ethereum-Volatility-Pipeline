@@ -104,11 +104,13 @@ def align_news_to_bars(
     """
     n_bars = len(market_df)
     bar_timestamps = pd.to_datetime(market_df.index, utc=True)
-    bar_secs = (bar_timestamps.astype("int64") // 10**9).to_numpy()
+    bar_divisor = 1_000_000 if "us" in str(bar_timestamps.dtype) else 1_000_000_000
+    bar_secs = (bar_timestamps.astype("int64") // bar_divisor).to_numpy()
     
     # News timestamps and embeddings (strictly UTC)
     ingested_dt = pd.to_datetime(news_df["ingested_at"], utc=True)
-    news_secs = (ingested_dt.astype("int64") // 10**9).to_numpy()
+    news_divisor = 1_000_000 if "us" in str(ingested_dt.dtype) else 1_000_000_000
+    news_secs = (ingested_dt.astype("int64") // news_divisor).to_numpy()
     embs = np.array(news_df["embedding"].to_list(), dtype=np.float32)
     
     # Entity masks

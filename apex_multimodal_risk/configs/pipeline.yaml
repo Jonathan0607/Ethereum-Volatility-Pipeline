@@ -83,3 +83,15 @@ causal_alignment:
   trailing_vol_lookback_hours: 72
   tail_vol_multiplier: 2.0
   aligned_parquet_path: "apex_multimodal_risk/data/processed/aligned_hourly.parquet"
+
+text_encoder:
+  model_name: "microsoft/MiniLM-L12-H384-uncased"
+  max_length: 48
+  batch_size: 32
+  epochs: 3
+  freeze_bottom_layers: 10
+  lr_head: 5.0e-4
+  lr_backbone: 3.0e-5
+  weight_decay: 0.01
+  grad_clip: 1.0
+  cache_dir: "apex_multimodal_risk/data/processed/text_encoder_cpcv_cache"

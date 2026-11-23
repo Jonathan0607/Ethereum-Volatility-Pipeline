@@ -114,19 +114,18 @@ def test_aligned_news_strictly_causal(aligned_hourly_df, dedup_news_df):
     Asserts zero lookahead: for every bar T with news,
     all news items in the lookback window satisfy ingested_at <= T and published_at < T.
     """
-    news_times = dedup_news_df["ingested_at"].to_numpy()
-    pub_times = dedup_news_df["published_at"].to_numpy()
+    news_times = pd.to_datetime(dedup_news_df["ingested_at"], utc=True)
+    pub_times = pd.to_datetime(dedup_news_df["published_at"], utc=True)
     
     rows_with_news = aligned_hourly_df[aligned_hourly_df["news_count_24h"] > 0]
     sample = rows_with_news.sample(min(500, len(rows_with_news)), random_state=42)
     
     for _, row in sample.iterrows():
         bar_t = pd.to_datetime(row["timestamp"], utc=True)
-        bar_t_ns = bar_t.to_datetime64()
-        lookback_24h_ns = (bar_t - timedelta(hours=24)).to_datetime64()
+        lookback_24h = bar_t - pd.Timedelta(hours=24)
         
         # News items matching (T - 24h, T]
-        mask = (news_times > lookback_24h_ns) & (news_times <= bar_t_ns)
+        mask = (news_times > lookback_24h) & (news_times <= bar_t)
         matching_ingested = news_times[mask]
         matching_published = pub_times[mask]
         
@@ -134,8 +133,8 @@ def test_aligned_news_strictly_causal(aligned_hourly_df, dedup_news_df):
             f"Expected {row['news_count_24h']} items, found {len(matching_ingested)} at bar {bar_t}"
         )
         if len(matching_ingested) > 0:
-            assert np.all(matching_ingested <= bar_t_ns), "Violation: ingested_at > bar_t!"
-            assert np.all(matching_published < bar_t_ns), "Violation: published_at >= bar_t!"
+            assert (matching_ingested <= bar_t).all(), "Violation: ingested_at > bar_t!"
+            assert (matching_published < bar_t).all(), "Violation: published_at >= bar_t!"
 
 
 def test_semantic_dedup_no_similar_clusters_within_6h(dedup_news_df):

@@ -37,12 +37,17 @@ logs/
 /data/
 apex_multimodal_risk/data/
 *.parquet
+*.pt
 *.pth
+*.ckpt
 *.npy
 *.png
 *.pkl
 best_params.txt
 archive/
+mlruns/
+apex_multimodal_risk/mlruns/
+apex_multimodal_risk/artifacts/
 
 # Frontend builds & caches
 frontend/.next/
