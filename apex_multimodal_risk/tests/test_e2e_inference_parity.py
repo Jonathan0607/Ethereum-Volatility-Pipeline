@@ -7,25 +7,23 @@ Asserts:
 - raw_var_5pct Pearson correlation >= 0.998
 """
 
-import pickle
 import json
-from pathlib import Path
+import pickle
 
-import pytest
 import numpy as np
-import pandas as pd
+import pytest
 import torch
 from fastapi.testclient import TestClient
 from sentence_transformers import SentenceTransformer
 
-from apex_multimodal_risk.src.utils import PROJECT_ROOT
-from apex_multimodal_risk.src.serving.app import app
 from apex_multimodal_risk.src.features.shared_features import (
-    load_and_merge_features_and_targets,
     MARKET_NUMERICAL_COLS,
+    load_and_merge_features_and_targets,
 )
-from apex_multimodal_risk.src.train.train_ablation import build_lookback_tensor
 from apex_multimodal_risk.src.models.itransformer import iTransformerOnlyModel
+from apex_multimodal_risk.src.serving.app import app
+from apex_multimodal_risk.src.train.train_ablation import build_lookback_tensor
+from apex_multimodal_risk.src.utils import PROJECT_ROOT
 
 
 @pytest.fixture(scope="module")
@@ -61,7 +59,7 @@ def test_e2e_inference_parity(client):
     tau_proto = lgb_bundle["gate_thresholds"]["tau_proto"]
 
     st_model = SentenceTransformer("BAAI/bge-small-en-v1.5", device="cpu")
-    with open(artifacts_dir / "risk_prototypes.json", "r") as f:
+    with open(artifacts_dir / "risk_prototypes.json") as f:
         proto_data = json.load(f)
     proto_keys = list(proto_data["prototypes"].keys())
     proto_matrix = np.array([proto_data["prototypes"][k]["vector"] for k in proto_keys], dtype=np.float32)
@@ -147,7 +145,7 @@ def test_e2e_inference_parity(client):
     max_p_diff = float(np.max(p_diff))
     mean_p_diff = float(np.mean(p_diff))
 
-    print(f"\nAudit C Results on 200 Real Bars:")
+    print("\nAudit C Results on 200 Real Bars:")
     print(f"Max abs diff p_crash_cal: {max_p_diff:.6f} (target < 0.005)")
     print(f"Mean abs diff p_crash_cal: {mean_p_diff:.6f} (target < 0.0005)")
     print(f"raw_var_5pct Correlation: {corr_v:.6f} (target >= 0.998)")

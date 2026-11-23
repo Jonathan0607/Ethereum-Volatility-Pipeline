@@ -5,12 +5,10 @@ Baseline Models for Tail Risk Forecasting.
   plus aggregated 24h causal news features.
 """
 
-from typing import Dict, List, Optional, Tuple, Any
 
-import numpy as np
-import pandas as pd
-from sklearn.linear_model import LogisticRegression
 import lightgbm as lgb
+import numpy as np
+from sklearn.linear_model import LogisticRegression
 
 from apex_multimodal_risk.src.utils import setup_logger
 
@@ -106,7 +104,7 @@ class LightGBMBaseline:
         min_child_samples: int = 20,
         reg_lambda: float = 0.0,
         scale_pos_weight: float = 1.0,
-        class_weight: Optional[str] = None,
+        class_weight: str | None = None,
         is_unbalance: bool = False,
         random_state: int = 42,
     ):
@@ -132,7 +130,7 @@ class LightGBMBaseline:
         self,
         X_train: np.ndarray,
         y_train: np.ndarray,
-        eval_set: Optional[List[Tuple[np.ndarray, np.ndarray]]] = None,
+        eval_set: list[tuple[np.ndarray, np.ndarray]] | None = None,
     ) -> "LightGBMBaseline":
         callbacks = [lgb.early_stopping(stopping_rounds=20, verbose=False)] if eval_set else None
         self.model.fit(

@@ -14,57 +14,50 @@ Downstream Risk Overlay:
 MLflow tracking across all 10 splits, checkpointing best calibrated model to artifacts/.
 """
 
-import os
 import gc
-import sys
-import time
-import pickle
+import os
 import resource
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+import sys
+from typing import Any
 
+import mlflow
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
-import mlflow
 
-from apex_multimodal_risk.src.utils import (
-    setup_logger,
-    PROJECT_ROOT,
-    get_device,
-    enforce_utc_columns,
-    read_parquet_utc,
-)
 from apex_multimodal_risk.src.features.shared_features import (
-    load_and_merge_features_and_targets,
-    CPCVStandardScaler,
     MARKET_NUMERICAL_COLS,
-    NEWS_AGG_COLS,
-)
-from apex_multimodal_risk.src.train.cpcv_runner import generate_cpcv_splits, CPCVSplit
-from apex_multimodal_risk.src.train.calibration import (
-    PlattScaler,
-    compute_constant_prior_metrics,
-    compute_all_metrics,
+    CPCVStandardScaler,
+    load_and_merge_features_and_targets,
 )
 from apex_multimodal_risk.src.models.baselines import (
-    GARCHSkewBaseline,
-    LightGBMBaseline,
     GARCH_SKEW_FEATURES,
     LIGHTGBM_FEATURES,
+    GARCHSkewBaseline,
+    LightGBMBaseline,
 )
 from apex_multimodal_risk.src.models.itransformer import (
     iTransformerOnlyModel,
-    pinball_loss,
 )
 from apex_multimodal_risk.src.models.multimodal_fusion import (
     MultimodalCrossAttentionFusion,
 )
 from apex_multimodal_risk.src.models.text_encoder import (
     train_and_cache_cpcv_splits,
-    RISK_CLASS_NAMES,
+)
+from apex_multimodal_risk.src.train.calibration import (
+    PlattScaler,
+    compute_all_metrics,
+    compute_constant_prior_metrics,
+)
+from apex_multimodal_risk.src.train.cpcv_runner import generate_cpcv_splits
+from apex_multimodal_risk.src.utils import (
+    PROJECT_ROOT,
+    get_device,
+    read_parquet_utc,
+    setup_logger,
 )
 
 logger = setup_logger("train_ablation")
@@ -107,7 +100,7 @@ def prepare_tabular_data(
 
 def build_lookback_tensor(
     panel_df: pd.DataFrame,
-    feature_cols: List[str],
+    feature_cols: list[str],
     lookback_len: int = 48,
 ) -> np.ndarray:
     """
@@ -135,8 +128,8 @@ def build_lazy_news_index(
     panel_df: pd.DataFrame,
     news_df: pd.DataFrame,
     max_clusters: int = 16,
-    fold_risk_probs: Optional[np.ndarray] = None,
-) -> Tuple[torch.Tensor, np.ndarray, np.ndarray, np.ndarray]:
+    fold_risk_probs: np.ndarray | None = None,
+) -> tuple[torch.Tensor, np.ndarray, np.ndarray, np.ndarray]:
     """
     Constructs compact static news matrix (N_news, 392) and index arrays for causal lookup (T-24h, T]:
     - full_news_matrix: torch.FloatTensor of shape (N_news, 392) on CPU (~28.3 MB)
@@ -215,7 +208,7 @@ def eval_itransformer_batched(
     t_lb: torch.Tensor,
     device: torch.device,
     batch_size: int = 128,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     model.eval()
     loader = DataLoader(TensorDataset(t_lb), batch_size=batch_size, shuffle=False, num_workers=0)
     logits, probs, var_preds = [], [], []
@@ -237,7 +230,7 @@ def eval_multimodal_batched(
     full_news_matrix: torch.Tensor,
     device: torch.device,
     batch_size: int = 128,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     model.eval()
     loader = DataLoader(
         TensorDataset(t_lb, t_idx, t_rec, t_mask),
@@ -269,7 +262,7 @@ def run_downstream_thresholded_overlay(
     tau: float = 0.08,
     gamma: float = 4.0,
     floor: float = 0.25,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Executes surgical thresholded circuit-breaker risk overlay on APEX v45 champion returns.
     - Calm days (p <= tau): scale = 1.0 (zero drag on calm days)
@@ -278,18 +271,18 @@ def run_downstream_thresholded_overlay(
     sys.path.insert(0, str(PROJECT_ROOT / "research"))
     sys.path.insert(0, str(PROJECT_ROOT))
     from research.apex_v45_champion import (
-        load_data_and_features,
-        run_directional_engine,
-        run_spread_engine,
-        run_funding_arb_engine,
         UNIVERSE,
+        W_ARB,
         W_DIR,
         W_SPREAD,
-        W_ARB,
         fast_metrics,
+        load_data_and_features,
+        run_directional_engine,
+        run_funding_arb_engine,
+        run_spread_engine,
     )
 
-    dataset, processed, garch_wts, eval_index, n, split_idx, macro_regime, mtf_skew_mult, arb_mag_scale = (
+    dataset, processed, garch_wts, eval_index, n, _split_idx, macro_regime, mtf_skew_mult, arb_mag_scale = (
         load_data_and_features()
     )
 
@@ -341,7 +334,7 @@ def run_downstream_thresholded_overlay(
     }
 
 
-def execute_sprint2_ablation() -> Dict[str, Any]:
+def execute_sprint2_ablation() -> dict[str, Any]:
     """
     Executes full 4-Way CPCV Ablation Study with Platt Scaling and Materiality-Regularized Cross-Attention.
     """
@@ -430,12 +423,12 @@ def execute_sprint2_ablation() -> Dict[str, Any]:
         "iTransformer_Only",
         "Multimodal_iTransformer_NLP",
     ]
-    all_split_results: Dict[str, List[Dict[str, float]]] = {m: [] for m in model_names}
+    all_split_results: dict[str, list[dict[str, float]]] = {m: [] for m in model_names}
     best_multimodal_checkpoint = None
     best_multimodal_pr_auc = -1.0
-    all_oos_test_probs: Dict[str, List[np.ndarray]] = {m: [] for m in model_names}
-    all_train_cal_probs: Dict[str, List[np.ndarray]] = {m: [] for m in model_names}
-    all_oos_test_ts: List[pd.Series] = []
+    all_oos_test_probs: dict[str, list[np.ndarray]] = {m: [] for m in model_names}
+    all_train_cal_probs: dict[str, list[np.ndarray]] = {m: [] for m in model_names}
+    all_oos_test_ts: list[pd.Series] = []
 
     for split in splits:
         split_id = split.split_id

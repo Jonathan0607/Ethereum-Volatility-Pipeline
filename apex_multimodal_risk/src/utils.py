@@ -3,17 +3,19 @@ Utility functions for APEX Multimodal Risk Overlay.
 Device management, configuration loading, UTC timezone enforcement, and DuckDB interface.
 """
 
-import os
 import logging
-import yaml
+import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
-import torch
-import pandas as pd
 import duckdb
+import pandas as pd
+import torch
+import yaml
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_env_root = os.environ.get("APEX_PROJECT_ROOT")
+PROJECT_ROOT = Path(_env_root).resolve() if _env_root else Path(__file__).resolve().parent.parent.parent
+PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 
 
 def setup_logger(name: str = "apex_risk", level: int = logging.INFO) -> logging.Logger:
@@ -46,17 +48,17 @@ def get_device() -> torch.device:
         return torch.device("cpu")
 
 
-def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
+def load_config(config_path: str | None = None) -> dict[str, Any]:
     """Loads pipeline configuration from YAML file."""
     if config_path is None:
         config_path = str(PROJECT_ROOT / "apex_multimodal_risk" / "configs" / "pipeline.yaml")
-    
-    with open(config_path, "r", encoding="utf-8") as f:
+
+    with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
     return config
 
 
-def get_duckdb_connection(db_path: Optional[str] = None) -> duckdb.DuckDBPyConnection:
+def get_duckdb_connection(db_path: str | None = None) -> duckdb.DuckDBPyConnection:
     """Returns an in-memory or file-backed DuckDB connection with UTC timezone enforced."""
     if db_path is None:
         con = duckdb.connect(database=":memory:")
@@ -85,12 +87,18 @@ def enforce_utc_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def read_parquet_utc(
-    path: str, con: Optional[duckdb.DuckDBPyConnection] = None, order_by: Optional[str] = None
+    path: str | Path, con: duckdb.DuckDBPyConnection | None = None, order_by: str | None = None
 ) -> pd.DataFrame:
     """Reads Parquet via DuckDB and guarantees all datetime columns are strictly UTC."""
+    p = Path(path)
+    if not p.is_absolute():
+        if (PROJECT_ROOT / p).exists():
+            p = PROJECT_ROOT / p
+        elif (PACKAGE_ROOT / p).exists():
+            p = PACKAGE_ROOT / p
     if con is None:
         con = get_duckdb_connection()
-    sql = f"SELECT * FROM '{path}'"
+    sql = f"SELECT * FROM '{p}'"
     if order_by:
         sql += f" ORDER BY {order_by}"
     df = con.execute(sql).df()

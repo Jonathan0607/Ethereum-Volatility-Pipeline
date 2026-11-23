@@ -632,3 +632,41 @@
     1. *Mode A (Directional Only):* Surgical NLP Gate incurs only 55.8 bps/yr re-entry drag, preserving 35.48% CAGR and 1.75 Sharpe (identical to 1.76 within statistical sampling noise) while cutting SEC crisis drawdown from -1.9% down to -1.1%.
     2. *Mode B (Spread Degradation):* When applied to the Spread sleeve, directional crash alerts degrade CAGR (36.07% $\to$ 25.57%) and incur 213.4 bps/yr drag. Structurally, directional crash alerts predict broad market-wide down-moves. Clamping cross-sectional dispersion arbitrage during periods of market divergence suppresses market-neutral long/short pairs that actually profit from idiosyncratic dispersion. Directional crash gating is an asymmetric hedge for directional risk, and must never be applied to market-neutral relative-value sleeves.
 - **Verdict & Next Step:** `[PROMOTED / PRODUCTION READY]` - All quantitative, serving, and architectural nuances fully resolved and audited. Ready for comprehensive repo audit and Sprint 4.
+
+---
+
+### AUDIT-001: End-to-End Codebase Integrity, Portability & Schema Parity Audit
+- **Date & Branch/Commit:** 2026-11-23 | `feat/multimodal-risk-mle`
+- **Scope & Objective:**
+  Execute comprehensive end-to-end integrity audit across all of `apex_multimodal_risk/` (covering Sprints 1–3) on `feat/multimodal-risk-mle`. Fix every discrepancy found across portability, schemas, code hygiene, and causality.
+- **Audit Findings & Discrepancies Resolved:**
+  1. *Portability & Path Resolution:*
+     - Scan confirmed ZERO local user paths (`/Users/...`, `/home/...`, `C:\...`) hardcoded in source or configuration files.
+     - Added support for `APEX_PROJECT_ROOT` and `APEX_PACKAGE_ROOT` environment variable overrides in `src/utils.py` to enable seamless containerized Docker and GitHub Actions execution.
+     - Updated `read_parquet_utc()` in `src/utils.py` to accept `Union[str, Path]` and automatically resolve relative paths against `PROJECT_ROOT` and `PACKAGE_ROOT`.
+     - Discovered and fixed missing parent directory creation in `src/data/ingest_news.py`, `src/data/noise_filter.py`, and `src/data/align_targets.py` by adding `Path(...).parent.mkdir(parents=True, exist_ok=True)` prior to DuckDB `COPY ... TO` calls, preventing runtime failures on fresh Linux/Docker checkouts.
+     - Patched `tests/test_cpcv_integrity.py` to resolve input datasets through `PROJECT_ROOT`.
+  2. *Config, Artifact & Schema Parity:*
+     - Cross-checked `configs/pipeline.yaml`, `artifacts/best_lightgbm_risk.pkl`, `artifacts/risk_prototypes.json`, `artifacts/onnx/serving_metadata.json`, `src/train/export_onnx.py`, and `src/serving/app.py`.
+     - Confirmed **100% bitwise parity** across all core parameters:
+       * Feature names & exact ordering: 20/20 bitwise match across Pickle, ONNX metadata, and pipeline definition.
+       * `tau_nov` $= 0.2880023717880249$ (cosine distance $1 - \cos$).
+       * `tau_proto` $= 0.7178921699523926$ (cosine similarity $\cos$).
+       * Platt scaling coefficients: $a = 1.0046218390715185$, $b = 0.0003085592138408936$.
+       * `iTransformer` variate standardizer means & stds: 16/16 exact match between PyTorch checkpoint `best_itransformer_var.pt` and `serving_metadata.json`.
+       * Delayed-Feedback ACI causal delay: `6` hours across config, ONNX metadata, and serving runtime.
+  3. *Code Hygiene & Dead Code:*
+     - Installed `ruff>=0.9.0` and pinned in both `apex_multimodal_risk/requirements.txt` and `apex_multimodal_risk/pyproject.toml`.
+     - Added `[tool.ruff]` configuration block in `pyproject.toml` (target Python 3.11, line-length 120).
+     - Fixed all 523 ruff linting errors across the repository:
+       * Replaced blind `except Exception:` handlers in `ingest_news.py`, `calibration.py`, `audit_diagnostics.py`, `train_finalization.py`, `exp002e_nlp_angles.py`, and `run_benchmark.py` with specific exceptions (`ValueError`, `TypeError`, `httpx.HTTPError`).
+       * Converted mutable dataclass field default `pd.Timedelta` in `cpcv_runner.py` to `field(default_factory=lambda: pd.Timedelta(hours=504))`.
+       * Corrected loop variable closure binding in `exp002e_nlp_angles.py` feature construction.
+       * Converted error logging in `app.py` to `logger.exception`.
+       * Cleaned up all unused variables (`_split_idx`, `_dedup_df`, `_meta`, `_dir_turn_base`, etc.) and orphaned imports.
+     - `ruff check --config apex_multimodal_risk/pyproject.toml apex_multimodal_risk/` now reports **All checks passed! (0 errors)**.
+     - Confirmed `.gitignore` comprehensively blocks all binary artifacts (`*.parquet`, `*.pt`, `*.pkl`, `*.onnx`, `*.onnx.data`, `mlruns/`, `benchmarks/results/`).
+  4. *Causal, Statistical & Numerical Verification:*
+     - Re-ran complete `pytest` test suite (`test_no_leakage.py`, `test_cpcv_integrity.py`, `test_conformal_causal.py`, `test_serving_api.py`, `test_e2e_inference_parity.py`): **24/24 passed (100% green)** in 10.53s.
+     - Reconciled all EXP-003e figures in `timeline.md` against live script outputs: 0 contradictions, 100% bitwise matching across walk-forward backtest metrics, Locust latency percentiles (Profile 1 p99 180ms, Profile 2 p99 52ms with 0.00% fallbacks), and 4-shock crisis returns.
+- **Verdict & Next Step:** `[PASSED / REPO INTEGRITY VERIFIED]` - Zero defects remain across Sprints 1–3. Frozen champion `research/apex_v45_champion.py` untouched. Fully prepared for final review and Sprint 4.

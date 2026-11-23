@@ -24,3 +24,4 @@ httpx>=0.27.0
 locust>=2.24.0
 urllib3>=2.0.0
 onnxscript
+ruff>=0.9.0

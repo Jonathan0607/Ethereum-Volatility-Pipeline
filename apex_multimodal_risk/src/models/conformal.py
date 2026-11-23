@@ -8,27 +8,26 @@ Wraps iTransformer 5% Value-at-Risk (VaR) output with strictly causal 6-hour del
 
 from collections import deque
 from datetime import timedelta
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any
 
 import numpy as np
 import pandas as pd
-import scipy.stats as stats
+from scipy import stats
 
-from apex_multimodal_risk.src.utils import setup_logger, PROJECT_ROOT
+from apex_multimodal_risk.src.utils import PROJECT_ROOT, setup_logger
 
 logger = setup_logger("conformal")
 
 
 class CausalViolationError(Exception):
     """Raised when feedback is delivered before the strict 6-hour horizon has elapsed."""
-    pass
 
 
 def kupiec_pof_test(
     y_true: np.ndarray,
     var_pred: np.ndarray,
     alpha: float = 0.05,
-) -> Tuple[float, float, int]:
+) -> tuple[float, float, int]:
     """
     Computes Kupiec's Proportion of Failures (POF) Likelihood Ratio Test.
     H0: True violation rate == alpha (e.g. 0.05).
@@ -54,7 +53,7 @@ def christoffersen_tests(
     var_pred: np.ndarray,
     alpha: float = 0.05,
     step: int = 1,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Computes Kupiec Unconditional Coverage (LR_uc), Christoffersen Independence (LR_ind),
     and Christoffersen Conditional Coverage (LR_cc) Likelihood Ratio Tests.
@@ -148,7 +147,7 @@ class DelayedFeedbackACI:
         delay_hours: int = 6,
         alpha_min: float = 0.005,
         alpha_max: float = 0.25,
-        asset: Optional[str] = None,
+        asset: str | None = None,
     ):
         self.nominal_alpha = nominal_alpha
         self.alpha_t = nominal_alpha
@@ -161,13 +160,13 @@ class DelayedFeedbackACI:
 
         self.residual_buffer: deque = deque(maxlen=window_size)
         # Pending queue maps bar_timestamp -> (raw_var, aci_var)
-        self.pending_queue: Dict[pd.Timestamp, Tuple[float, float]] = {}
+        self.pending_queue: dict[pd.Timestamp, tuple[float, float]] = {}
 
     def predict(
         self,
         raw_var: float,
-        bar_time: Optional[pd.Timestamp] = None,
-    ) -> Tuple[float, float]:
+        bar_time: pd.Timestamp | None = None,
+    ) -> tuple[float, float]:
         """
         Computes conformal-adjusted VaR bound for current bar T:
             aci_var_t = raw_var - quantile(residual_buffer, 1 - alpha_t)
@@ -193,7 +192,7 @@ class DelayedFeedbackACI:
         target_bar_time: pd.Timestamp,
         current_time: pd.Timestamp,
         realized_y: float,
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """
         Receives feedback for bar target_bar_time at current_time.
         Enforces strict causal delay: (current_time - target_bar_time) >= delay_hours.
@@ -250,7 +249,7 @@ class MultiAssetDelayedFeedbackACI:
         self.gamma = gamma
         self.window_size = window_size
         self.delay_hours = delay_hours
-        self.engines: Dict[str, DelayedFeedbackACI] = {}
+        self.engines: dict[str, DelayedFeedbackACI] = {}
 
     def get_engine(self, asset: str) -> DelayedFeedbackACI:
         if asset not in self.engines:
@@ -267,8 +266,8 @@ class MultiAssetDelayedFeedbackACI:
         self,
         asset: str,
         raw_var: float,
-        bar_time: Optional[pd.Timestamp] = None,
-    ) -> Tuple[float, float]:
+        bar_time: pd.Timestamp | None = None,
+    ) -> tuple[float, float]:
         return self.get_engine(asset).predict(raw_var, bar_time)
 
     def step_feedback(
@@ -277,11 +276,11 @@ class MultiAssetDelayedFeedbackACI:
         target_bar_time: pd.Timestamp,
         current_time: pd.Timestamp,
         realized_y: float,
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         return self.get_engine(asset).step_feedback(target_bar_time, current_time, realized_y)
 
 
-def run_conformal_validation(gamma: float = 0.01) -> Dict[str, Any]:
+def run_conformal_validation(gamma: float = 0.01) -> dict[str, Any]:
     """
     Evaluates Delayed-Feedback ACI on out-of-sample data across SOL, AVAX, LINK.
     Reuses chronological OOS fold predictions (Split 9 test fold or chronological walk-forward split).
@@ -289,15 +288,15 @@ def run_conformal_validation(gamma: float = 0.01) -> Dict[str, Any]:
     and stress coverage during FTX (Nov 2022) and Aug 2024 crash.
     """
     from apex_multimodal_risk.src.features.shared_features import (
-        load_and_merge_features_and_targets,
-        CPCVStandardScaler,
         MARKET_NUMERICAL_COLS,
+        CPCVStandardScaler,
+        load_and_merge_features_and_targets,
     )
+    from apex_multimodal_risk.src.models.itransformer import iTransformerOnlyModel
     from apex_multimodal_risk.src.train.train_ablation import (
         build_lookback_tensor,
         eval_itransformer_batched,
     )
-    from apex_multimodal_risk.src.models.itransformer import iTransformerOnlyModel
     from apex_multimodal_risk.src.utils import get_device
 
     logger.info(f"Running ACI out-of-sample validation pass (gamma={gamma})...")

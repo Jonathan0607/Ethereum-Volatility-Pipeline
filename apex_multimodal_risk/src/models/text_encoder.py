@@ -18,29 +18,28 @@ Optimizations:
 - Caches predictions to data/processed/text_encoder_cpcv_cache/split_{i}.parquet.
 """
 
-import os
 import gc
+import os
+import resource
 import sys
 import time
-import resource
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
+from sklearn.metrics import auc, f1_score, precision_recall_curve
+from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
-from sklearn.metrics import f1_score, precision_recall_curve, auc
 
-from apex_multimodal_risk.src.utils import (
-    setup_logger,
-    PROJECT_ROOT,
-    get_device,
-    enforce_utc_columns,
-)
 from apex_multimodal_risk.src.train.cpcv_runner import CPCVSplit
+from apex_multimodal_risk.src.utils import (
+    PROJECT_ROOT,
+    enforce_utc_columns,
+    get_device,
+    setup_logger,
+)
 
 logger = setup_logger("text_encoder")
 
@@ -74,7 +73,7 @@ class FastNewsDataset(Dataset):
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        labels: Optional[torch.Tensor] = None,
+        labels: torch.Tensor | None = None,
     ):
         self.input_ids = input_ids
         self.attention_mask = attention_mask
@@ -83,7 +82,7 @@ class FastNewsDataset(Dataset):
     def __len__(self) -> int:
         return len(self.input_ids)
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         item = {
             "input_ids": self.input_ids[idx],
             "attention_mask": self.attention_mask[idx],
@@ -97,8 +96,8 @@ def build_minilm_classifier(
     model_name: str = MODEL_NAME,
     num_labels: int = 6,
     freeze_bottom_layers: int = 10,
-    device: Optional[torch.device] = None,
-) -> Tuple[AutoModelForSequenceClassification, AutoTokenizer]:
+    device: torch.device | None = None,
+) -> tuple[AutoModelForSequenceClassification, AutoTokenizer]:
     """
     Initializes MiniLM-L12 model with frozen embeddings and bottom 10 layers.
     Fine-tunes ONLY layers 10-11 and classification head.
@@ -145,7 +144,7 @@ def tokenize_news_clusters(
     news_df: pd.DataFrame,
     tokenizer: AutoTokenizer,
     max_length: int = 48,
-) -> Dict[str, torch.Tensor]:
+) -> dict[str, torch.Tensor]:
     """Pre-tokenizes all news titles + descriptions with max_length=48."""
     titles = news_df["title"].fillna("").astype(str).tolist()
     descs = news_df["description"].fillna("").astype(str).tolist()
@@ -196,8 +195,8 @@ def infer_minilm(
     model: nn.Module,
     dataset: FastNewsDataset,
     batch_size: int = 128,
-    device: Optional[torch.device] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
+    device: torch.device | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Infers 6-class softmax probabilities and 384-dim pooled CLS embeddings.
     """
@@ -229,7 +228,7 @@ def infer_minilm(
 def evaluate_text_classifier(
     probs: np.ndarray,
     labels: np.ndarray,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Computes Macro F1 and per-class PR-AUC."""
     preds = np.argmax(probs, axis=1)
     macro_f1 = float(f1_score(labels, preds, average="macro", zero_division=0))
@@ -260,7 +259,7 @@ def train_single_split(
     batch_size: int = 32,
     lr_head: float = 5e-4,
     lr_backbone: float = 3e-5,
-) -> Tuple[Dict[str, float], List[float], float]:
+) -> tuple[dict[str, float], list[float], float]:
     """
     Trains MiniLM on a single CPCV split, evaluates OOS metrics, and caches predictions.
     Returns: (metrics, epoch_losses, elapsed_seconds).
@@ -356,7 +355,7 @@ def run_split0_sanity_gate(
     news_parquet_path: str = "apex_multimodal_risk/data/processed/news_dedup.parquet",
     aligned_parquet_path: str = "apex_multimodal_risk/data/processed/aligned_hourly.parquet",
     cache_dir: str = DEFAULT_CACHE_DIR,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Fast Split-0 Sanity Gate:
     Runs Split 0 and verifies:
@@ -423,8 +422,8 @@ def run_split0_sanity_gate(
     print("\n" + "=" * 60)
     print("SPLIT-0 SANITY GATE RESULTS:")
     print("=" * 60)
-    for ep, l in enumerate(losses):
-        print(f"  Epoch {ep+1}/3 Loss:         {l:.4f}")
+    for ep, loss_val in enumerate(losses):
+        print(f"  Epoch {ep+1}/3 Loss:         {loss_val:.4f}")
     print(f"  OOS Macro F1:             {metrics.get('macro_f1', 0.0):.4f}")
     print(f"  Wall-Clock Time:          {elapsed:.2f} seconds (Gate: < 90.0s)")
     print(f"  Final Epoch Loss:         {losses[-1]:.4f} (Gate: < 1.10)")
@@ -452,13 +451,13 @@ def run_split0_sanity_gate(
 
 def train_and_cache_cpcv_splits(
     news_parquet_path: str = "apex_multimodal_risk/data/processed/news_dedup.parquet",
-    cpcv_splits: Optional[List[CPCVSplit]] = None,
+    cpcv_splits: list[CPCVSplit] | None = None,
     cache_dir: str = DEFAULT_CACHE_DIR,
     epochs: int = 3,
     batch_size: int = 32,
     lr_head: float = 5e-4,
     lr_backbone: float = 3e-5,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Executes leak-free MiniLM fine-tuning across all 10 CPCV splits.
     Caches fold predictions and returns summary metrics table.

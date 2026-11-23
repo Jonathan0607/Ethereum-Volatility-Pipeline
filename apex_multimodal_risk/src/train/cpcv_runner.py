@@ -9,8 +9,8 @@ Implements Marcos Lopez de Prado's CPCV framework with:
 """
 
 import itertools
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -23,15 +23,15 @@ logger = setup_logger("cpcv_runner")
 @dataclass
 class CPCVSplit:
     split_id: int
-    test_block_ids: Tuple[int, int]
+    test_block_ids: tuple[int, int]
     train_timestamps: np.ndarray
     inner_train_timestamps: np.ndarray
     inner_val_timestamps: np.ndarray
     test_timestamps: np.ndarray
     min_gap_hours: float
-    test_intervals: List[Tuple[pd.Timestamp, pd.Timestamp]]
-    train_intervals: List[Tuple[pd.Timestamp, pd.Timestamp]]
-    purge_embargo_td: pd.Timedelta = pd.Timedelta(hours=504)
+    test_intervals: list[tuple[pd.Timestamp, pd.Timestamp]]
+    train_intervals: list[tuple[pd.Timestamp, pd.Timestamp]]
+    purge_embargo_td: pd.Timedelta = field(default_factory=lambda: pd.Timedelta(hours=504))
 
     def get_train_mask(self, df_timestamps: pd.Series) -> np.ndarray:
         ts_set = set(self.train_timestamps)
@@ -76,7 +76,7 @@ def generate_cpcv_splits(
     k_test: int = 2,
     purge_embargo_hours: int = 504,
     inner_val_ratio: float = 0.15,
-) -> List[CPCVSplit]:
+) -> list[CPCVSplit]:
     """
     Generates N choose k CPCV splits with strict purge and embargo buffers.
     Guarantees min |t_train - t_test| >= purge_embargo_hours.
@@ -100,7 +100,7 @@ def generate_cpcv_splits(
     purge_embargo_td = pd.Timedelta(hours=purge_embargo_hours)
     test_combinations = list(itertools.combinations(range(n_blocks), k_test))
 
-    splits: List[CPCVSplit] = []
+    splits: list[CPCVSplit] = []
 
     for split_id, test_block_ids in enumerate(test_combinations):
         # 1. Test timestamps
@@ -151,8 +151,7 @@ def generate_cpcv_splits(
 
         # 5. Partition train into inner_train and inner_val (last inner_val_ratio slice)
         val_size = int(len(train_ts) * inner_val_ratio)
-        if val_size < 1:
-            val_size = 1
+        val_size = max(val_size, 1)
         inner_train_ts = train_ts[:-val_size]
         inner_val_ts = train_ts[-val_size:]
 

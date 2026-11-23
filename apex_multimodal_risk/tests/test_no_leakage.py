@@ -10,13 +10,13 @@ Asserts:
 """
 
 import os
-from pathlib import Path
 from datetime import timedelta
+from pathlib import Path
 
-import pytest
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
+import pytest
 
 from apex_multimodal_risk.src.utils import PROJECT_ROOT, load_config, read_parquet_utc
 
@@ -69,11 +69,11 @@ def test_strict_utc_timestamps_across_all_parquets(raw_news_path, dedup_news_pat
     Verifies both PyArrow schema metadata and Pandas timezone awareness.
     """
     parquet_paths = [raw_news_path, dedup_news_path, aligned_hourly_path]
-    
+
     for path in parquet_paths:
         table = pq.read_table(path)
         schema = table.schema
-        
+
         # Check PyArrow schema level
         found_timestamp_col = False
         for field in schema:
@@ -84,7 +84,7 @@ def test_strict_utc_timestamps_across_all_parquets(raw_news_path, dedup_news_pat
                     f"File '{Path(path).name}' column '{field.name}' has non-UTC type: {field.type}"
                 )
         assert found_timestamp_col, f"File '{Path(path).name}' should contain at least one timestamp column."
-        
+
         # Check Pandas DataFrame level
         df = read_parquet_utc(path)
         for col in df.columns:
@@ -103,7 +103,7 @@ def test_causal_ingestion_delay(dedup_news_df):
     """Asserts simulated ingestion delay: ingested_at = published_at + 120s."""
     pub = dedup_news_df["published_at"]
     ing = dedup_news_df["ingested_at"]
-    
+
     diff_sec = (ing - pub).dt.total_seconds()
     assert (diff_sec == 120).all(), "Every news item must have strictly a 120s ingestion delay."
     assert (ing > pub).all(), "ingested_at must be strictly greater than published_at."
@@ -116,19 +116,19 @@ def test_aligned_news_strictly_causal(aligned_hourly_df, dedup_news_df):
     """
     news_times = pd.to_datetime(dedup_news_df["ingested_at"], utc=True)
     pub_times = pd.to_datetime(dedup_news_df["published_at"], utc=True)
-    
+
     rows_with_news = aligned_hourly_df[aligned_hourly_df["news_count_24h"] > 0]
     sample = rows_with_news.sample(min(500, len(rows_with_news)), random_state=42)
-    
+
     for _, row in sample.iterrows():
         bar_t = pd.to_datetime(row["timestamp"], utc=True)
         lookback_24h = bar_t - pd.Timedelta(hours=24)
-        
+
         # News items matching (T - 24h, T]
         mask = (news_times > lookback_24h) & (news_times <= bar_t)
         matching_ingested = news_times[mask]
         matching_published = pub_times[mask]
-        
+
         assert len(matching_ingested) == row["news_count_24h"], (
             f"Expected {row['news_count_24h']} items, found {len(matching_ingested)} at bar {bar_t}"
         )
@@ -143,25 +143,25 @@ def test_semantic_dedup_no_similar_clusters_within_6h(dedup_news_df):
     """
     timestamps = dedup_news_df["ingested_at"].tolist()
     embeddings = np.vstack(dedup_news_df["embedding"].to_numpy()).astype(np.float32)
-    
+
     norms = np.linalg.norm(embeddings, axis=1)
     np.testing.assert_allclose(norms, 1.0, atol=1e-3, err_msg="Embeddings must be L2-normalized.")
-    
+
     n_items = len(dedup_news_df)
     window_delta = timedelta(hours=6.0)
-    
+
     np.random.seed(42)
     check_indices = np.random.choice(n_items, size=min(1000, n_items), replace=False)
-    
+
     for i in check_indices:
         t_i = timestamps[i]
         emb_i = embeddings[i]
-        
+
         window_indices = [
             j for j in range(i + 1, min(i + 100, n_items))
             if timestamps[j] <= t_i + window_delta
         ]
-        
+
         if window_indices:
             w_embs = embeddings[window_indices]
             sims = np.dot(w_embs, emb_i)
@@ -185,18 +185,18 @@ def test_targets_and_monotonicity(aligned_hourly_df, pipeline_config):
     target_mult = float(align_cfg.get("tail_vol_multiplier", 2.0))
     fwd_horizon = int(align_cfg.get("forward_horizon_hours", 6))
     scale = np.sqrt(float(fwd_horizon))
-    
+
     for asset in aligned_hourly_df["asset"].unique():
         sub = aligned_hourly_df[aligned_hourly_df["asset"] == asset]
         ts = pd.to_datetime(sub["timestamp"], utc=True)
         assert ts.is_monotonic_increasing, f"Timestamps for {asset} must be strictly monotonic increasing."
         assert not ts.duplicated().any(), f"Duplicate timestamps detected for {asset}."
-        
+
         valid_sub = sub[sub["target_valid"]].copy()
         assert not valid_sub["fwd_min_ret_6h"].isna().any(), f"fwd_min_ret_6h contains NaNs on valid rows for {asset}."
         assert not valid_sub["trailing_1h_vol_72h"].isna().any(), f"trailing_1h_vol_72h contains NaNs on valid rows for {asset}."
         assert set(valid_sub["tail_crash_6h"].unique()).issubset({0, 1}), f"tail_crash_6h must be binary for {asset}."
-        
+
         # Mathematical identity verification
         threshold = -target_mult * scale * valid_sub["trailing_1h_vol_72h"]
         expected_crash = (valid_sub["fwd_min_ret_6h"] < threshold).astype(int)
@@ -205,13 +205,13 @@ def test_targets_and_monotonicity(aligned_hourly_df, pipeline_config):
             expected_crash.to_numpy(),
             err_msg=f"tail_crash_6h does not match -{target_mult}*sqrt({fwd_horizon})*vol_72h threshold for {asset}!"
         )
-        
+
         # Base rate verification: must land cleanly in 3%–8%
         base_rate = float(valid_sub["tail_crash_6h"].mean())
         assert 0.03 <= base_rate <= 0.08, (
             f"Base rate for {asset} is {base_rate:.2%}, outside institutional target range [3%, 8%]!"
         )
-        
+
     assert not aligned_hourly_df["target_valid"].isna().any(), "target_valid mask contains NaNs!"
 
 
@@ -220,7 +220,7 @@ def test_entity_and_risk_labels(dedup_news_df):
     for col in ["entity_sol", "entity_avax", "entity_link", "entity_macro"]:
         assert col in dedup_news_df.columns
         assert dedup_news_df[col].dtype == bool
-        
+
     valid_classes = {
         "protocol_exploit",
         "network_outage",

@@ -6,36 +6,35 @@ Audits:
 - Audit D: Delayed-Feedback ACI Strict Out-of-Sample Validation & Christoffersen Tests.
 """
 
-import os
-import sys
-import time
 import json
 import pickle
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+import time
+from typing import Any
 
 import numpy as np
 import pandas as pd
-import scipy.stats as stats
 import torch
 
-from apex_multimodal_risk.src.utils import setup_logger, PROJECT_ROOT, get_device
-from apex_multimodal_risk.src.models.conformal import christoffersen_tests, MultiAssetDelayedFeedbackACI
 from apex_multimodal_risk.src.features.shared_features import (
-    load_and_merge_features_and_targets,
-    CPCVStandardScaler,
     MARKET_NUMERICAL_COLS,
+    CPCVStandardScaler,
+    load_and_merge_features_and_targets,
 )
+from apex_multimodal_risk.src.models.conformal import (
+    MultiAssetDelayedFeedbackACI,
+    christoffersen_tests,
+)
+from apex_multimodal_risk.src.models.itransformer import iTransformerOnlyModel
 from apex_multimodal_risk.src.train.train_ablation import (
     build_lookback_tensor,
     eval_itransformer_batched,
 )
-from apex_multimodal_risk.src.models.itransformer import iTransformerOnlyModel
+from apex_multimodal_risk.src.utils import PROJECT_ROOT, get_device, setup_logger
 
 logger = setup_logger("audit_sprint2_3")
 
 
-def run_audit_a() -> Dict[str, Any]:
+def run_audit_a() -> dict[str, Any]:
     """
     Audit A: Reconcile tau_nov and tau_proto values across codebase.
     Verifies that:
@@ -67,7 +66,7 @@ def run_audit_a() -> Dict[str, Any]:
         lgb_data = pickle.load(f)
     thresh_pkl = lgb_data["gate_thresholds"]
 
-    with open(artifacts_dir / "onnx/serving_metadata.json", "r") as f:
+    with open(artifacts_dir / "onnx/serving_metadata.json") as f:
         meta_json = json.load(f)
     thresh_json = meta_json["gate_thresholds"]
 
@@ -98,7 +97,7 @@ def run_audit_a() -> Dict[str, Any]:
     }
 
 
-def run_audit_b() -> Dict[str, Any]:
+def run_audit_b() -> dict[str, Any]:
     """
     Audit B: ONNX LightGBM Platt Logit Parity & Output Shape Check.
     Verifies that:
@@ -158,7 +157,7 @@ def run_audit_b() -> Dict[str, Any]:
     }
 
 
-def run_audit_c() -> Dict[str, Any]:
+def run_audit_c() -> dict[str, Any]:
     """
     Audit C: End-to-End Inference Parity & Worst-Case Bar Dissection.
     Scores 200 real historical bars through both offline Python stack and ONNX serving stack.
@@ -171,6 +170,7 @@ def run_audit_c() -> Dict[str, Any]:
 
     from fastapi.testclient import TestClient
     from sentence_transformers import SentenceTransformer
+
     from apex_multimodal_risk.src.serving.app import app
 
     df = load_and_merge_features_and_targets()
@@ -191,7 +191,7 @@ def run_audit_c() -> Dict[str, Any]:
     tau_proto = lgb_bundle["gate_thresholds"]["tau_proto"]
 
     st_model = SentenceTransformer("BAAI/bge-small-en-v1.5", device="cpu")
-    with open(artifacts_dir / "risk_prototypes.json", "r") as f:
+    with open(artifacts_dir / "risk_prototypes.json") as f:
         proto_data = json.load(f)
     proto_keys = list(proto_data["prototypes"].keys())
     proto_matrix = np.array([proto_data["prototypes"][k]["vector"] for k in proto_keys], dtype=np.float32)
@@ -291,7 +291,7 @@ def run_audit_c() -> Dict[str, Any]:
     logger.info(f"Audit C Mean abs diff p_crash_cal: {mean_p_diff:.6f} (target < 0.0005)")
     logger.info(f"Audit C raw_var_5pct Correlation: {corr_v:.6f} (target >= 0.998)")
     logger.info(f"Worst-Case Bar Dissection: Asset={worst_bar['asset']}, TS={worst_bar['timestamp']}, Diff={worst_bar['diff']:.6f}")
-    logger.info(f"Root Cause: INT8 BGE-small quantization rounding (~2e-4 shift) straddled a LightGBM split threshold.")
+    logger.info("Root Cause: INT8 BGE-small quantization rounding (~2e-4 shift) straddled a LightGBM split threshold.")
 
     assert max_p_diff < 5e-3
     assert mean_p_diff < 5e-4
@@ -307,7 +307,7 @@ def run_audit_c() -> Dict[str, Any]:
     }
 
 
-def run_audit_d() -> Dict[str, Any]:
+def run_audit_d() -> dict[str, Any]:
     """
     Audit D: Strict Out-of-Sample Delayed-Feedback ACI Validation.
     Trains iTransformer ONLY on the first 60% of data (zero future leakage).

@@ -7,15 +7,16 @@ Verifies:
 4. Multi-asset state isolation.
 """
 
-import pytest
+from datetime import timedelta
+
 import numpy as np
 import pandas as pd
-from datetime import datetime, timezone, timedelta
+import pytest
 
 from apex_multimodal_risk.src.models.conformal import (
+    CausalViolationError,
     DelayedFeedbackACI,
     MultiAssetDelayedFeedbackACI,
-    CausalViolationError,
     kupiec_pof_test,
 )
 
@@ -152,6 +153,6 @@ def test_kupiec_pof_test():
     # Scenario 2: Severe violation rate (15% violations)
     y[:150] = -1.0
     v[:150] = 0.0
-    p_val_bad, p_hat_bad, x_bad = kupiec_pof_test(y, v, alpha=0.05)
+    p_val_bad, p_hat_bad, _x_bad = kupiec_pof_test(y, v, alpha=0.05)
     assert p_hat_bad == 0.15
     assert p_val_bad < 0.001  # Strongly rejected

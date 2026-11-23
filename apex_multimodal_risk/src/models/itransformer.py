@@ -8,14 +8,12 @@ Dual Head:
   2. 5% Value-at-Risk (VaR) prediction on forward 6h minimum return (Pinball loss, alpha=0.05)
 """
 
-from typing import Dict, List, Optional, Tuple, Any
 
-import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
-from apex_multimodal_risk.src.utils import setup_logger, get_device
+from apex_multimodal_risk.src.utils import setup_logger
 
 logger = setup_logger("itransformer")
 
@@ -72,7 +70,7 @@ class InvertedTransformerBackbone(nn.Module):
         # Attention pooling across variates
         self.pool_attn = nn.Linear(d_model, 1)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
           x: Tensor of shape (batch_size, lookback_len, num_variates)
@@ -134,7 +132,7 @@ class iTransformerOnlyModel(nn.Module):
             nn.Linear(d_model // 2, 1),
         )
 
-    def forward(self, x_market: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, x_market: torch.Tensor) -> dict[str, torch.Tensor]:
         h_market, _ = self.backbone(x_market)
         logit = self.clf_head(h_market).squeeze(-1)
         var_pred = self.var_head(h_market).squeeze(-1)
@@ -147,12 +145,12 @@ class iTransformerOnlyModel(nn.Module):
 
     def compute_loss(
         self,
-        outputs: Dict[str, torch.Tensor],
+        outputs: dict[str, torch.Tensor],
         y_clf: torch.Tensor,
         y_var: torch.Tensor,
         pos_weight: float = 23.0,
         lambda_var: float = 10.0,
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+    ) -> tuple[torch.Tensor, dict[str, float]]:
         pos_wt_tensor = torch.tensor([pos_weight], device=y_clf.device)
         bce_fn = nn.BCEWithLogitsLoss(pos_weight=pos_wt_tensor)
         loss_bce = bce_fn(outputs["logit"], y_clf)

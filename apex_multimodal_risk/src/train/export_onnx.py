@@ -10,34 +10,29 @@ Evaluates:
 - Numerical parity vs PyTorch FP32 (cosine similarity, max abs drift, correlation)
 """
 
-import os
-import gc
-import sys
-import time
 import json
 import pickle
+import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any
 
 import numpy as np
+import onnxmltools
+import onnxruntime as ort
 import pandas as pd
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from transformers import AutoModel, AutoTokenizer
-import onnx
-import onnxruntime as ort
-from onnxruntime.quantization import quantize_dynamic, QuantType
-import onnxmltools
 from onnxmltools.convert.common.data_types import FloatTensorType
+from onnxruntime.quantization import QuantType, quantize_dynamic
+from torch import nn
 
-from apex_multimodal_risk.src.utils import setup_logger, PROJECT_ROOT
 from apex_multimodal_risk.src.models.itransformer import iTransformerOnlyModel
+from apex_multimodal_risk.src.utils import PROJECT_ROOT, setup_logger
 
 logger = setup_logger("export_onnx")
 
 
 import types
+
 from sentence_transformers import SentenceTransformer
 
 
@@ -61,7 +56,7 @@ class iTransformerExportWrapper(nn.Module):
         super().__init__()
         self.model = model
 
-    def forward(self, x_market: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x_market: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         out = self.model(x_market)
         return out["logit"], out["var_pred"]
 
@@ -79,10 +74,10 @@ def _custom_transformer_layer_forward(self, src, src_mask=None, src_key_padding_
 
 def benchmark_session_latency(
     session: ort.InferenceSession,
-    feed_dict: Dict[str, np.ndarray],
+    feed_dict: dict[str, np.ndarray],
     n_warmup: int = 15,
     n_runs: int = 50,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Measures p50, p95, p99 latency in ms on CPU."""
     for _ in range(n_warmup):
         session.run(None, feed_dict)
@@ -104,10 +99,10 @@ def benchmark_session_latency(
 
 def benchmark_pytorch_latency(
     model: nn.Module,
-    inputs: Tuple[torch.Tensor, ...],
+    inputs: tuple[torch.Tensor, ...],
     n_warmup: int = 15,
     n_runs: int = 50,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Measures p50, p95, p99 latency in ms for PyTorch on CPU."""
     model.eval()
     with torch.no_grad():
@@ -131,8 +126,8 @@ def benchmark_pytorch_latency(
 
 def export_nlp_encoder(
     export_dir: Path,
-    sample_headlines: List[str],
-) -> Dict[str, Any]:
+    sample_headlines: list[str],
+) -> dict[str, Any]:
     """Exports BAAI/bge-small-en-v1.5 to FP32 and INT8 ONNX."""
     logger.info("Exporting BAAI/bge-small-en-v1.5 to ONNX FP32 and INT8...")
     model_name = "BAAI/bge-small-en-v1.5"
@@ -220,7 +215,7 @@ def export_nlp_encoder(
 def export_itransformer(
     export_dir: Path,
     lookback_samples: np.ndarray,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Exports iTransformer VaR backbone to FP32 and INT8 ONNX."""
     logger.info("Exporting iTransformer to ONNX FP32 and INT8...")
     ckpt_path = PROJECT_ROOT / "apex_multimodal_risk/artifacts/best_itransformer_var.pt"
@@ -279,7 +274,7 @@ def export_itransformer(
     # Parity verification over 200 real lookbacks
     test_x = lookback_samples[:200].astype(np.float32)
     with torch.no_grad():
-        pt_log, pt_var = wrapper(torch.tensor(test_x))
+        _pt_log, pt_var = wrapper(torch.tensor(test_x))
         pt_var = pt_var.numpy()
 
     fp32_out = sess_fp32.run(None, {"x_market": test_x})
@@ -293,7 +288,10 @@ def export_itransformer(
     max_drift_fp32 = float(np.max(np.abs(pt_var - fp32_var)))
     max_drift_int8 = float(np.max(np.abs(pt_var - int8_var)))
 
-    logger.info(f"iTransformer Parity: FP32 VaR Corr = {corr_fp32:.5f}, INT8 VaR Corr = {corr_int8:.5f}, Max Drift = {max_drift_int8:.6f}")
+    logger.info(
+        f"iTransformer Parity: FP32 VaR Corr = {corr_fp32:.5f} (Drift = {max_drift_fp32:.6f}), "
+        f"INT8 VaR Corr = {corr_int8:.5f}, Max Drift = {max_drift_int8:.6f}"
+    )
 
     # Latency benchmarks
     s1_dict = {"x_market": test_x[:1]}
@@ -321,7 +319,7 @@ def export_itransformer(
 def export_lightgbm_risk(
     export_dir: Path,
     sample_features: np.ndarray,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Exports winning LightGBM risk classifier to ONNX and writes serving_metadata.json."""
     logger.info("Exporting LightGBM Risk Classifier to ONNX...")
     ckpt_path = PROJECT_ROOT / "apex_multimodal_risk/artifacts/best_lightgbm_risk.pkl"
@@ -407,7 +405,7 @@ def export_lightgbm_risk(
     }
 
 
-def run_full_onnx_export() -> Dict[str, Any]:
+def run_full_onnx_export() -> dict[str, Any]:
     t0 = time.time()
     export_dir = PROJECT_ROOT / "apex_multimodal_risk/artifacts/onnx"
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -421,9 +419,9 @@ def run_full_onnx_export() -> Dict[str, Any]:
     sample_headlines = news_df["title"].dropna().tolist()
 
     from apex_multimodal_risk.src.features.shared_features import (
-        load_and_merge_features_and_targets,
-        CPCVStandardScaler,
         MARKET_NUMERICAL_COLS,
+        CPCVStandardScaler,
+        load_and_merge_features_and_targets,
     )
     from apex_multimodal_risk.src.train.train_ablation import build_lookback_tensor
 

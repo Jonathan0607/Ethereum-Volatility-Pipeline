@@ -7,11 +7,11 @@ Supports TWO profiles:
 """
 
 import os
-import uuid
 import random
-from typing import List
+import uuid
+
 import numpy as np
-from locust import HttpUser, task, between
+from locust import HttpUser, between, task
 
 ASSETS = ["SOLUSDT", "ETHUSDT", "BTCUSDT", "AVAXUSDT", "LINKUSDT"]
 
@@ -30,7 +30,7 @@ CRISIS_TEMPLATES = [
     "Leading digital asset market maker reports 200M unexpected loss from counterparty default",
     "Critical oracle latency failure leads to bad debt accumulation across decentralized exchanges",
 ]
-SHARED_CRISIS_HEADLINES: List[str] = [
+SHARED_CRISIS_HEADLINES: list[str] = [
     f"{CRISIS_TEMPLATES[i % len(CRISIS_TEMPLATES)]} [macro-shock-{i+1:02d}]" for i in range(50)
 ]
 
@@ -46,7 +46,7 @@ NORMAL_MACRO_TEMPLATES = [
     "Global asset management firm submits revised application for multi-asset staking ETF",
     "Leading payment processing network settles 10B in merchant stablecoin transactions",
 ]
-SHARED_NORMAL_HEADLINES: List[str] = [
+SHARED_NORMAL_HEADLINES: list[str] = [
     f"{NORMAL_MACRO_TEMPLATES[i % len(NORMAL_MACRO_TEMPLATES)]} [macro-flow-{i+1:02d}]" for i in range(50)
 ]
 
@@ -60,7 +60,7 @@ ASSET_TOPICS = [
     "network throughput hits sustained TPS milestone following protocol upgrade",
     "institutional staking node operators onboard multi-party computation security",
 ]
-ASSET_SPECIFIC_HEADLINES: List[str] = []
+ASSET_SPECIFIC_HEADLINES: list[str] = []
 for sym in ["SOL", "ETH", "BTC", "AVAX", "LINK"]:
     for top in ASSET_TOPICS:
         for v in range(5):

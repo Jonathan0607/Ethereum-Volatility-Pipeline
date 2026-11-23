@@ -19,5 +19,23 @@ dependencies = [
     "pyyaml>=6.0",
     "pytest>=8.0.0",
     "pandas>=2.0.0",
-    "numpy>=1.24.0"
+    "numpy>=1.24.0",
+    "ruff>=0.9.0"
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",   # Line length handled by formatter
+    "B008",   # Do not perform function call in argument defaults (FastAPI Depends)
+    "W293",   # Blank line contains whitespace
+    "E701",   # Multiple statements on one line (colon)
+    "E702",   # Multiple statements on one line (semicolon)
+    "E402",   # Module level import not at top of file (dynamic sys.path insertion)
+    "B007",   # Loop control variable not used within loop body
+    "B905",   # zip() without strict= parameter
 ]

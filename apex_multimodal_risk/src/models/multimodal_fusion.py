@@ -15,15 +15,15 @@ Combines:
   6. Dual Head: Binary tail_crash_6h logit (pos_weight BCE) + 5% VaR (Pinball loss, alpha=0.05).
 """
 
-from typing import Dict, List, Optional, Tuple, Any
 
-import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from torch import nn
 
+from apex_multimodal_risk.src.models.itransformer import (
+    InvertedTransformerBackbone,
+    pinball_loss,
+)
 from apex_multimodal_risk.src.utils import setup_logger
-from apex_multimodal_risk.src.models.itransformer import InvertedTransformerBackbone, pinball_loss
 
 logger = setup_logger("multimodal_fusion")
 
@@ -102,7 +102,7 @@ class MultimodalCrossAttentionFusion(nn.Module):
         x_market: torch.Tensor,
         x_news: torch.Tensor,
         news_pad_mask: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         """
         Args:
           x_market: (B, lookback_len, num_variates)
@@ -159,12 +159,12 @@ class MultimodalCrossAttentionFusion(nn.Module):
 
     def compute_loss(
         self,
-        outputs: Dict[str, torch.Tensor],
+        outputs: dict[str, torch.Tensor],
         y_clf: torch.Tensor,
         y_var: torch.Tensor,
         pos_weight: float = 23.0,
         lambda_var: float = 10.0,
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+    ) -> tuple[torch.Tensor, dict[str, float]]:
         pos_wt_tensor = torch.tensor([pos_weight], device=y_clf.device)
         bce_fn = nn.BCEWithLogitsLoss(pos_weight=pos_wt_tensor)
         loss_bce = bce_fn(outputs["logit"], y_clf)

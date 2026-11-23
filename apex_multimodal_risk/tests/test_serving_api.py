@@ -10,12 +10,10 @@ Tests:
 7. Concurrent micro-batching test (16 parallel requests).
 """
 
-import pytest
-import asyncio
+
 import numpy as np
-import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
-import httpx
 
 from apex_multimodal_risk.src.serving.app import app
 

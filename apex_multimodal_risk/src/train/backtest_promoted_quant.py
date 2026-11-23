@@ -9,26 +9,26 @@ under 0 bps and realistic 25 bps one-way slippage:
 5. Combined Quant Risk System (Entry-Gating + ACI VaR Deadband Sizing)
 """
 
-import os
+import pickle
 import sys
 import time
-import json
-import pickle
-from pathlib import Path
-from typing import Dict, List, Tuple, Any, Optional
 from datetime import timedelta
 
 import numpy as np
 import pandas as pd
-import scipy.stats as scipy_stats
 import torch
 
-from apex_multimodal_risk.src.utils import setup_logger, PROJECT_ROOT, get_device
-from apex_multimodal_risk.src.train.exp002e_nlp_angles import engineer_nlp_features_and_targets
 from apex_multimodal_risk.src.features.shared_features import MARKET_NUMERICAL_COLS
-from apex_multimodal_risk.src.train.train_ablation import build_lookback_tensor, eval_itransformer_batched
-from apex_multimodal_risk.src.models.itransformer import iTransformerOnlyModel
 from apex_multimodal_risk.src.models.conformal import MultiAssetDelayedFeedbackACI
+from apex_multimodal_risk.src.models.itransformer import iTransformerOnlyModel
+from apex_multimodal_risk.src.train.exp002e_nlp_angles import (
+    engineer_nlp_features_and_targets,
+)
+from apex_multimodal_risk.src.train.train_ablation import (
+    build_lookback_tensor,
+    eval_itransformer_batched,
+)
+from apex_multimodal_risk.src.utils import PROJECT_ROOT, get_device, setup_logger
 
 logger = setup_logger("backtest_promoted_quant")
 
@@ -36,36 +36,36 @@ logger = setup_logger("backtest_promoted_quant")
 sys.path.insert(0, str(PROJECT_ROOT / "research"))
 sys.path.insert(0, str(PROJECT_ROOT))
 from research.apex_v45_champion import (
-    load_data_and_features,
-    run_spread_engine,
-    run_funding_arb_engine,
-    UNIVERSE,
-    W_DIR,
-    W_SPREAD,
-    W_ARB,
-    DIR_WT,
-    DIR_WC,
-    DIR_WO,
     DIR_HYST,
     DIR_TAKER_FEE,
-    LEVERAGE,
-    WARMUP_BARS,
+    DIR_WC,
+    DIR_WO,
+    DIR_WT,
     HOURS_PER_YEAR,
+    LEVERAGE,
+    UNIVERSE,
+    W_ARB,
+    W_DIR,
+    W_SPREAD,
+    WARMUP_BARS,
+    load_data_and_features,
+    run_funding_arb_engine,
+    run_spread_engine,
 )
 
 
 def run_custom_directional_engine(
-    processed: Dict[str, pd.DataFrame],
-    dataset: Dict[str, pd.DataFrame],
-    univ: List[str],
+    processed: dict[str, pd.DataFrame],
+    dataset: dict[str, pd.DataFrame],
+    univ: list[str],
     eval_index: pd.DatetimeIndex,
     n: int,
-    wts: Dict[str, np.ndarray],
-    skew_mult_dict: Dict[str, np.ndarray],
-    entry_gate_mask: Optional[np.ndarray] = None,
-    scale_overlay: Optional[np.ndarray] = None,
+    wts: dict[str, np.ndarray],
+    skew_mult_dict: dict[str, np.ndarray],
+    entry_gate_mask: np.ndarray | None = None,
+    scale_overlay: np.ndarray | None = None,
     slippage_bps: float = 0.0,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Parametric Directional Engine supporting:
     - entry_gate_mask: Suppresses new risk-increasing positions when True (holds existing open trades).
@@ -146,7 +146,7 @@ def compute_quant_metrics(
     turnover: np.ndarray,
     slippage_bps: float,
     hedged_mask: np.ndarray,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Computes Institutional Quant Tear Sheet Metrics."""
     n = len(returns)
     if n == 0:
@@ -210,8 +210,8 @@ def compute_quant_metrics(
 def compute_crisis_attribution(
     eval_index: pd.DatetimeIndex,
     returns: np.ndarray,
-    episodes: Dict[str, Tuple[str, str]],
-) -> Dict[str, Dict[str, float]]:
+    episodes: dict[str, tuple[str, str]],
+) -> dict[str, dict[str, float]]:
     """Calculates cumulative net return and max drawdown across specific crisis windows."""
     ret_series = pd.Series(returns, index=eval_index)
     results = {}
@@ -236,13 +236,13 @@ def main():
 
     # 1. Load APEX v45 Champion Data
     logger.info("Loading APEX v45 champion datasets and features...")
-    dataset, processed, garch_wts, eval_index, n, split_idx, macro_regime, mtf_skew_mult, arb_mag_scale = (
+    dataset, processed, garch_wts, eval_index, n, _split_idx, macro_regime, mtf_skew_mult, arb_mag_scale = (
         load_data_and_features()
     )
 
     # Component engines for Spread and Funding Arb (unchanged baseline)
-    spread_stream, sp_decomp = run_spread_engine(processed, dataset, UNIVERSE, eval_index, n)
-    arb_stream, arb_decomp = run_funding_arb_engine(dataset, UNIVERSE, eval_index, n, arb_mag_scale)
+    spread_stream, _sp_decomp = run_spread_engine(processed, dataset, UNIVERSE, eval_index, n)
+    arb_stream, _arb_decomp = run_funding_arb_engine(dataset, UNIVERSE, eval_index, n, arb_mag_scale)
     spread_filtered = spread_stream * macro_regime
 
     # 2. News Overlap Mask (2.90 Years: 2022-07-01 to 2025-05-23)
@@ -261,7 +261,7 @@ def main():
     tau_proto = lgb_bundle["gate_thresholds"]["tau_proto"]
 
     # NLP & Feature Panel
-    eval_panel, meta = engineer_nlp_features_and_targets()
+    eval_panel, _meta = engineer_nlp_features_and_targets()
 
     X_mkt = eval_panel[MARKET_NUMERICAL_COLS].to_numpy(dtype=np.float32)
     nov = eval_panel["embedding_novelty_score"].to_numpy(dtype=np.float32)

@@ -6,17 +6,17 @@ retrieves /health degraded fallback telemetry, and prints side-by-side benchmark
 """
 
 import os
+import signal
+import subprocess
 import sys
 import time
-import subprocess
-import signal
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any
 
-import pandas as pd
 import httpx
+import pandas as pd
 
-from apex_multimodal_risk.src.utils import setup_logger, PROJECT_ROOT
+from apex_multimodal_risk.src.utils import PROJECT_ROOT, setup_logger
 
 logger = setup_logger("run_benchmark")
 
@@ -29,7 +29,7 @@ def wait_for_server(url: str, timeout: float = 20.0) -> bool:
             if resp.status_code == 200:
                 logger.info(f"Microservice is healthy at {url}")
                 return True
-        except Exception:
+        except (httpx.RequestError, httpx.HTTPError):
             pass
         time.sleep(0.5)
     return False
@@ -66,7 +66,7 @@ def run_benchmark_for_profile(
     host: str,
     port: int,
     results_dir: Path,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     base_url = f"http://{host}:{port}"
     csv_prefix = results_dir / f"locust_{profile_name}"
 
@@ -99,7 +99,7 @@ def run_benchmark_for_profile(
         env = os.environ.copy()
         env["LOCUST_PROFILE"] = profile_name
 
-        locust_proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT), env=env, capture_output=True, text=True)
+        locust_proc = subprocess.run(cmd, check=False, cwd=str(PROJECT_ROOT), env=env, capture_output=True, text=True)
         if locust_proc.returncode != 0:
             logger.warning(f"Locust returned code {locust_proc.returncode}: {locust_proc.stderr}")
 

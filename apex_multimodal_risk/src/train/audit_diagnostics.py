@@ -15,54 +15,48 @@ Executes:
    - 3-Way APEX v45 Downstream Overlay with 25 bps one-way stress slippage on scale turnover.
 """
 
-import os
 import gc
+import os
 import sys
 import time
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from apex_multimodal_risk.src.utils import (
-    setup_logger,
-    PROJECT_ROOT,
-    get_device,
-    read_parquet_utc,
-    enforce_utc_columns,
-)
 from apex_multimodal_risk.src.features.shared_features import (
-    load_and_merge_features_and_targets,
-    CPCVStandardScaler,
     MARKET_NUMERICAL_COLS,
-    NEWS_AGG_COLS,
-)
-from apex_multimodal_risk.src.train.cpcv_runner import generate_cpcv_splits, CPCVSplit
-from apex_multimodal_risk.src.train.calibration import (
-    PlattScaler,
-    compute_constant_prior_metrics,
-    compute_all_metrics,
-    compute_ece,
+    CPCVStandardScaler,
+    load_and_merge_features_and_targets,
 )
 from apex_multimodal_risk.src.models.baselines import (
-    GARCHSkewBaseline,
-    LightGBMBaseline,
-    GARCH_SKEW_FEATURES,
     LIGHTGBM_FEATURES,
+    LightGBMBaseline,
 )
 from apex_multimodal_risk.src.models.itransformer import iTransformerOnlyModel
-from apex_multimodal_risk.src.models.multimodal_fusion import MultimodalCrossAttentionFusion
+from apex_multimodal_risk.src.models.multimodal_fusion import (
+    MultimodalCrossAttentionFusion,
+)
+from apex_multimodal_risk.src.train.calibration import (
+    PlattScaler,
+    compute_ece,
+)
+from apex_multimodal_risk.src.train.cpcv_runner import generate_cpcv_splits
 from apex_multimodal_risk.src.train.train_ablation import (
-    prepare_tabular_data,
-    build_lookback_tensor,
     build_lazy_news_index,
+    build_lookback_tensor,
     eval_itransformer_batched,
     eval_multimodal_batched,
     get_peak_rss_mb,
+    prepare_tabular_data,
+)
+from apex_multimodal_risk.src.utils import (
+    PROJECT_ROOT,
+    get_device,
+    read_parquet_utc,
+    setup_logger,
 )
 
 logger = setup_logger("audit_diagnostics")
@@ -92,7 +86,7 @@ def compute_comprehensive_metrics(
     probs_cal: np.ndarray,
     top_pct: float = 0.05,
     n_bins: int = 10,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Computes comprehensive ranking and skill metrics:
     - PR-AUC
@@ -104,7 +98,7 @@ def compute_comprehensive_metrics(
     - Brier Skill Score (BSS = 1 - Brier / Brier_ref)
     - ECE (10 bins)
     """
-    from sklearn.metrics import precision_recall_curve, auc, roc_auc_score
+    from sklearn.metrics import auc, precision_recall_curve, roc_auc_score
 
     y = np.asarray(y_true, dtype=np.float64)
     p = np.asarray(probs_cal, dtype=np.float64)
@@ -117,7 +111,7 @@ def compute_comprehensive_metrics(
     pr_auc = float(auc(rec, prec))
     try:
         roc_auc = float(roc_auc_score(y, p))
-    except Exception:
+    except ValueError:
         roc_auc = 0.5
 
     # Top 5% ranking metrics
@@ -148,7 +142,7 @@ def compute_comprehensive_metrics(
     }
 
 
-def audit_metadata_and_causality() -> Dict[str, Any]:
+def audit_metadata_and_causality() -> dict[str, Any]:
     """
     Part 1: Audits confirmation_count causality, verifies absence of post-hoc columns,
     and runs a 1-split News-Shuffle Placebo Test.
@@ -160,8 +154,8 @@ def audit_metadata_and_causality() -> Dict[str, Any]:
     # 1. Inspect confirmation_count
     news_dedup = pd.read_parquet(PROJECT_ROOT / "apex_multimodal_risk/data/processed/news_dedup.parquet")
     conf_counts = news_dedup["confirmation_count"].value_counts().to_dict()
-    is_retrospective = any(c > 1 for c in conf_counts.keys())
-    
+    is_retrospective = any(c > 1 for c in conf_counts)
+
     logger.info(f"confirmation_count audit: unique counts = {conf_counts}")
     if is_retrospective:
         logger.warning(
@@ -175,7 +169,7 @@ def audit_metadata_and_causality() -> Dict[str, Any]:
     forbidden_cols = ["vote_counts", "total_votes", "market_direction", "vote_counts_json"]
     entered_lgbm = [c for c in forbidden_cols if c in LIGHTGBM_FEATURES]
     entered_market = [c for c in forbidden_cols if c in MARKET_NUMERICAL_COLS]
-    
+
     logger.info(f"Post-hoc columns in LIGHTGBM_FEATURES: {entered_lgbm} (Clean: {len(entered_lgbm) == 0})")
     logger.info(f"Post-hoc columns in MARKET_NUMERICAL_COLS: {entered_market} (Clean: {len(entered_market) == 0})")
 
@@ -243,7 +237,7 @@ def audit_metadata_and_causality() -> Dict[str, Any]:
     logger.info(f"Split 0 | Market_Only:          PR-AUC = {res_mkt['pr_auc']:.4f}, Lift@Top-5% = {res_mkt['lift_top5']:.2f}x, BSS = {res_mkt['bss']:.4f}")
     logger.info(f"Split 0 | Market+News (True):   PR-AUC = {res_news['pr_auc']:.4f}, Lift@Top-5% = {res_news['lift_top5']:.2f}x, BSS = {res_news['bss']:.4f}")
     logger.info(f"Split 0 | News-Shuffle Placebo: PR-AUC = {res_plac['pr_auc']:.4f}, Lift@Top-5% = {res_plac['lift_top5']:.2f}x, BSS = {res_plac['bss']:.4f}")
-    
+
     lift_true = res_news["pr_auc"] - res_mkt["pr_auc"]
     lift_placebo = res_plac["pr_auc"] - res_mkt["pr_auc"]
     logger.info(f"True News Marginal Lift:    {lift_true:+.4f}")
@@ -260,7 +254,7 @@ def audit_metadata_and_causality() -> Dict[str, Any]:
     }
 
 
-def execute_full_conditional_attribution() -> Dict[str, Any]:
+def execute_full_conditional_attribution() -> dict[str, Any]:
     """
     Part 2: Runs 10-split CPCV across 4 models:
     - LightGBM_Market_Only
@@ -320,15 +314,15 @@ def execute_full_conditional_attribution() -> Dict[str, Any]:
         "Multimodal_iTransformer_NLP",
     ]
 
-    split_metrics: Dict[str, List[Dict[str, float]]] = {m: [] for m in models}
-    all_oos_probs: Dict[str, List[np.ndarray]] = {m: [] for m in models}
-    all_oos_y: List[np.ndarray] = []
-    all_oos_ts: List[pd.Series] = []
-    all_oos_active_mask: List[np.ndarray] = []
-    all_oos_vol: List[np.ndarray] = []
+    split_metrics: dict[str, list[dict[str, float]]] = {m: [] for m in models}
+    all_oos_probs: dict[str, list[np.ndarray]] = {m: [] for m in models}
+    all_oos_y: list[np.ndarray] = []
+    all_oos_ts: list[pd.Series] = []
+    all_oos_active_mask: list[np.ndarray] = []
+    all_oos_vol: list[np.ndarray] = []
 
     rezero_gates = []
-    lgbm_feature_importances: List[np.ndarray] = []
+    lgbm_feature_importances: list[np.ndarray] = []
 
     for split in splits:
         split_id = split.split_id
@@ -342,7 +336,7 @@ def execute_full_conditional_attribution() -> Dict[str, Any]:
         scaler.fit(eval_panel.loc[tr_mask])
 
         y_tr, y_val, y_te = y_clf_all[tr_mask], y_clf_all[val_mask], y_clf_all[te_mask]
-        v_tr, v_val, v_te = y_var_all[tr_mask], y_var_all[val_mask], y_var_all[te_mask]
+        v_tr, _v_val, _v_te = y_var_all[tr_mask], y_var_all[val_mask], y_var_all[te_mask]
 
         all_oos_y.append(y_te)
         all_oos_ts.append(panel_timestamps[te_mask])
@@ -490,7 +484,6 @@ def execute_full_conditional_attribution() -> Dict[str, Any]:
     flat_probs = {m: np.concatenate(all_oos_probs[m]) for m in models}
 
     # Slice Evaluations
-    slice_names = ["Full OOS Panel", "News-Active Slice", "Quiet Slice", "Low Trailing Vol Tercile"]
     slice_masks = {
         "Full OOS Panel": np.ones(len(flat_y), dtype=bool),
         "News-Active Slice": flat_active,
@@ -498,7 +491,7 @@ def execute_full_conditional_attribution() -> Dict[str, Any]:
         "Low Trailing Vol Tercile": flat_low_vol,
     }
 
-    slice_results: Dict[str, Dict[str, Dict[str, float]]] = {}
+    slice_results: dict[str, dict[str, dict[str, float]]] = {}
     for s_name, s_mask in slice_masks.items():
         slice_results[s_name] = {}
         for m in models:
@@ -523,8 +516,8 @@ def execute_full_conditional_attribution() -> Dict[str, Any]:
 
 
 def execute_shock_case_studies_and_slippage_overlay(
-    audit_data: Dict[str, Any]
-) -> Dict[str, Any]:
+    audit_data: dict[str, Any]
+) -> dict[str, Any]:
     """
     Part 3: Hourly lead-lag shock case studies (FTX, SEC, Aug 2024) and 3-way stress overlay
     with 25 bps one-way slippage.
@@ -533,7 +526,6 @@ def execute_shock_case_studies_and_slippage_overlay(
     logger.info("PART 3: HISTORICAL SHOCK CASE STUDIES & 3-WAY STRESS OVERLAY")
     logger.info("=" * 80)
 
-    eval_panel = audit_data["eval_panel"]
     flat_ts = audit_data["flat_ts"]
     flat_y = audit_data["flat_y"]
     flat_probs = audit_data["flat_probs"]
@@ -562,7 +554,7 @@ def execute_shock_case_studies_and_slippage_overlay(
     for s_name, (t_start, t_end) in shock_windows.items():
         sub_preds = hourly_preds.loc[t_start:t_end].copy()
         sub_news = news_df[(news_df["ingested_at"] >= t_start) & (news_df["ingested_at"] <= t_end)]
-        
+
         # Max crash risk hour
         peak_mkt_hour = sub_preds["prob_mkt"].idxmax()
         peak_multi_hour = sub_preds["prob_multimodal"].idxmax()
@@ -583,18 +575,18 @@ def execute_shock_case_studies_and_slippage_overlay(
     sys.path.insert(0, str(PROJECT_ROOT / "research"))
     sys.path.insert(0, str(PROJECT_ROOT))
     from research.apex_v45_champion import (
-        load_data_and_features,
-        run_directional_engine,
-        run_spread_engine,
-        run_funding_arb_engine,
         UNIVERSE,
+        W_ARB,
         W_DIR,
         W_SPREAD,
-        W_ARB,
         fast_metrics,
+        load_data_and_features,
+        run_directional_engine,
+        run_funding_arb_engine,
+        run_spread_engine,
     )
 
-    dataset, processed, garch_wts, eval_index, n, split_idx, macro_regime, mtf_skew_mult, arb_mag_scale = (
+    dataset, processed, garch_wts, eval_index, n, _split_idx, macro_regime, mtf_skew_mult, arb_mag_scale = (
         load_data_and_features()
     )
 
@@ -613,7 +605,7 @@ def execute_shock_case_studies_and_slippage_overlay(
     def evaluate_circuit_breaker_with_slippage(probs_series: pd.Series, tau: float = 0.097, slippage_bps: float = 25.0):
         aligned_p = probs_series.reindex(eval_index).fillna(0.0412).values
         scale = np.where(aligned_p <= tau, 1.0, np.clip(1.0 - 4.0 * (aligned_p - tau), 0.25, 1.0))
-        
+
         # Slippage drag: slippage_bps * |scale_t - scale_{t-1}| * W_DIR
         scale_shift = np.roll(scale, 1)
         scale_shift[0] = 1.0
@@ -677,7 +669,7 @@ def execute_shock_case_studies_and_slippage_overlay(
     }
 
 
-def run_full_diagnostic_audit() -> Dict[str, Any]:
+def run_full_diagnostic_audit() -> dict[str, Any]:
     t0 = time.time()
     logger.info("=" * 80)
     logger.info("STARTING SPRINT 2.5 READ-ONLY DIAGNOSTIC AUDIT (EXP-002c)")

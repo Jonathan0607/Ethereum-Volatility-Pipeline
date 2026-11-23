@@ -14,37 +14,33 @@ Evaluates 4 Feature Sets across 10 CPCV splits:
 - M3_Market+NoveltyAndProtoTop (16 market + novelty + gated_proto + burst ratio)
 """
 
-import os
 import gc
-import sys
-import time
 import json
 import pickle
-import resource
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+import time
+from typing import Any
 
 import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 
-from apex_multimodal_risk.src.utils import (
-    setup_logger,
-    PROJECT_ROOT,
-    get_device,
-    read_parquet_utc,
-)
 from apex_multimodal_risk.src.features.shared_features import (
-    load_and_merge_features_and_targets,
     MARKET_NUMERICAL_COLS,
+    load_and_merge_features_and_targets,
 )
-from apex_multimodal_risk.src.train.cpcv_runner import generate_cpcv_splits, CPCVSplit
+from apex_multimodal_risk.src.models.baselines import LightGBMBaseline
 from apex_multimodal_risk.src.train.calibration import (
     PlattScaler,
     compute_ece,
 )
-from apex_multimodal_risk.src.models.baselines import LightGBMBaseline
+from apex_multimodal_risk.src.train.cpcv_runner import generate_cpcv_splits
 from apex_multimodal_risk.src.train.train_ablation import get_peak_rss_mb
+from apex_multimodal_risk.src.utils import (
+    PROJECT_ROOT,
+    get_device,
+    read_parquet_utc,
+    setup_logger,
+)
 
 logger = setup_logger("exp002e_nlp_angles")
 
@@ -64,9 +60,9 @@ def compute_comprehensive_metrics(
     probs_cal: np.ndarray,
     top_pct: float = 0.05,
     n_bins: int = 10,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Computes ranking, skill, and calibration metrics."""
-    from sklearn.metrics import precision_recall_curve, auc, roc_auc_score
+    from sklearn.metrics import auc, precision_recall_curve, roc_auc_score
 
     y = np.asarray(y_true, dtype=np.float64)
     p = np.asarray(probs_cal, dtype=np.float64)
@@ -78,7 +74,7 @@ def compute_comprehensive_metrics(
     pr_auc = float(auc(rec, prec))
     try:
         roc_auc = float(roc_auc_score(y, p))
-    except Exception:
+    except ValueError:
         roc_auc = 0.5
 
     k = max(1, int(n * top_pct))
@@ -107,7 +103,7 @@ def compute_comprehensive_metrics(
     }
 
 
-def engineer_nlp_features_and_targets() -> Tuple[pd.DataFrame, Dict[str, Any]]:
+def engineer_nlp_features_and_targets() -> tuple[pd.DataFrame, dict[str, Any]]:
     """
     Encodes 5 risk prototypes ONCE, computes strictly causal similarities and burst ratio,
     and constructs Target 2 (vol_expansion_24h).
@@ -239,7 +235,7 @@ def engineer_nlp_features_and_targets() -> Tuple[pd.DataFrame, Dict[str, Any]]:
     return eval_panel, meta
 
 
-def run_exp002e_cpcv(eval_panel: pd.DataFrame, meta: Dict[str, Any]) -> Dict[str, Any]:
+def run_exp002e_cpcv(eval_panel: pd.DataFrame, meta: dict[str, Any]) -> dict[str, Any]:
     """Runs 10-split CPCV across M0, M1, M2, M3 on both Target 1 and Target 2."""
     unique_ts = np.array(sorted(eval_panel["timestamp"].unique()))
     splits = generate_cpcv_splits(unique_ts, n_blocks=5, k_test=2, purge_embargo_hours=504)
@@ -270,16 +266,16 @@ def run_exp002e_cpcv(eval_panel: pd.DataFrame, meta: Dict[str, Any]) -> Dict[str
     ]
 
     # Containers for out-of-sample predictions
-    oos_preds_t1: Dict[str, List[np.ndarray]] = {m: [] for m in models}
-    oos_preds_t2: Dict[str, List[np.ndarray]] = {m: [] for m in models}
-    oos_y1: List[np.ndarray] = []
-    oos_y2: List[np.ndarray] = []
-    oos_low_vol: List[np.ndarray] = []
+    oos_preds_t1: dict[str, list[np.ndarray]] = {m: [] for m in models}
+    oos_preds_t2: dict[str, list[np.ndarray]] = {m: [] for m in models}
+    oos_y1: list[np.ndarray] = []
+    oos_y2: list[np.ndarray] = []
+    oos_low_vol: list[np.ndarray] = []
 
     logger.info("Executing 10 CPCV splits across 4 feature sets on Targets 1 & 2...")
 
     for split in splits:
-        split_id = split.split_id
+        _split_id = split.split_id
         tr_mask = split.get_train_mask(panel_ts)
         val_mask = split.get_inner_val_mask(panel_ts)
         te_mask = split.get_test_mask(panel_ts)
@@ -296,7 +292,7 @@ def run_exp002e_cpcv(eval_panel: pd.DataFrame, meta: Dict[str, Any]) -> Dict[str
         tau_proto = float(np.percentile(eval_panel.loc[tr_mask, "max_proto_sim_24h"], 85.0))
 
         # Build feature matrices for each slice
-        def build_features(mask):
+        def build_features(mask, t_nov=tau_nov, t_proto=tau_proto):
             sub = eval_panel.loc[mask]
             X_mkt = sub[MARKET_FEATURES].to_numpy(dtype=np.float32)
             X_proto = sub[f_raw_proto].to_numpy(dtype=np.float32)
@@ -306,9 +302,9 @@ def run_exp002e_cpcv(eval_panel: pd.DataFrame, meta: Dict[str, Any]) -> Dict[str
             p_max = sub["max_proto_sim_24h"].to_numpy(dtype=np.float32)
             burst = sub["news_burst_ratio"].to_numpy(dtype=np.float32).reshape(-1, 1)
 
-            g_nov = np.maximum(0.0, nov - tau_nov).reshape(-1, 1)
-            g_proto = np.maximum(0.0, p_max - tau_proto).reshape(-1, 1)
-            alert = ((nov > tau_nov) | (p_max > tau_proto)).astype(np.float32).reshape(-1, 1)
+            g_nov = np.maximum(0.0, nov - t_nov).reshape(-1, 1)
+            g_proto = np.maximum(0.0, p_max - t_proto).reshape(-1, 1)
+            alert = ((nov > t_nov) | (p_max > t_proto)).astype(np.float32).reshape(-1, 1)
 
             X_m1 = np.concatenate([X_mkt, X_proto], axis=1)
             X_m2 = np.concatenate([X_mkt, g_nov, g_proto, alert, burst], axis=1)
@@ -401,8 +397,8 @@ def run_exp002e_cpcv(eval_panel: pd.DataFrame, meta: Dict[str, Any]) -> Dict[str
 
 
 def conditional_promotion_and_artifacts(
-    results: Dict[str, Any],
-) -> Dict[str, Any]:
+    results: dict[str, Any],
+) -> dict[str, Any]:
     """
     Applies conditional promotion rules:
     - Target 1: If best NLP variant beats EXP-002d (0.0581 PR-AUC, +0.0035 BSS, ECE < 0.015), promote to best_lightgbm_risk.pkl.

@@ -29,74 +29,77 @@ Methodology:
 """
 
 import os
+
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["OMP_NUM_THREADS"] = "1"
 import sys
 import time
-import json
-import pickle
-from pathlib import Path
-from typing import Dict, List, Tuple, Any, Optional
 from datetime import timedelta
+from typing import Any
 
+import lightgbm as lgb
+import matplotlib
 import numpy as np
 import pandas as pd
 import scipy.stats as scipy_stats
-import lightgbm as lgb
 import torch
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 
-from apex_multimodal_risk.src.utils import setup_logger, PROJECT_ROOT, get_device
-from apex_multimodal_risk.src.train.exp002e_nlp_angles import engineer_nlp_features_and_targets
+matplotlib.use("Agg")
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+
 from apex_multimodal_risk.src.features.shared_features import (
     MARKET_NUMERICAL_COLS,
-    CPCVStandardScaler,
+)
+from apex_multimodal_risk.src.models.conformal import MultiAssetDelayedFeedbackACI
+from apex_multimodal_risk.src.models.itransformer import iTransformerOnlyModel
+from apex_multimodal_risk.src.train.exp002e_nlp_angles import (
+    engineer_nlp_features_and_targets,
+)
+from apex_multimodal_risk.src.train.train_ablation import (
+    build_lookback_tensor,
+    eval_itransformer_batched,
 )
 from apex_multimodal_risk.src.train.train_finalization import PlattScaler
-from apex_multimodal_risk.src.train.train_ablation import build_lookback_tensor, eval_itransformer_batched
-from apex_multimodal_risk.src.models.itransformer import iTransformerOnlyModel
-from apex_multimodal_risk.src.models.conformal import MultiAssetDelayedFeedbackACI
+from apex_multimodal_risk.src.utils import PROJECT_ROOT, setup_logger
 
 logger = setup_logger("walkforward_equity_curve")
 
 sys.path.insert(0, str(PROJECT_ROOT / "research"))
 sys.path.insert(0, str(PROJECT_ROOT))
 from research.apex_v45_champion import (
-    load_data_and_features,
-    run_funding_arb_engine,
-    UNIVERSE,
-    WARMUP_BARS,
-    DIR_WT,
-    DIR_WC,
-    DIR_WO,
     DIR_HYST,
     DIR_TAKER_FEE,
-    SP_WT,
+    DIR_WC,
+    DIR_WO,
+    DIR_WT,
+    HOURS_PER_YEAR,
+    LEVERAGE,
     SP_WC,
     SP_WO,
+    SP_WT,
     SPREAD_HYST,
     SPREAD_MAKER_FEE,
-    LEVERAGE,
+    UNIVERSE,
+    W_ARB,
     W_DIR,
     W_SPREAD,
-    W_ARB,
-    HOURS_PER_YEAR,
+    WARMUP_BARS,
+    load_data_and_features,
+    run_funding_arb_engine,
 )
 
 
 def run_custom_directional_engine(
-    processed: Dict[str, pd.DataFrame],
-    dataset: Dict[str, pd.DataFrame],
-    univ: List[str],
+    processed: dict[str, pd.DataFrame],
+    dataset: dict[str, pd.DataFrame],
+    univ: list[str],
     eval_index: pd.DatetimeIndex,
     n: int,
-    wts: Dict[str, np.ndarray],
-    skew_mult_dict: Dict[str, np.ndarray],
-    gate_mask: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
+    wts: dict[str, np.ndarray],
+    skew_mult_dict: dict[str, np.ndarray],
+    gate_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
     """
     Parametric Directional Engine supporting True Zero-Liquidation Entry Gating.
     When gate_mask[t] is True, clamps |pos_gated_t| <= |pos_gated_{t-1}| (blocks risk expansion, allows exits).
@@ -172,13 +175,13 @@ def run_custom_directional_engine(
 
 
 def run_custom_spread_engine(
-    processed: Dict[str, pd.DataFrame],
-    dataset: Dict[str, pd.DataFrame],
-    univ: List[str],
+    processed: dict[str, pd.DataFrame],
+    dataset: dict[str, pd.DataFrame],
+    univ: list[str],
     eval_index: pd.DatetimeIndex,
     n: int,
-    gate_mask: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
+    gate_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
     """
     Parametric Spread Engine supporting True Zero-Liquidation Entry Gating.
     When gate_mask[t] is True, clamps |pos_gated_t| <= |pos_gated_{t-1}|.
@@ -208,9 +211,7 @@ def run_custom_spread_engine(
             old = cur_pos[s]
             id_s = ideal[s]
             if gate_mask is not None and gate_mask[t]:
-                if old == 0.0:
-                    id_s = 0.0
-                elif np.sign(id_s) != np.sign(old):
+                if old == 0.0 or np.sign(id_s) != np.sign(old):
                     id_s = 0.0
                 elif abs(id_s) > abs(old):
                     id_s = old
@@ -233,7 +234,7 @@ def compute_quant_metrics(
     incremental_turnover: np.ndarray,
     slippage_bps: float,
     hedged_mask: np.ndarray,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Computes Institutional Quant Tear Sheet Metrics with honest incremental fee accounting."""
     n = len(returns)
     if n == 0:
@@ -302,8 +303,8 @@ def compute_quant_metrics(
 def compute_crisis_attribution(
     eval_index: pd.DatetimeIndex,
     returns: np.ndarray,
-    episodes: Dict[str, Tuple[str, str]],
-) -> Dict[str, Dict[str, float]]:
+    episodes: dict[str, tuple[str, str]],
+) -> dict[str, dict[str, float]]:
     """Calculates cumulative net return and max drawdown across crisis windows."""
     ret_series = pd.Series(returns, index=eval_index)
     results = {}
@@ -320,26 +321,26 @@ def compute_crisis_attribution(
     return results
 
 
-def run_expanding_walk_forward() -> Dict[str, Any]:
+def run_expanding_walk_forward() -> dict[str, Any]:
     """Runs causal expanding walk-forward out-of-sample backtest across 2022-11-01 to 2025-05-23."""
     logger.info("=" * 80)
     logger.info("EXECUTING CAUSAL EXPANDING WALK-FORWARD BACKTEST (EXP-003d)")
     logger.info("=" * 80)
-    t0 = time.time()
+    _t0 = time.time()
 
     # 1. Load APEX v45 Champion Datasets and Streams
     logger.info("Loading APEX v45 champion datasets and features...")
-    dataset, processed, garch_wts, eval_index, n, split_idx, macro_regime, mtf_skew_mult, arb_mag_scale = (
+    dataset, processed, garch_wts, eval_index, n, _split_idx, macro_regime, mtf_skew_mult, arb_mag_scale = (
         load_data_and_features()
     )
 
     # Base return streams and base gross positions (ALREADY NET OF TRADING FEES)
-    dir_ret_base, dir_turn_base, pos_dir_base = run_custom_directional_engine(
+    dir_ret_base, _dir_turn_base, pos_dir_base = run_custom_directional_engine(
         processed, dataset, UNIVERSE, eval_index, n, garch_wts, mtf_skew_mult, gate_mask=None
     )
     dir_filtered_base = dir_ret_base * macro_regime
 
-    sp_ret_base, sp_turn_base, pos_sp_base = run_custom_spread_engine(
+    sp_ret_base, _sp_turn_base, pos_sp_base = run_custom_spread_engine(
         processed, dataset, UNIVERSE, eval_index, n, gate_mask=None
     )
     spread_filtered_base = sp_ret_base * macro_regime
@@ -349,10 +350,10 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
     # Actual hourly gross exposure (0.0 identically when macro_regime == 0)
     gross_dir_base = np.sum([np.abs(pos_dir_base[s]) for s in UNIVERSE], axis=0) * macro_regime
     gross_sp_base = np.sum([np.abs(pos_sp_base[s]) for s in UNIVERSE], axis=0) * macro_regime
-    gross_book_base = (W_DIR * gross_dir_base + W_SPREAD * gross_sp_base) / (W_DIR + W_SPREAD)
+    _gross_book_base = (W_DIR * gross_dir_base + W_SPREAD * gross_sp_base) / (W_DIR + W_SPREAD)
 
     # 2. Load Multimodal Features and Targets Panel
-    eval_panel, meta = engineer_nlp_features_and_targets()
+    eval_panel, _meta = engineer_nlp_features_and_targets()
     eval_panel = eval_panel.sort_values(["timestamp", "asset"]).reset_index(drop=True)
 
     # 3. Compute Delayed-Feedback ACI 5% VaR across full panel causally
@@ -593,17 +594,17 @@ def run_expanding_walk_forward() -> Dict[str, Any]:
 
     # Run true entry-gated engines for Strategies 2 and 3
     logger.info("Simulating true zero-liquidation entry-gated engines for S2 and S3...")
-    dir_ret_s2, dir_turn_s2, pos_dir_s2 = run_custom_directional_engine(
+    dir_ret_s2, _dir_turn_s2, pos_dir_s2 = run_custom_directional_engine(
         processed, dataset, UNIVERSE, eval_index, n, garch_wts, mtf_skew_mult, gate_mask=gate_mask_s2
     )
-    sp_ret_s2, sp_turn_s2, pos_sp_s2 = run_custom_spread_engine(
+    sp_ret_s2, _sp_turn_s2, pos_sp_s2 = run_custom_spread_engine(
         processed, dataset, UNIVERSE, eval_index, n, gate_mask=gate_mask_s2
     )
 
-    dir_ret_s3, dir_turn_s3, pos_dir_s3 = run_custom_directional_engine(
+    dir_ret_s3, _dir_turn_s3, pos_dir_s3 = run_custom_directional_engine(
         processed, dataset, UNIVERSE, eval_index, n, garch_wts, mtf_skew_mult, gate_mask=gate_mask_s3
     )
-    sp_ret_s3, sp_turn_s3, pos_sp_s3 = run_custom_spread_engine(
+    sp_ret_s3, _sp_turn_s3, pos_sp_s3 = run_custom_spread_engine(
         processed, dataset, UNIVERSE, eval_index, n, gate_mask=gate_mask_s3
     )
 

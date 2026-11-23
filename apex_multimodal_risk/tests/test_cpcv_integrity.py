@@ -12,12 +12,12 @@ import pandas as pd
 import pytest
 
 from apex_multimodal_risk.src.train.cpcv_runner import generate_cpcv_splits
-from apex_multimodal_risk.src.utils import read_parquet_utc
+from apex_multimodal_risk.src.utils import PROJECT_ROOT, read_parquet_utc
 
 
 @pytest.fixture(scope="module")
 def panel_timestamps():
-    df = read_parquet_utc("apex_multimodal_risk/data/processed/aligned_hourly.parquet")
+    df = read_parquet_utc(PROJECT_ROOT / "apex_multimodal_risk/data/processed/aligned_hourly.parquet")
     unique_ts = sorted(df["timestamp"].unique())
     return unique_ts
 

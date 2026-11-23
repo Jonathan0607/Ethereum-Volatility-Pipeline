@@ -13,16 +13,15 @@ Includes CPCVStandardScaler for leak-free standardization fit strictly on train 
 
 import os
 import pickle
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 from apex_multimodal_risk.src.utils import (
-    setup_logger,
     PROJECT_ROOT,
     enforce_utc_columns,
     read_parquet_utc,
+    setup_logger,
 )
 
 logger = setup_logger("shared_features")
@@ -69,7 +68,7 @@ def compute_ewma_vol(returns: pd.Series, span: int = 48) -> pd.Series:
 
 def build_per_asset_causal_features(
     df: pd.DataFrame,
-    garch_weights_series: Optional[pd.Series] = None,
+    garch_weights_series: pd.Series | None = None,
 ) -> pd.DataFrame:
     """
     Computes single-asset causal features strictly using historical information <= bar T.
@@ -124,8 +123,8 @@ def build_per_asset_causal_features(
 
 
 def build_market_features(
-    market_data: Dict[str, pd.DataFrame],
-    garch_weights_dict: Optional[Dict[str, np.ndarray]] = None,
+    market_data: dict[str, pd.DataFrame],
+    garch_weights_dict: dict[str, np.ndarray] | None = None,
 ) -> pd.DataFrame:
     """
     Computes causal per-asset features and cross-asset dispersion across all assets.
@@ -224,10 +223,10 @@ class CPCVStandardScaler:
     Guarantees no cross-fold contamination or future data leakage.
     """
 
-    def __init__(self, feature_cols: List[str]):
+    def __init__(self, feature_cols: list[str]):
         self.feature_cols = feature_cols
-        self.means_: Optional[np.ndarray] = None
-        self.stds_: Optional[np.ndarray] = None
+        self.means_: np.ndarray | None = None
+        self.stds_: np.ndarray | None = None
 
     def fit(self, df_train: pd.DataFrame) -> "CPCVStandardScaler":
         values = df_train[self.feature_cols].to_numpy(dtype=np.float32)

@@ -11,40 +11,21 @@ Executes:
 5. Promote winning production artifacts to apex_multimodal_risk/artifacts/ for Sprint 3 ONNX export.
 """
 
-import os
 import gc
+import pickle
 import sys
 import time
-import pickle
-import resource
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from apex_multimodal_risk.src.utils import (
-    setup_logger,
-    PROJECT_ROOT,
-    get_device,
-    read_parquet_utc,
-    enforce_utc_columns,
-)
 from apex_multimodal_risk.src.features.shared_features import (
-    load_and_merge_features_and_targets,
-    CPCVStandardScaler,
     MARKET_NUMERICAL_COLS,
-    NEWS_AGG_COLS,
-)
-from apex_multimodal_risk.src.train.cpcv_runner import generate_cpcv_splits, CPCVSplit
-from apex_multimodal_risk.src.train.calibration import (
-    PlattScaler,
-    compute_constant_prior_metrics,
-    compute_all_metrics,
-    compute_ece,
+    CPCVStandardScaler,
+    load_and_merge_features_and_targets,
 )
 from apex_multimodal_risk.src.models.baselines import (
     LightGBMBaseline,
@@ -52,10 +33,21 @@ from apex_multimodal_risk.src.models.baselines import (
 from apex_multimodal_risk.src.models.itransformer import (
     iTransformerOnlyModel,
 )
+from apex_multimodal_risk.src.train.calibration import (
+    PlattScaler,
+    compute_ece,
+)
+from apex_multimodal_risk.src.train.cpcv_runner import generate_cpcv_splits
 from apex_multimodal_risk.src.train.train_ablation import (
     build_lookback_tensor,
     eval_itransformer_batched,
     get_peak_rss_mb,
+)
+from apex_multimodal_risk.src.utils import (
+    PROJECT_ROOT,
+    get_device,
+    read_parquet_utc,
+    setup_logger,
 )
 
 logger = setup_logger("train_finalization")
@@ -74,9 +66,9 @@ def compute_comprehensive_metrics(
     probs_cal: np.ndarray,
     top_pct: float = 0.05,
     n_bins: int = 10,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Computes ranking, skill, and calibration metrics."""
-    from sklearn.metrics import precision_recall_curve, auc, roc_auc_score
+    from sklearn.metrics import auc, precision_recall_curve, roc_auc_score
 
     y = np.asarray(y_true, dtype=np.float64)
     p = np.asarray(probs_cal, dtype=np.float64)
@@ -88,7 +80,7 @@ def compute_comprehensive_metrics(
     pr_auc = float(auc(rec, prec))
     try:
         roc_auc = float(roc_auc_score(y, p))
-    except Exception:
+    except ValueError:
         roc_auc = 0.5
 
     k = max(1, int(n * top_pct))
@@ -117,7 +109,7 @@ def compute_comprehensive_metrics(
     }
 
 
-def prepare_final_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
+def prepare_final_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     """Loads panel features and prepares has_tier1_news_24h feature."""
     logger.info("Loading merged panel and news deduplication parquets...")
     merged_panel = load_and_merge_features_and_targets()
@@ -143,7 +135,7 @@ def prepare_final_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
 
 def run_cpcv_finalization(
     eval_panel: pd.DataFrame,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Runs 10-split CPCV across LightGBM_Market_Only, LightGBM_Market+PrunedNLP, and iTransformer_Only."""
     device = get_device()
     logger.info(f"Running CPCV finalization on device: {device}")
@@ -165,10 +157,10 @@ def run_cpcv_finalization(
         "iTransformer_Only",
     ]
 
-    split_metrics: Dict[str, List[Dict[str, float]]] = {m: [] for m in models}
-    all_oos_probs: Dict[str, List[np.ndarray]] = {m: [] for m in models}
-    all_oos_y: List[np.ndarray] = []
-    all_oos_ts: List[pd.Series] = []
+    split_metrics: dict[str, list[dict[str, float]]] = {m: [] for m in models}
+    all_oos_probs: dict[str, list[np.ndarray]] = {m: [] for m in models}
+    all_oos_y: list[np.ndarray] = []
+    all_oos_ts: list[pd.Series] = []
 
     lgbm_mkt_calibrators = []
     lgbm_pruned_calibrators = []
@@ -185,7 +177,7 @@ def run_cpcv_finalization(
         scaler.fit(eval_panel.loc[tr_mask])
 
         y_tr, y_val, y_te = y_clf_all[tr_mask], y_clf_all[val_mask], y_clf_all[te_mask]
-        v_tr, v_val, v_te = y_var_all[tr_mask], y_var_all[val_mask], y_var_all[te_mask]
+        v_tr, _v_val, _v_te = y_var_all[tr_mask], y_var_all[val_mask], y_var_all[te_mask]
 
         all_oos_y.append(y_te)
         all_oos_ts.append(panel_timestamps[te_mask])
@@ -312,11 +304,11 @@ def run_cpcv_finalization(
 
 
 def evaluate_hysteresis_overlay(
-    cpcv_data: Dict[str, Any],
+    cpcv_data: dict[str, Any],
     cooldown_hours: int = 6,
     scale_low: float = 0.50,
     slippage_bps: float = 25.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Evaluates 6-hour minimum hold / hysteresis circuit breaker under 25 bps slippage:
     - Step scale to 0.50 when p_crash > tau
@@ -327,18 +319,18 @@ def evaluate_hysteresis_overlay(
     sys.path.insert(0, str(PROJECT_ROOT / "research"))
     sys.path.insert(0, str(PROJECT_ROOT))
     from research.apex_v45_champion import (
-        load_data_and_features,
-        run_directional_engine,
-        run_spread_engine,
-        run_funding_arb_engine,
         UNIVERSE,
+        W_ARB,
         W_DIR,
         W_SPREAD,
-        W_ARB,
         fast_metrics,
+        load_data_and_features,
+        run_directional_engine,
+        run_funding_arb_engine,
+        run_spread_engine,
     )
 
-    dataset, processed, garch_wts, eval_index, n, split_idx, macro_regime, mtf_skew_mult, arb_mag_scale = (
+    dataset, processed, garch_wts, eval_index, n, _split_idx, macro_regime, mtf_skew_mult, arb_mag_scale = (
         load_data_and_features()
     )
 
@@ -448,7 +440,7 @@ def evaluate_hysteresis_overlay(
     }
 
 
-def fit_and_save_production_artifacts(eval_panel: pd.DataFrame) -> Dict[str, str]:
+def fit_and_save_production_artifacts(eval_panel: pd.DataFrame) -> dict[str, str]:
     """Fits winning LightGBM and iTransformer on full dataset and saves to artifacts/."""
     artifacts_dir = PROJECT_ROOT / "apex_multimodal_risk/artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -552,7 +544,7 @@ def run_exp002d():
     logger.info("STARTING EXP-002d: MODEL SELECTION, CALIBRATION FINALIZATION & HYSTERESIS OVERLAY")
     logger.info("=" * 80)
 
-    eval_panel, news_df = prepare_final_data()
+    eval_panel, _news_df = prepare_final_data()
     cpcv_data = run_cpcv_finalization(eval_panel)
     overlay_data = evaluate_hysteresis_overlay(cpcv_data, cooldown_hours=6, scale_low=0.50, slippage_bps=25.0)
     artifacts = fit_and_save_production_artifacts(eval_panel)

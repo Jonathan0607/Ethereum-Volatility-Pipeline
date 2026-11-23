@@ -6,28 +6,24 @@ Endpoints:
 - POST /v1/feedback: Delayed-feedback ACI quantile update (causal 6h realization).
 """
 
-import os
-import sys
-import time
-import json
 import asyncio
-from collections import OrderedDict
+import json
 import threading
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC
+from typing import Any
 
 import numpy as np
-import pandas as pd
 import onnxruntime as ort
-from transformers import AutoTokenizer
+import pandas as pd
+from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
-from fastapi import FastAPI, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse
+from transformers import AutoTokenizer
 
-from apex_multimodal_risk.src.utils import setup_logger, PROJECT_ROOT
 from apex_multimodal_risk.src.models.conformal import MultiAssetDelayedFeedbackACI
+from apex_multimodal_risk.src.utils import PROJECT_ROOT, setup_logger
 
 logger = setup_logger("serving_app")
 
@@ -44,9 +40,9 @@ class BoundedLRUCache:
         self.hits_count: int = 0
         self.misses_count: int = 0
 
-    def get_many(self, keys: List[str]) -> Tuple[Dict[int, np.ndarray], List[Tuple[int, str]]]:
-        hits: Dict[int, np.ndarray] = {}
-        misses: List[Tuple[int, str]] = []
+    def get_many(self, keys: list[str]) -> tuple[dict[int, np.ndarray], list[tuple[int, str]]]:
+        hits: dict[int, np.ndarray] = {}
+        misses: list[tuple[int, str]] = []
         with self.lock:
             for idx, key in enumerate(keys):
                 # Ensure key is a non-empty, stripped headline string (never count empty or whitespace keys)
@@ -62,7 +58,7 @@ class BoundedLRUCache:
                     self.misses_count += 1
         return hits, misses
 
-    def set_many(self, items: List[Tuple[str, np.ndarray]]):
+    def set_many(self, items: list[tuple[str, np.ndarray]]):
         with self.lock:
             for key, val in items:
                 if not key or not isinstance(key, str) or not key.strip():
@@ -80,7 +76,7 @@ class BoundedLRUCache:
         with self.lock:
             return len(self.cache)
 
-    def stats(self) -> Dict[str, Any]:
+    def stats(self) -> dict[str, Any]:
         with self.lock:
             total = self.hits_count + self.misses_count
             hit_rate = (self.hits_count / total) if total > 0 else 0.0
@@ -98,17 +94,17 @@ class BoundedLRUCache:
 class EngineState:
     def __init__(self):
         self.start_time: float = time.time()
-        self.metadata: Dict[str, Any] = {}
-        self.sess_bge: Optional[ort.InferenceSession] = None
-        self.sess_itransformer: Optional[ort.InferenceSession] = None
-        self.sess_lgbm: Optional[ort.InferenceSession] = None
-        self.tokenizer: Optional[Any] = None
-        self.proto_matrix: Optional[np.ndarray] = None
-        self.proto_keys: List[str] = []
-        self.aci_manager: Optional[MultiAssetDelayedFeedbackACI] = None
-        self.micro_batcher: Optional["DynamicMicroBatcher"] = None
-        self.scaler_means: Optional[np.ndarray] = None
-        self.scaler_stds: Optional[np.ndarray] = None
+        self.metadata: dict[str, Any] = {}
+        self.sess_bge: ort.InferenceSession | None = None
+        self.sess_itransformer: ort.InferenceSession | None = None
+        self.sess_lgbm: ort.InferenceSession | None = None
+        self.tokenizer: Any | None = None
+        self.proto_matrix: np.ndarray | None = None
+        self.proto_keys: list[str] = []
+        self.aci_manager: MultiAssetDelayedFeedbackACI | None = None
+        self.micro_batcher: DynamicMicroBatcher | None = None
+        self.scaler_means: np.ndarray | None = None
+        self.scaler_stds: np.ndarray | None = None
         self.embedding_cache: BoundedLRUCache = BoundedLRUCache(maxsize=4096)
         self.total_score_requests: int = 0
         self.degraded_fallback_count: int = 0
@@ -121,19 +117,19 @@ state = EngineState()
 # ---------------------------------------------------------------------------
 class ScoreRequest(BaseModel):
     asset: str = Field(default="SOLUSDT", description="Target asset symbol (e.g. SOLUSDT, ETHUSDT, BTCUSDT)")
-    market_window: Optional[List[List[float]]] = Field(
+    market_window: list[list[float]] | None = Field(
         default=None,
         description="48-hour lookback matrix of 16 normalized market features (shape 48 x 16)",
     )
-    market_features: Optional[List[float]] = Field(
+    market_features: list[float] | None = Field(
         default=None,
         description="16 current market features as fallback or direct vector",
     )
-    headline: Optional[str] = Field(
+    headline: str | None = Field(
         default=None,
         description="Breaking crypto headline or news text for NLP risk evaluation",
     )
-    timestamp: Optional[str] = Field(
+    timestamp: str | None = Field(
         default=None,
         description="ISO 8601 timestamp of request bar (UTC)",
     )
@@ -167,7 +163,7 @@ class FeedbackRequest(BaseModel):
     asset: str = Field(..., description="Target asset symbol (e.g. SOLUSDT)")
     target_bar_time: str = Field(..., description="ISO 8601 timestamp of the forecast bar")
     realized_fwd_min_ret_6h: float = Field(..., description="Realized 6-hour minimum return")
-    current_time: Optional[str] = Field(
+    current_time: str | None = Field(
         default=None,
         description="Optional current time (must be >= target_bar_time + 6h for causal ACI)",
     )
@@ -186,8 +182,8 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     architecture: str
-    providers: List[str]
-    models_loaded: List[str]
+    providers: list[str]
+    models_loaded: list[str]
     uptime_seconds: float
     total_score_requests: int = 0
     degraded_fallback_count: int = 0
@@ -222,7 +218,7 @@ class DynamicMicroBatcher:
         self.max_batch_size = max_batch_size
         self.max_wait_ms = max_wait_ms
         self.queue: asyncio.Queue[BatchItem] = asyncio.Queue()
-        self.worker_task: Optional[asyncio.Task] = None
+        self.worker_task: asyncio.Task | None = None
         self._running = False
 
     def start(self):
@@ -254,7 +250,7 @@ class DynamicMicroBatcher:
             except asyncio.CancelledError:
                 break
 
-            items: List[BatchItem] = [first_item]
+            items: list[BatchItem] = [first_item]
             deadline = time.perf_counter() + (self.max_wait_ms / 1000.0)
 
             while len(items) < self.max_batch_size:
@@ -264,19 +260,19 @@ class DynamicMicroBatcher:
                 try:
                     next_item = await asyncio.wait_for(self.queue.get(), timeout=timeout)
                     items.append(next_item)
-                except (asyncio.TimeoutError, TimeoutError):
+                except TimeoutError:
                     break
 
             # Execute batch synchronously in thread pool
             try:
                 await asyncio.to_thread(self._process_batch_sync, items)
             except Exception as e:
-                logger.error(f"Error processing micro-batch: {e}", exc_info=True)
+                logger.exception(f"Error processing micro-batch: {e}")
                 for item in items:
                     if not item.future.done():
                         item.future.set_exception(e)
 
-    def _process_batch_sync(self, items: List[BatchItem]):
+    def _process_batch_sync(self, items: list[BatchItem]):
         n_items = len(items)
         if n_items == 0:
             return
@@ -306,7 +302,7 @@ class DynamicMicroBatcher:
         if nlp_headlines and state.proto_matrix is not None:
             # Query LRU cache
             hits, misses = state.embedding_cache.get_many(nlp_headlines)
-            embs_list: List[Optional[np.ndarray]] = [None] * len(nlp_headlines)
+            embs_list: list[np.ndarray | None] = [None] * len(nlp_headlines)
             for h_idx, h_emb in hits.items():
                 embs_list[h_idx] = h_emb
 
@@ -399,7 +395,7 @@ class DynamicMicroBatcher:
             p_calibrated = 1.0 / (1.0 + np.exp(-(platt_a * z + platt_b)))
 
         # 4. ACI Conformal VaR and Responses
-        now_utc = pd.Timestamp.now(tz=timezone.utc)
+        now_utc = pd.Timestamp.now(tz=UTC)
         for idx, it in enumerate(items):
             if it.future.done():
                 continue
@@ -452,7 +448,7 @@ async def lifespan(app: FastAPI):
     # 1. Load serving metadata
     meta_path = onnx_dir / "serving_metadata.json"
     if meta_path.exists():
-        with open(meta_path, "r") as f:
+        with open(meta_path) as f:
             state.metadata = json.load(f)
         logger.info(f"Loaded serving metadata from {meta_path}")
     else:
@@ -490,7 +486,7 @@ async def lifespan(app: FastAPI):
     # 3. Load risk prototypes
     proto_path = artifacts_dir / "risk_prototypes.json"
     if proto_path.exists():
-        with open(proto_path, "r") as f:
+        with open(proto_path) as f:
             proto_data = json.load(f)
         state.proto_keys = list(proto_data.get("prototypes", {}).keys())
         state.proto_matrix = np.array(
@@ -587,7 +583,7 @@ async def score_risk(req: ScoreRequest):
         score_coro = state.micro_batcher.submit(req)
         response = await asyncio.wait_for(score_coro, timeout=timeout_sec)
         return response
-    except (asyncio.TimeoutError, TimeoutError):
+    except TimeoutError:
         state.degraded_fallback_count += 1
         elapsed = (time.perf_counter() - t0) * 1000.0
         logger.warning(f"SLA budget ({req.timeout_ms:.1f}ms) exceeded ({elapsed:.1f}ms) for asset {req.asset}. Returning degraded fallback.")
@@ -640,8 +636,8 @@ async def submit_feedback(req: FeedbackRequest):
             message=f"ACI feedback applied successfully for {req.asset}. New alpha_t={step_res['alpha_t']:.4f}.",
         )
     except Exception as e:
-        logger.error(f"Error applying ACI feedback: {e}", exc_info=True)
+        logger.exception(f"Error applying ACI feedback: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"ACI causal error: {str(e)}",
-        )
+            detail=f"ACI causal error: {e!s}",
+        ) from e

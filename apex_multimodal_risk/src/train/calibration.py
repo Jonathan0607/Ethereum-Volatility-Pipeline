@@ -8,16 +8,14 @@ Implements:
 - 5% Pinball Loss and empirical VaR violation rate.
 """
 
-from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 from scipy.optimize import minimize_scalar
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
-    precision_recall_curve,
     auc,
-    roc_auc_score,
     brier_score_loss,
+    precision_recall_curve,
+    roc_auc_score,
 )
 
 from apex_multimodal_risk.src.utils import setup_logger
@@ -150,8 +148,8 @@ def compute_ece(
 def compute_constant_prior_metrics(
     y_true: np.ndarray,
     prior: float = 0.0412,
-    y_var_true: Optional[np.ndarray] = None,
-) -> Dict[str, float]:
+    y_var_true: np.ndarray | None = None,
+) -> dict[str, float]:
     """
     Computes theoretical and empirical benchmark metrics for a constant prior predictor (p = prior).
     """
@@ -180,9 +178,9 @@ def compute_all_metrics(
     clf_logits: np.ndarray,
     clf_probs_raw: np.ndarray,
     clf_probs_cal: np.ndarray,
-    y_var_true: Optional[np.ndarray] = None,
-    var_preds: Optional[np.ndarray] = None,
-) -> Dict[str, float]:
+    y_var_true: np.ndarray | None = None,
+    var_preds: np.ndarray | None = None,
+) -> dict[str, float]:
     """
     Computes complete audit metric suite:
     - PR-AUC (primary metric)
@@ -191,7 +189,7 @@ def compute_all_metrics(
     - ECE (raw vs calibrated)
     - 5% Pinball Loss and VaR violation rate
     """
-    metrics: Dict[str, float] = {}
+    metrics: dict[str, float] = {}
 
     # PR-AUC
     prec, rec, _ = precision_recall_curve(y_clf_true, clf_probs_cal)
@@ -200,7 +198,7 @@ def compute_all_metrics(
     # ROC-AUC
     try:
         metrics["roc_auc"] = float(roc_auc_score(y_clf_true, clf_probs_cal))
-    except Exception:
+    except ValueError:
         metrics["roc_auc"] = 0.5
 
     # Brier Score (Raw vs Calibrated)
