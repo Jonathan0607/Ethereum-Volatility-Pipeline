@@ -53,14 +53,19 @@ def christoffersen_tests(
     y_true: np.ndarray,
     var_pred: np.ndarray,
     alpha: float = 0.05,
+    step: int = 1,
 ) -> Dict[str, Any]:
     """
     Computes Kupiec Unconditional Coverage (LR_uc), Christoffersen Independence (LR_ind),
     and Christoffersen Conditional Coverage (LR_cc) Likelihood Ratio Tests.
     Also computes Mean Realized Shortfall on violation bars.
+    If step > 1 (e.g. step=6 for 6h non-overlapping sampling), sub-samples y_true and var_pred.
     """
     y = np.asarray(y_true, dtype=np.float64).ravel()
     v = np.asarray(var_pred, dtype=np.float64).ravel()
+    if step > 1:
+        y = y[::step]
+        v = v[::step]
     hits = (y < v).astype(np.int32)
     T = len(hits)
     N = int(np.sum(hits))
@@ -107,6 +112,7 @@ def christoffersen_tests(
     mean_breach = float(np.mean(v[hits == 1] - violation_returns)) if len(violation_returns) > 0 else 0.0
 
     return {
+        "step": step,
         "T": T,
         "violations": N,
         "violation_rate": p,
@@ -168,8 +174,10 @@ class DelayedFeedbackACI:
         Returns (aci_var_t, current_alpha_t).
         """
         if len(self.residual_buffer) >= 20:
-            q_level = float(np.clip(1.0 - self.alpha_t, 0.01, 0.99))
-            q_adj = float(np.quantile(list(self.residual_buffer), q_level))
+            n_buf = len(self.residual_buffer)
+            # Conservative finite-sample conformal quantile: ceil((1 - alpha_t) * (n_buf + 1)) / n_buf
+            q_level = float(np.clip(np.ceil((1.0 - self.alpha_t) * (n_buf + 1)) / n_buf, 0.01, 1.0))
+            q_adj = float(np.quantile(list(self.residual_buffer), q_level, method="higher"))
             aci_var = float(raw_var - q_adj)
         else:
             # Warm-up fallback
@@ -348,6 +356,9 @@ def run_conformal_validation(gamma: float = 0.01) -> Dict[str, Any]:
     aci_var_arr = np.zeros(n_test, dtype=np.float32)
     alpha_arr = np.zeros(n_test, dtype=np.float32)
 
+    # Pre-build lookup for O(1) delayed feedback retrieval
+    lookup_y = {(row.asset, row.timestamp): float(row.fwd_min_ret_6h) for row in test_df.itertuples()}
+
     # Process sequentially by timestamp
     for i in range(n_test):
         row = test_df.iloc[i]
@@ -357,10 +368,8 @@ def run_conformal_validation(gamma: float = 0.01) -> Dict[str, Any]:
 
         # Step feedback for bar t - 6h if present
         t_delayed = t - timedelta(hours=6)
-        match_delayed = test_df[(test_df["asset"] == sym) & (test_df["timestamp"] == t_delayed)]
-        if len(match_delayed) > 0:
-            realized_y_prev = float(match_delayed.iloc[0]["fwd_min_ret_6h"])
-            aci_manager.step_feedback(sym, t_delayed, t, realized_y_prev)
+        if (sym, t_delayed) in lookup_y:
+            aci_manager.step_feedback(sym, t_delayed, t, lookup_y[(sym, t_delayed)])
 
         # Predict current bar
         v_adj, a_curr = aci_manager.predict(sym, r_var, t)

@@ -41,6 +41,8 @@ class BoundedLRUCache:
         self.maxsize = maxsize
         self.cache: OrderedDict[str, np.ndarray] = OrderedDict()
         self.lock = threading.Lock()
+        self.hits_count: int = 0
+        self.misses_count: int = 0
 
     def get_many(self, keys: List[str]) -> Tuple[Dict[int, np.ndarray], List[Tuple[int, str]]]:
         hits: Dict[int, np.ndarray] = {}
@@ -50,8 +52,10 @@ class BoundedLRUCache:
                 if key in self.cache:
                     self.cache.move_to_end(key)
                     hits[idx] = self.cache[key]
+                    self.hits_count += 1
                 else:
                     misses.append((idx, key))
+                    self.misses_count += 1
         return hits, misses
 
     def set_many(self, items: List[Tuple[str, np.ndarray]]):
@@ -68,6 +72,17 @@ class BoundedLRUCache:
     def size(self) -> int:
         with self.lock:
             return len(self.cache)
+
+    def stats(self) -> Dict[str, Any]:
+        with self.lock:
+            total = self.hits_count + self.misses_count
+            hit_rate = (self.hits_count / total) if total > 0 else 0.0
+            return {
+                "size": len(self.cache),
+                "hits": self.hits_count,
+                "misses": self.misses_count,
+                "hit_rate": round(float(hit_rate), 4),
+            }
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +185,9 @@ class HealthResponse(BaseModel):
     total_score_requests: int = 0
     degraded_fallback_count: int = 0
     degraded_fallback_rate: float = 0.0
+    cache_hits: int = 0
+    cache_misses: int = 0
+    cache_hit_rate: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +538,7 @@ async def health_check():
         models_loaded.append("lightgbm_risk")
 
     fallback_rate = (state.degraded_fallback_count / state.total_score_requests) if state.total_score_requests > 0 else 0.0
+    c_stats = state.embedding_cache.stats()
 
     return HealthResponse(
         status="healthy",
@@ -531,6 +550,9 @@ async def health_check():
         total_score_requests=state.total_score_requests,
         degraded_fallback_count=state.degraded_fallback_count,
         degraded_fallback_rate=round(float(fallback_rate), 4),
+        cache_hits=c_stats["hits"],
+        cache_misses=c_stats["misses"],
+        cache_hit_rate=c_stats["hit_rate"],
     )
 
 
