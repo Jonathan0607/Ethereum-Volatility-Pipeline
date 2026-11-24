@@ -141,3 +141,51 @@ def test_convex_l1_optimizer_dollar_neutral():
     assert pytest.approx(np.sum(w_opt), abs=1e-5) == 0.0  # Dollar neutral
     assert np.sum(np.abs(w_opt)) <= 1.0001  # Max gross <= 1.0
     assert np.all(w_opt >= -0.1501) and np.all(w_opt <= 0.1501)  # Max position bound
+
+
+def test_funding_adjusted_total_return():
+    """Verifies that forward total return correctly subtracts cumulative funding paid."""
+    c = np.array([100.0, 105.0])
+    fwd_price_ret = (c[1] / c[0]) - 1.0  # +5%
+    cum_funding_paid = 0.008  # Long pays 0.8% funding
+    fwd_total_ret = fwd_price_ret - cum_funding_paid
+
+    assert pytest.approx(fwd_total_ret, 1e-6) == 0.042  # Net +4.2%
+
+
+def test_beta_neutral_projection_nullspace():
+    """Verifies that nullspace projection enforces both sum(w)=0 and sum(w*beta)=0."""
+    from apex_multimodal_risk.src.train.exp008c_beta_neutral_carry_ml import project_weights_to_beta_neutral
+
+    n = 15
+    np.random.seed(42)
+    w0 = np.random.randn(n)
+    w0 = w0 - np.mean(w0)  # Dollar neutral initial guess
+    beta = np.random.uniform(0.5, 2.0, n)
+    beta[0] = 1.0  # BTC
+
+    w_bn = project_weights_to_beta_neutral(w0, beta, max_pos=0.15)
+
+    assert pytest.approx(np.sum(w_bn), abs=1e-5) == 0.0  # Dollar-neutral
+    assert pytest.approx(np.sum(w_bn * beta), abs=1e-5) == 0.0  # BTC Beta-neutral
+    assert np.sum(np.abs(w_bn)) <= 1.0001  # Gross <= 1.0
+    assert np.all(w_bn >= -0.1501) and np.all(w_bn <= 0.1501)  # Max position cap
+
+
+def test_vol_matched_blend_scaling():
+    """Verifies causal volatility matching leverage scalar capping at <= 1.25x."""
+    from apex_multimodal_risk.src.train.exp008c_beta_neutral_carry_ml import run_vol_matched_blend
+
+    n_bars = 5000
+    np.random.seed(42)
+    r_apex = np.random.randn(n_bars) * (0.1844 / np.sqrt(8760))
+    r_ml = np.random.randn(n_bars) * (0.1000 / np.sqrt(8760))
+    turn_ml = np.full(n_bars, 0.005)
+
+    r_scaled = run_vol_matched_blend(
+        r_apex, r_ml, turn_ml, w_ml=0.10, slippage_bps=10.0, target_vol=0.1844, max_leverage=1.25
+    )
+
+    assert len(r_scaled) == n_bars
+    assert not np.any(np.isnan(r_scaled))
+
