@@ -709,3 +709,44 @@
   6. *Timeline Reconciliation:*
      - Reconciled `timeline.md` entry for EXP-003d to `[SUPERSEDED BY EXP-003e — bar-by-bar re-entry slippage & headline cache denominator fixed]`.
 - **Verdict & Next Step:** `[PASSED / REMEDIATION-001 COMPLETE]` - All 7 audit discrepancies resolved. Dual test suites green, zero PyTorch serving runtime, sub-50ms p99 production serving verified. Ready for executive README delivery and merge into `main`.
+
+---
+
+## [2026-11-23] - EXP-010: ML-Filtered Rolling PCA / Eigenportfolio Statistical Arbitrage Across 15 Liquid Binance Perpetuals
+- **Git Branch:** `feat/ml-pca-statarb`
+- **Scope & Objective:**
+  Execute `EXP-010`: Causal rolling PCA / eigenportfolio statistical arbitrage across 15 liquid Binance perpetuals over the exact 22,440-hour audited OOS period (`2022-11-01 00:00:00` to `2025-05-23 23:00:00` UTC). Test whether idiosyncratic residual divergence from rolling eigenportfolios ($|z_{i,t}| \ge 2.0$) generates net-of-friction alpha, and whether a walk-forward LightGBM classifier can filter regime breakouts from temporary liquidity sweeps to create an accretive 4th sleeve alongside Frozen APEX v45.
+- **Causal Architecture & Methodology:**
+  1. *Zero Lookahead Rolling PCA:* Trailing 720h (30-day) standardized hourly return matrix across 15 coins, refit strictly every 24 hours. Retains top $K=2$ eigenportfolios (PC1 crypto market beta, PC2 altcoin factor) and PC1 Absorption Ratio ($\lambda_1 / \sum \lambda_i$).
+  2. *Causal Residual Extraction & OU Process:* For each coin, regresses trailing 168h returns onto PC1 and PC2 via causal OLS, integrates residuals into spread $S_{i,t}$, computes rolling 168h z-score $z_{i,t}$, and estimates AR(1) Ornstein-Uhlenbeck mean-reversion half-life.
+  3. *Discrete Divergence Events:* Triggers entry when $|z_{i,t}| \ge 2.0$ with a 24h per-coin cooldown (1,728 total events, 1,528 OOS). Hedged trade constructed via closed-form analytic nullspace projection ($C = [\mathbf{1}, \beta_1, \beta_2]$) enforcing exact dollar-neutrality ($\sum w = 0$) and PC1/PC2 factor-neutrality to $< 10^{-12}$ machine precision.
+  4. *Exit Dynamics:* Bar-by-bar evaluation until take-profit ($z$ crosses $0.0$, 95.6% of trades), stop-loss ($|z| \ge 4.0$, 0.2% of trades), or time-stop (120h max hold, 4.2% of trades). Average holding duration: 47.4 hours.
+  5. *Walk-Forward ML Filter:* 10 expanding quarterly refits (+168h purge/embargo on closed trades). LightGBM classifier predicting $P(\text{mean-reversion succeeds} \mid |z| \ge 2.0)$ from 9 causal entry features.
+- **Key Empirical Results:**
+  1. *ML Regime-Break Filter Discrimination (Event-Level):*
+     - Total Evaluated OOS Divergence Events: **1,528**
+     - Baseline Mean-Reversion Win Rate: **63.35%**
+     - Target LightGBM Model ROC-AUC: **0.4891** (PR-AUC: 0.6305, BSS: -0.0494, ECE: 0.0817)
+     - Label Shuffle Placebo ROC-AUC: **0.4992** (BSS: -0.0318)
+     - Top-Half vs. Bottom-Half Predicted: Win Rate = **62.57% vs. 64.14%** (-1.57% spread), Avg PnL = **+8.3 bps vs. +10.8 bps** (-2.4 bps spread).
+     - *Finding:* At the discrete $|z| \ge 2.0$ extreme, idiosyncratic residual mean-reversion is inherently high-probability (63.4% baseline win rate), but entry microstructure features cannot distinguish successful reversions from trend breakouts better than random chance (ROC-AUC 0.4891 vs 0.4992 placebo).
+  2. *Gross Alpha vs. Turnover Friction Reality (22,440 Hourly Bars):*
+     - **S1 (Unfiltered PCA Stat-Arb):**
+       * At 0 bps: **+25.4% CAGR / 1.34 Sharpe / 0.74 Calmar / -34.4% MaxDD** (genuine gross alpha, $\rho(\text{APEX}) = -0.096$).
+       * Turnover: **576.3x / yr**!
+       * At 10 bps: **-29.5% CAGR / -1.83 Sharpe / -63.6% MaxDD** (57.6% annual slippage drag).
+       * At 25 bps: **-70.3% CAGR / -6.41 Sharpe**.
+     - **S2 (ML-Filtered Top-50%):**
+       * At 0 bps: **+8.8% CAGR / 0.57 Sharpe** | Turnover: **357.1x / yr** | At 10 bps: **-23.9% CAGR / -1.44 Sharpe**.
+     - **S3 (High-Conviction Top-30%):**
+       * At 0 bps: **+14.2% CAGR / 0.98 Sharpe** | Turnover: **220.5x / yr** | At 10 bps: **-8.4% CAGR / -0.53 Sharpe**.
+     - *Finding:* Statistical arbitrage on 15-coin baskets requires rebalancing both the target coin and 14 hedge assets on every entry/exit, generating extreme portfolio turnover (> 350x/yr). While highly profitable gross (+25.4%), perpetual trading friction wipes out all alpha.
+  3. *APEX v45 Portfolio Blend Performance (10 bps):*
+     - 100% Frozen APEX v45 (Honest Vol-Matched Baseline): **36.82% CAGR / 1.86 Sharpe / 3.36 Calmar / -11.0% MaxDD**.
+     - 90% APEX / 10% S2 (Honest Vol-Matched Blend): **32.00% CAGR / 1.73 Sharpe / 3.19 Calmar / -10.0% MaxDD** (-482 bps CAGR, -0.13 Sharpe).
+- **Integrity & Verification:**
+  - `apex_multimodal_risk/tests/test_pca_statarb.py`: 4/4 passing (PCA residual orthogonality $< 10^{-5}$, exact nullspace factor/dollar neutrality $< 10^{-11}$, zero lookahead invariance, AR(1) OU recovery).
+  - Full test suite: 38/38 passing (100% green).
+  - Ruff: 0 errors across entire repository.
+  - Frozen `research/apex_v45_champion.py` strictly untouched. Zero binary artifacts staged in git.
+- **Verdict & Next Step:** `[FALSIFIED AS PRODUCTION CANDIDATE / METHODOLOGICALLY RIGOROUS]` - Rolling PCA eigenportfolio stat-arb demonstrates strong gross mean-reversion alpha (+25.4% CAGR at 0 bps), but multi-asset hedge basket turnover (> 350x/yr) is prohibitive under institutional perpetual friction (10–25 bps). EXP-008d (Beta-Neutral 48h Total Return LightGBM with 7-tranche overlapping buffering, 43.4x turnover, +8.68% net CAGR at 10 bps) remains the sole viable, accretive 4th sleeve for APEX v45.
