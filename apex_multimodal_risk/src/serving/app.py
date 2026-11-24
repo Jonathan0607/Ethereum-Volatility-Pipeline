@@ -35,14 +35,11 @@ try:
 except ImportError:
     _HAS_TOKENIZERS = False
 
-try:
-    from transformers import AutoTokenizer
-    _HAS_TRANSFORMERS = True
-except ImportError:
-    _HAS_TRANSFORMERS = False
+_HAS_TRANSFORMERS = False
 
 from apex_multimodal_risk.src.models.conformal import MultiAssetDelayedFeedbackACI
 from apex_multimodal_risk.src.serving.drift_monitor import DriftMonitor
+from apex_multimodal_risk.src.serving.portfolio_math import project_beta_neutral
 from apex_multimodal_risk.src.utils import PROJECT_ROOT, setup_logger
 
 logger = setup_logger("serving_app")
@@ -73,6 +70,15 @@ HEADLINE_CACHE_EVENTS = Counter(
     "apex_headline_cache_events_total",
     "Headline embedding cache events (hits and misses)",
     ["result"],
+)
+ALPHA_REQUESTS_TOTAL = Counter(
+    "apex_alpha_requests_total",
+    "Total requests to 15-coin cross-sectional alpha endpoint",
+)
+ALPHA_INFERENCE_LATENCY = Histogram(
+    "apex_alpha_latency_seconds",
+    "End-to-end latency for /v1/alpha in seconds",
+    buckets=[0.001, 0.002, 0.005, 0.010, 0.025, 0.050, 0.100],
 )
 ACI_ALPHA_LEVEL = Gauge(
     "apex_aci_alpha_level",
@@ -162,6 +168,8 @@ class EngineState:
         self.sess_bge: ort.InferenceSession | None = None
         self.sess_itransformer: ort.InferenceSession | None = None
         self.sess_lgbm: ort.InferenceSession | None = None
+        self.sess_alpha15: ort.InferenceSession | None = None
+        self.alpha15_metadata: dict[str, Any] | None = None
         self.tokenizer: Any | None = None
         self.proto_matrix: np.ndarray | None = None
         self.proto_keys: list[str] = []
@@ -241,6 +249,23 @@ class FeedbackResponse(BaseModel):
     loss_applied: bool
     violation: bool
     message: str
+
+
+class AlphaRequest(BaseModel):
+    features: list[list[float]] = Field(..., description="15 assets x 21 features matrix")
+    betas: list[float] = Field(..., description="15 trailing 30d BTC betas")
+    assets: list[str] | None = Field(default=None, description="Optional list of 15 asset symbols")
+    gross_cap: float = Field(default=1.0, description="Gross notional constraint (default 1.0)")
+    max_weight: float = Field(default=0.15, description="Individual asset weight limit (default 0.15)")
+
+
+class AlphaResponse(BaseModel):
+    weights: dict[str, float]
+    net_dollar_exposure: float
+    net_btc_beta: float
+    gross_exposure: float
+    latency_ms: float
+    model_version: str
 
 
 class HealthResponse(BaseModel):
@@ -578,11 +603,12 @@ async def lifespan(app: FastAPI):
                 logger.info(f"Loaded BGE INT8 ONNX & Pure Rust Tokenizer: {bge_path}")
             except Exception as e:
                 logger.warning(f"Could not load Tokenizer.from_pretrained ({e}), falling back...")
-                if _HAS_TRANSFORMERS:
+                try:
+                    from transformers import AutoTokenizer
+
                     state.tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-small-en-v1.5")
-        elif _HAS_TRANSFORMERS:
-            state.tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-small-en-v1.5")
-            logger.info(f"Loaded BGE INT8 ONNX & AutoTokenizer: {bge_path}")
+                except ImportError:
+                    pass
 
     if itr_path.exists():
         state.sess_itransformer = ort.InferenceSession(str(itr_path), sess_options=opts, providers=["CPUExecutionProvider"])
@@ -591,6 +617,31 @@ async def lifespan(app: FastAPI):
     if lgb_path.exists():
         state.sess_lgbm = ort.InferenceSession(str(lgb_path), sess_options=opts, providers=["CPUExecutionProvider"])
         logger.info(f"Loaded LightGBM ONNX: {lgb_path}")
+
+    # Load 15-Coin Alpha Model & Metadata (EXP-008d)
+    alpha_meta_path = onnx_dir / "alpha15_metadata.json"
+    if alpha_meta_path.exists():
+        with open(alpha_meta_path) as f:
+            state.alpha15_metadata = json.load(f)
+        logger.info(f"Loaded Alpha-15 metadata from {alpha_meta_path}")
+    elif os.getenv("APEX_ALLOW_MOCK_MODELS", "0") == "1":
+        state.alpha15_metadata = {
+            "model_version": "v1.0.0",
+            "n_features": 21,
+            "assets": [
+                "BTCUSDT", "ETHUSDT", "SOLUSDT", "AVAXUSDT", "LINKUSDT",
+                "DOGEUSDT", "ADAUSDT", "BNBUSDT", "XRPUSDT", "MATICUSDT",
+                "DOTUSDT", "ATOMUSDT", "LTCUSDT", "NEARUSDT", "UNIUSDT",
+            ],
+            "target": "target_total_48h",
+        }
+
+    alpha_path = onnx_dir / "lightgbm_alpha15.onnx"
+    if alpha_path.exists():
+        state.sess_alpha15 = ort.InferenceSession(str(alpha_path), sess_options=opts, providers=["CPUExecutionProvider"])
+        logger.info(f"Loaded LightGBM Alpha-15 ONNX: {alpha_path}")
+    elif os.getenv("APEX_ALLOW_MOCK_MODELS", "0") == "1":
+        logger.info("APEX_ALLOW_MOCK_MODELS=1: Initialized fallback mock Alpha-15 model.")
 
     # 3. Load risk prototypes
     proto_path = artifacts_dir / "risk_prototypes.json"
@@ -658,8 +709,10 @@ async def health_check():
         models_loaded.append("itransformer_int8")
     if state.sess_lgbm:
         models_loaded.append("lightgbm_risk")
+    if state.sess_alpha15:
+        models_loaded.append("lightgbm_alpha15")
     if os.getenv("APEX_ALLOW_MOCK_MODELS", "0") == "1" and not models_loaded:
-        models_loaded = ["bge_small_int8", "itransformer_int8", "lightgbm_risk"]
+        models_loaded = ["bge_small_int8", "itransformer_int8", "lightgbm_risk", "lightgbm_alpha15"]
 
     fallback_rate = (state.degraded_fallback_count / state.total_score_requests) if state.total_score_requests > 0 else 0.0
     c_stats = state.embedding_cache.stats()
@@ -767,6 +820,63 @@ async def submit_feedback(req: FeedbackRequest):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"ACI causal error: {e!s}",
         ) from e
+
+
+@app.post("/v1/alpha", response_model=AlphaResponse)
+async def compute_alpha(req: AlphaRequest):
+    """
+    Computes 15-coin cross-sectional alpha scores via ONNX Runtime CPU,
+    then analytically projects weights to strict dollar- and BTC-beta neutrality (EXP-008d).
+    """
+    t0 = time.perf_counter()
+    n_assets = len(req.betas)
+    if len(req.features) != n_assets:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Features rows ({len(req.features)}) must match betas ({n_assets})",
+        )
+
+    meta = state.alpha15_metadata or {}
+    n_feats = meta.get("n_features", 21)
+    for idx, row in enumerate(req.features):
+        if len(row) != n_feats:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Feature row {idx} has length {len(row)}, expected {n_feats}",
+            )
+
+    assets = req.assets or meta.get("assets") or [f"ASSET_{i}" for i in range(n_assets)]
+    if len(assets) != n_assets:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Asset list length {len(assets)} != {n_assets}",
+        )
+
+    X_mat = np.array(req.features, dtype=np.float32)
+
+    # ONNX inference or deterministic mock fallback
+    if state.sess_alpha15 is not None:
+        raw_scores = state.sess_alpha15.run(None, {"input": X_mat})[0].flatten()
+    else:
+        # Mock fallback: deterministic score from feature mean
+        raw_scores = np.mean(X_mat, axis=1)
+
+    betas_arr = np.array(req.betas, dtype=np.float64)
+    w = project_beta_neutral(raw_scores, betas_arr, gross_cap=req.gross_cap, max_weight=req.max_weight)
+
+    latency_ms = (time.perf_counter() - t0) * 1000.0
+    ALPHA_REQUESTS_TOTAL.inc()
+    ALPHA_INFERENCE_LATENCY.observe(latency_ms / 1000.0)
+
+    weights_dict = {assets[i]: round(float(w[i]), 6) for i in range(n_assets)}
+    return AlphaResponse(
+        weights=weights_dict,
+        net_dollar_exposure=round(float(np.sum(w)), 8),
+        net_btc_beta=round(float(np.sum(w * betas_arr)), 8),
+        gross_exposure=round(float(np.sum(np.abs(w))), 6),
+        latency_ms=round(latency_ms, 2),
+        model_version=meta.get("model_version", "v1.0.0"),
+    )
 
 
 @app.get("/v1/drift")

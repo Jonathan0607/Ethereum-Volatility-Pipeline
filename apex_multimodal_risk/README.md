@@ -1,4 +1,4 @@
-# APEX Multimodal Risk Engine (`apex_multimodal_risk`)
+# APEX Multimodal Risk & Alpha Engine (`apex_multimodal_risk`)
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](file:///Users/kingebenezer/Desktop/Coding/Projects/Ethereum%20Tracker/apex_multimodal_risk/pyproject.toml)
 [![ONNX Runtime INT8](https://img.shields.io/badge/ONNX%20Runtime-INT8%20CPU-orange.svg)](file:///Users/kingebenezer/Desktop/Coding/Projects/Ethereum%20Tracker/apex_multimodal_risk/src/train/export_onnx.py)
@@ -6,14 +6,16 @@
 [![Prometheus Metrics](https://img.shields.io/badge/Prometheus-Metrics%20Exposed-E6522C.svg)](file:///Users/kingebenezer/Desktop/Coding/Projects/Ethereum%20Tracker/apex_multimodal_risk/src/serving/app.py)
 [![Zero-Torch Serving](https://img.shields.io/badge/Runtime-Zero--PyTorch%20Serving-success.svg)](file:///Users/kingebenezer/Desktop/Coding/Projects/Ethereum%20Tracker/apex_multimodal_risk/requirements-serving.txt)
 
-> **A production-grade Machine Learning Engineering microservice and quantitative tail-risk overlay for crypto derivative portfolios.**  
-> Built to protect institutional trading books against extreme non-stationary volatility clusters, liquidation cascades, and black-swan tail shocks.
+> **A production-grade Machine Learning Engineering microservice for quantitative tail-risk telemetry and 15-coin beta-neutral cross-sectional alpha generation.**  
+> Built to protect institutional trading books against extreme volatility cascades and harvest fee-surviving cross-sectional carry/momentum alpha net of institutional execution friction.
 
 ---
 
 ## 1. Architectural Overview
 
-`apex_multimodal_risk` decouples heavy deep learning and tree models into an ultra-lean, sub-50ms CPU inference engine. It ingests market microstructure feeds (OHLCV, Funding Rates, Open Interest) alongside real-time news headlines, extracts quantized text embeddings and deep temporal representations, and outputs calibrated crash probabilities and dynamic Value-at-Risk (VaR) sizing overlays.
+`apex_multimodal_risk` decouples heavy deep learning and gradient boosted models into an ultra-lean, sub-50ms pure CPU inference engine. It operates across two specialized production pipelines:
+1. **Path 1: Downside Risk Telemetry (`POST /v1/score`):** Ingests market microstructure feeds alongside news headlines, extracts quantized text embeddings and deep temporal representations, and outputs calibrated crash probabilities and dynamic Value-at-Risk (VaR) sizing overlays via 6-hour delayed-feedback Adaptive Conformal Inference (ACI).
+2. **Path 2: Cross-Sectional Alpha Engine (`POST /v1/alpha`):** Ingests 21 causal microstructure and funding features across 15 perpetual assets, computes Huber gradient boosted return forecasts via ONNX Runtime, and executes closed-form analytic nullspace projection for strict dollar and BTC-beta neutrality.
 
 ```mermaid
 flowchart TD
@@ -21,30 +23,33 @@ flowchart TD
         A1["Market Data Feed<br/>(Binance 1h Klines)"] --> B["Redis Streams<br/>(market:bars)"]
         A2["News Feed<br/>(CoinDesk / Cointelegraph RSS)"] --> C["4-Stage Noise Funnel<br/>(Regex + Deduplication)"]
         C --> D["Redis Streams<br/>(news:raw)"]
+        A3["15-Perp Microstructure Feed<br/>(Klines + 8h Funding)"] --> U["Cross-Sectional Matrix<br/>(15 Coins x 21 Causal Features)"]
     end
 
-    subgraph ENGINE ["State Machine & Online Parity"]
+    subgraph PATH1 ["Path 1: Downside Risk Telemetry"]
         B --> E["OnlineFeatureState<br/>(16 Market Features, 1.14ms/bar)"]
         D --> F["OnlineFeatureState<br/>(4 Sparse-Gated NLP Features)"]
         E & F --> G["Dynamic Micro-Batcher<br/>(max_batch=16, wait=2ms)"]
-    end
-
-    subgraph INFERENCE ["Unified ONNX Runtime Engine (Pure CPU, Zero-PyTorch)"]
         G --> H1["BGE-Small-en-v1.5 INT8<br/>(34.2 MB, 0.9968 Cos Sim)"]
         G --> H2["iTransformer INT8<br/>(0.71 MB, 0.9993 Pearson Corr)"]
         H1 & H2 --> H3["LightGBM Classifier ONNX<br/>(0.09 MB, 9.23e-8 Max Diff)"]
-    end
-
-    subgraph RISK ["Calibration & Conformal Risk Management"]
         H3 --> I["Platt Scaling<br/>(p_crash ∈ [0, 1])"]
         I --> J["6h Delayed-Feedback ACI<br/>(Non-overlapping Adaptive VaR)"]
+        J --> K1["FastAPI: POST /v1/score<br/>(p_crash, regime, scale_factor)"]
     end
 
-    subgraph SERVING ["Serving & Observability"]
-        J --> K["FastAPI Async App<br/>(POST /v1/score)"]
-        K --> L1["Prometheus /metrics<br/>(RPS, Latency, Fallbacks, Cache)"]
-        K --> L2["Live Drift Monitor<br/>(GET /v1/drift: PSI + Centroid Shift)"]
-        K --> L3["LRU Headline Cache<br/>(96.1% Hit Rate under Load)"]
+    subgraph PATH2 ["Path 2: Cross-Sectional Alpha Engine"]
+        U --> V1["LightGBM Alpha-15 ONNX<br/>(48h Huber Total Return, 28.5 KB)"]
+        V1 --> V2["Raw Expected Return Scores<br/>(s ∈ ℝ¹⁵)"]
+        V2 --> V3["Analytic Nullspace Projection<br/>(P = I - C(CᵀC)⁻¹Cᵀ)"]
+        V3 --> V4["Strict Neutral Portfolio<br/>(Σw=0, Σwβ=0, |wᵢ|≤15%)"]
+        V4 --> K2["FastAPI: POST /v1/alpha<br/>(target portfolio weights)"]
+    end
+
+    subgraph OBSERVABILITY ["Observability & Infrastructure"]
+        K1 & K2 --> L1["Prometheus /metrics<br/>(RPS, Latency, Fallbacks, Cache)"]
+        K1 --> L2["Live Drift Monitor<br/>(GET /v1/drift: PSI + Centroid Shift)"]
+        K1 --> L3["LRU Headline Cache<br/>(96.1% Hit Rate under Load)"]
     end
 ```
 
@@ -132,6 +137,55 @@ Provides strictly causal 6-hour delayed ground-truth realized loss feedback to u
 
 ---
 
+### `POST /v1/alpha`
+Generates strictly dollar-neutral and BTC-beta-neutral 15-coin portfolio weights using the exported ONNX 48h Total-Return Huber model and closed-form analytic nullspace projection ($P = I - C(C^T C)^{-1} C^T$).
+
+**Request Schema:**
+```json
+{
+  "cross_sections": {
+    "BTCUSDT": {
+      "features": {
+        "beta_30d": 1.0, "iv_rv_spread": 0.02, "realized_vol_168h": 0.03,
+        "fwd_ret_24h": 0.01, "fwd_ret_48h": 0.02, "fwd_ret_72h": 0.03, "fwd_ret_168h": 0.05,
+        "funding_accel_24h": 0.0, "cum_funding_24h": 0.0001, "cum_funding_72h": 0.0003, "cum_funding_168h": 0.0007,
+        "funding_spread_btc": 0.0, "funding_zscore_168h": 0.5, "oi_funding_interaction": 0.1,
+        "parkinson_vol_ratio": 1.0, "downside_semivar_ratio": 0.9, "volume_surprise_24h": 0.2,
+        "taker_flow_imbalance": 0.1, "skew_168h": -0.1, "kurt_168h": 2.5, "basis_annualized": 0.08
+      },
+      "beta": 1.0
+    },
+    "ETHUSDT": {
+      "features": { "... 21 causal features ...": 0.0 },
+      "beta": 1.15
+    }
+  },
+  "gross_cap": 1.0,
+  "max_weight": 0.15
+}
+```
+
+**Response Schema:**
+```json
+{
+  "weights": {
+    "BTCUSDT": 0.0421,
+    "ETHUSDT": -0.0366,
+    "SOLUSDT": 0.1142,
+    "DOGEUSDT": -0.1250
+  },
+  "net_dollar_exposure": 0.0,
+  "net_btc_beta": 0.0,
+  "gross_exposure": 1.0,
+  "latency_ms": 3.2
+}
+```
+
+*Mathematical Guarantees:*  
+The analytic nullspace projection guarantees $|\sum w_i| < 10^{-10}$ and $|\sum w_i \beta_i| < 10^{-10}$ machine precision via pure NumPy linear algebra, with individual position sizes capped at $\pm 15\%$ and gross exposure normalized to $1.0$.
+
+---
+
 ### `GET /health`
 Returns system health, ONNX model readiness, and headline cache statistics.
 
@@ -175,8 +229,10 @@ Reports feature Population Stability Index (PSI), Kolmogorov-Smirnov statistics,
 ### `GET /metrics`
 Standard Prometheus scraping endpoint exposing:
 - `apex_score_requests_total{asset, risk_regime}`: Request counter per asset and classification regime.
+- `apex_alpha_requests_total`: Request counter for 15-coin cross-sectional alpha optimization.
 - `apex_degraded_fallback_total`: Emergency fallback invocation counter.
-- `apex_inference_latency_seconds`: Latency distribution histogram.
+- `apex_inference_latency_seconds`: Latency distribution histogram for risk scoring.
+- `apex_alpha_inference_latency_seconds`: Latency distribution histogram for alpha scoring and projection.
 - `apex_microbatch_size`: Batcher fill efficiency histogram.
 - `apex_headline_cache_events_total{result="hit|miss"}`: Cache lookup counters (non-empty headlines only).
 - `apex_aci_alpha_level{asset}`: Dynamic conformal coverage target gauge.
@@ -201,7 +257,8 @@ apex_multimodal_risk/
 │   ├── pipeline.yaml                # Canonical pipeline hyperparameters and thresholds
 │   └── drift_baseline.json          # 10-bin reference distributions & centroid baseline
 ├── docs/
-│   └── quant_equity_tearsheet.png   # Full 2.56-year walk-forward equity tearsheet
+│   ├── quant_equity_tearsheet.png   # Full 2.56-year walk-forward equity tearsheet
+│   └── apex_v45_plus_ml15_tearsheet.png # EXP-008d Alpha-15 + APEX v45 comparison tearsheet
 ├── src/
 │   ├── utils.py                     # Path resolvers, seed controls, lazy torch loader
 │   ├── data/
@@ -215,18 +272,21 @@ apex_multimodal_risk/
 │   │   └── conformal.py             # 6-hour Delayed-Feedback Adaptive Conformal Inference
 │   ├── serving/
 │   │   ├── app.py                   # Async FastAPI service with micro-batching & cache
+│   │   ├── portfolio_math.py        # Pure NumPy analytic nullspace beta-neutral projection
 │   │   ├── drift_monitor.py         # PSI, KS test, and embedding centroid drift monitor
 │   │   ├── generate_drift_baseline.py # Reference baseline generator
 │   │   └── shadow_stream.py         # Redis Streams live/replay shadow scoring worker
 │   └── train/
 │       ├── exp002e_nlp_angles.py    # Sparse prototype & novelty feature engineering
 │       ├── export_onnx.py           # PyTorch/LightGBM -> ONNX & INT8 static quantizer
+│       ├── export_alpha15_onnx.py   # EXP-008d 15-coin LightGBM -> ONNX & tearsheet generator
 │       └── audit_sprint2_3.py       # Kupiec/Christoffersen statistical audit harness
 └── tests/
     ├── test_no_leakage.py           # Strict train/test boundary & lookahead assertion
     ├── test_cpcv_integrity.py       # Combinatorial fold purge & embargo verification
     ├── test_conformal_causal.py     # 6-hour non-overlapping delay queue causal tests
     ├── test_serving_api.py          # FastAPI endpoint integration & fallback tests
+    ├── test_alpha_serving.py        # POST /v1/alpha parity, beta neutrality & mock CI tests
     ├── test_e2e_inference_parity.py # ONNX vs PyTorch bitwise equivalence assertions
     ├── test_train_serve_parity.py   # 500-hour step-by-step stateful parity test
     ├── test_drift_monitor.py        # Distribution shift & centroid shock alarm tests
@@ -248,3 +308,6 @@ apex_multimodal_risk/
 
 3. **Sub-50ms Tail Latency under Heavy Load:**  
    Under 25 concurrent users at 869.3 RPS, the asynchronous dynamic micro-batcher (`max_batch_size=16`, `max_wait_ms=2.0`) combined with the LRU headline embedding cache achieves **p99 latency of 36.00 ms** with **0.00% degraded fallbacks**.
+
+4. **Analytic Beta-Neutral Alpha Serving:**  
+   Sub-5ms 15-coin cross-sectional inference and closed-form nullspace projection in pure NumPy. Enforces strict zero-dollar ($|\sum w_i| < 10^{-10}$) and zero-beta ($|\sum w_i \beta_i| < 10^{-10}$) constraints, exported with $\max|\text{diff}| < 10^{-6}$ numerical parity against native LightGBM.
