@@ -25,7 +25,7 @@
   - **Deflated Sharpe Ratio (DSR):** `96.9%` ($p = 0.0314 < 0.05$, adjusting for 50 trials)
   - **CPCV Inter-Path Variance:** $\sigma = 0.003$
   - **Worst-Case OOS Path Return / Drawdown:** `+147.9%` net return / `-13.1%` Max DD
-- **Reconciliation Note:** The APEX v45 champion engine in `research/apex_v45_champion.py` and the overlay simulator in `train_finalization.py` share 100% bitwise-identical net-of-fee returns. The difference between the 1.47 baseline Sharpe and the 1.77 overlay baseline Sharpe arises solely because the historical news dataset ends at 2025-05-23 (2.90 years vs. 4.17 years total backtest). In the 2.90-year news overlap window, APEX v45's unhedged benchmark is 1.77 Sharpe, 34.39% CAGR, and 10.38 Codebase RoMaD (2.63 True Calmar).
+- **Reconciliation Note:** The APEX v45 champion engine in `archive/apex_v45_champion.py` and the overlay simulator in `train_finalization.py` share 100% bitwise-identical net-of-fee returns. The difference between the 1.47 baseline Sharpe and the 1.77 overlay baseline Sharpe arises solely because the historical news dataset ends at 2025-05-23 (2.90 years vs. 4.17 years total backtest). In the 2.90-year news overlap window, APEX v45's unhedged benchmark is 1.77 Sharpe, 34.39% CAGR, and 10.38 Codebase RoMaD (2.63 True Calmar).
 - **Status:** **FROZEN (Read-Only)** downstream evaluation harness and baseline benchmark for multimodal risk overlays.
 
 ---
@@ -593,7 +593,7 @@
   4. *Causal, Statistical & Numerical Verification:*
      - Re-ran complete `pytest` test suite (`test_no_leakage.py`, `test_cpcv_integrity.py`, `test_conformal_causal.py`, `test_serving_api.py`, `test_e2e_inference_parity.py`): **24/24 passed (100% green)** in 10.53s.
      - Reconciled all EXP-003e figures in `timeline.md` against live script outputs: 0 contradictions, 100% bitwise matching across walk-forward backtest metrics, Locust latency percentiles (Profile 1 p99 180ms, Profile 2 p99 52ms with 0.00% fallbacks), and 4-shock crisis returns.
-- **Verdict & Next Step:** `[PASSED / REPO INTEGRITY VERIFIED]` - Zero defects remain across Sprints 1–3. Frozen champion `research/apex_v45_champion.py` untouched. Fully prepared for final review and Sprint 4.
+- **Verdict & Next Step:** `[PASSED / REPO INTEGRITY VERIFIED]` - Zero defects remain across Sprints 1–3. Frozen champion `archive/apex_v45_champion.py` untouched. Fully prepared for final review and Sprint 4.
 
 ## [2026-11-23] - SPRINT 4A: Prometheus Telemetry, Strict Online Train-Serve Feature Parity & Live Drift Monitoring (`EXP-004a`)
 - **Git Branch:** `feat/multimodal-risk-mle`
@@ -631,7 +631,7 @@
   4. *Verification & Hygiene:*
      - `ruff check apex_multimodal_risk/`: **All checks passed! (0 errors)**.
      - `pytest apex_multimodal_risk/tests/`: **31/31 passed (100% green)** in 14.44s.
-     - Frozen champion `research/apex_v45_champion.py` strictly untouched.
+     - Frozen champion `archive/apex_v45_champion.py` strictly untouched.
      - Zero binary artifacts staged in git (`configs/drift_baseline.json` is small text JSON).
 - **Verdict & Next Step:** `[PASSED / SPRINT 4A COMPLETE]` - Microservice telemetry, stateful incremental train-serve parity, and drift monitoring fully productionized. Ready for final review / Sprint 4B.
 
@@ -668,7 +668,7 @@
      - Fresh-Clone CI suite (`not requires_local_artifacts`): **17 passed, 17 deselected in 6.21s (100% green)** with zero binary files required.
      - Full Local suite (with local artifacts): **34 passed in 12.72s (100% green)**.
      - `ruff check apex_multimodal_risk/`: **All checks passed! (0 errors)**.
-     - Frozen champion `research/apex_v45_champion.py` strictly untouched.
+     - Frozen champion `archive/apex_v45_champion.py` strictly untouched.
      - Zero binary artifacts staged in git.
 - **Verdict & Next Step:** `[PASSED / SPRINT 4B COMPLETE]` - Redis Streams shadow scoring, production Docker containerization, and fresh-clone GitHub Actions CI fully operational and verified green. Ready for final review.
 
@@ -743,7 +743,7 @@
      - **REJECT NLP AS AN ACTIVE DIRECTIONAL ALPHA SLEEVE.**
      - In liquid perpetuals, headline sentiment exhibits rapid instantaneous price discovery and high noise; trading post-headline drift incurs catastrophic turnover drag (256.2x/yr) that destroys profitability net of realistic friction (6,406 bps/yr drag at 25 bps).
      - Multimodal NLP in `apex_multimodal_risk` is scientifically validated exclusively as an **asymmetric tail-risk hedge / crash gate** (ACI VaR multiplier, as proven in Sprint 2-3), where it successfully cuts crisis drawdowns (e.g. Aug 2024 recovery) without incurring continuous rebalancing turnover.
-     - Verified: `pytest apex_multimodal_risk/tests/` **34/34 passed (100% green)**, `ruff check` passed with 0 errors, `research/apex_v45_champion.py` strictly untouched, and zero binary artifacts staged.
+     - Verified: `pytest apex_multimodal_risk/tests/` **34/34 passed (100% green)**, `ruff check` passed with 0 errors, `archive/apex_v45_champion.py` strictly untouched, and zero binary artifacts staged.
 - **Verdict & Next Step:** `[COMPLETED / HYPOTHESIS FALSIFIED WITH HONEST INTEGRITY]` - Rigorous negative result documented. APEX v45 Champion preserved with its verified multimodal risk overlay.
 
 ---
@@ -796,7 +796,7 @@
   Evaluate whether Marcos López de Prado's Meta-Labeling framework predicting trade profitability $P(\text{trade is profitable} \mid \text{primary signal fired})$ at entry time can improve frozen APEX v45's Directional sleeve performance across the audited 2.56-year OOS window (`2022-11-01` to `2025-05-23`, 22,435 bars) with **zero mid-trade whipsaw churn**.
 - **Key Deliverables & Empirical Results:**
   1. *Primary Directional Trade Events Extraction (`src/train/exp007_meta_labeling.py`):*
-     - Extracted exact primary trade events by executing frozen `research/apex_v45_champion.py` read-only.
+     - Extracted exact primary trade events by executing frozen `archive/apex_v45_champion.py` read-only.
      - A trade entry occurs at bar $t$ when asset $s$ opens a position from 0 or flips sign. Trade holding period runs until position returns to 0 or flips sign.
      - Audited OOS Baseline Trade Summary (`2022-11-01` to `2025-05-23`, 22,435 bars):
        * Total Primary Trade Events: **1,326 trades**
@@ -1047,7 +1047,7 @@
 - **Verdict & Promotional Decision:** `[COMPLETED / VOL-MATCHED ACCRETIVE 4TH SLEEVE VALIDATED / UNLEVERED CAPACITY BOUNDARY IDENTIFIED]`
   1. *Vol-Matched Accretion:* When sized to match APEX v45's institutional ~18.4% risk budget using strictly causal trailing 90-day realized volatility ($\le 1.25$x notional), the **90% APEX / 10% ML** blend strictly beats frozen APEX v45 on Net Sharpe (**1.89 vs 1.76**) AND True Calmar (**3.54 vs 3.09**) at 10 bps institutional slippage, while holding and expanding Net Sharpe (**1.85 vs 1.76**) and Calmar (**3.33 vs 3.09**) under brutal 25 bps stress slippage, compressing Max Drawdown from -11.7% down to **-9.8%**, and boosting Sharpe in both 2024 (+1.68 $\to$ +2.01) and 2025 (+1.20 $\to$ +1.33).
   2. *Unlevered Friction Reality:* On an unlevered basis, the 43.4x turnover friction prevents standalone CAGR from exceeding +2.65% at 10 bps, slightly diluting baseline CAGR (36.07% $\to$ 32.50%).
-  3. *Artifact Generation:* Generated 3-panel comparative equity and drawdown tearsheet at `apex_multimodal_risk/docs/apex_v45_plus_ml15_tearsheet.png`. All 43 test suite assertions pass and Ruff formatting is clean. Baseline frozen `research/apex_v45_champion.py` remains untouched.
+  3. *Artifact Generation:* Generated 3-panel comparative equity and drawdown tearsheet at `apex_multimodal_risk/docs/apex_v45_plus_ml15_tearsheet.png`. All 43 test suite assertions pass and Ruff formatting is clean. Baseline frozen `archive/apex_v45_champion.py` remains untouched.
 
 ### 2026-11-23 — EXP-008d: Forensic Verification Pass, Newey-West HAC Audit & Honest Vol-Matching
 - **Branch:** `feat/ml-cross-sectional-15`
@@ -1108,7 +1108,7 @@
 - **Definitive Scientific Verdict & Production Demarcation:**
   1. *Honest Vol-Matched Comparison:* When 100% APEX v45 is subjected to the exact same dynamic vol-targeting rule with fees charged on leverage changes, APEX v45 baseline prints **36.82% CAGR / 1.86 Sharpe / 3.36 Calmar / -11.0% MaxDD** at 10 bps. Blending 10% ML (P1 48h Total) produces **36.04% CAGR / 1.91 Sharpe / 3.71 Calmar / -9.7% MaxDD**. This achieves a genuine +0.05 Sharpe and +0.35 Calmar expansion while shaving 130 bps off maximum drawdown, surrendering only 78 bps of annual CAGR.
   2. *Unlevered Reality:* In pure unlevered portfolios, the 43.4x turnover friction prevents the ML sleeve from matching APEX v45's 36.07% CAGR. However, it successfully lifts Net Sharpe from 1.76 to **1.82** (at 10 bps) and **1.78** (at 25 bps), cutting Max Drawdown from -11.7% to **-10.8%**.
-  3. *Conclusion:* The 48h Total Return factor ($t_{HAC} = +5.26$) is mathematically validated as an accretive risk-reducing diversifying sleeve. All 45 test assertions pass (`test_cross_sectional_ml.py`). Frozen `research/apex_v45_champion.py` remains untouched.
+  3. *Conclusion:* The 48h Total Return factor ($t_{HAC} = +5.26$) is mathematically validated as an accretive risk-reducing diversifying sleeve. All 45 test assertions pass (`test_cross_sectional_ml.py`). Frozen `archive/apex_v45_champion.py` remains untouched.
 
 ---
 
@@ -1144,7 +1144,7 @@
   - `apex_multimodal_risk/tests/test_decision_focused.py`: 4/4 unit tests passing (nullspace dollar/beta neutrality $< 10^{-5}$, gross/position caps $\le 1.0 / 0.15$, strict gradient flow through $L_1$ turnover term).
   - Full test suite: 38/38 passing (100% green).
   - Ruff: 0 errors across entire codebase.
-  - Frozen `research/apex_v45_champion.py` strictly unmodified. Zero binary artifacts staged.
+  - Frozen `archive/apex_v45_champion.py` strictly unmodified. Zero binary artifacts staged.
 - **Verdict & Next Step:** `[FALSIFIED AS PRODUCTION CANDIDATE / METHODOLOGICALLY VALIDATED]` - Decision-Focused Learning successfully proves the mathematical principle of endogenous turnover suppression via differentiable loss formulation (-30.2% turnover). However, daily recurrent unrolling without discrete tranche buffering cannot overcome perpetual transaction friction (> 149x/yr turnover). EXP-008d (Beta-Neutral 48h Total Return LightGBM with 7-tranche buffering) remains the champion candidate sleeve for APEX v45.
 
 ---
@@ -1185,7 +1185,7 @@
   - `apex_multimodal_risk/tests/test_pca_statarb.py`: 4/4 passing (PCA residual orthogonality $< 10^{-5}$, exact nullspace factor/dollar neutrality $< 10^{-11}$, zero lookahead invariance, AR(1) OU recovery).
   - Full test suite: 38/38 passing (100% green).
   - Ruff: 0 errors across entire repository.
-  - Frozen `research/apex_v45_champion.py` strictly untouched. Zero binary artifacts staged in git.
+  - Frozen `archive/apex_v45_champion.py` strictly untouched. Zero binary artifacts staged in git.
 - **Verdict & Next Step:** `[FALSIFIED AS PRODUCTION CANDIDATE / METHODOLOGICALLY RIGOROUS]` - Rolling PCA eigenportfolio stat-arb demonstrates strong gross mean-reversion alpha (+25.4% CAGR at 0 bps), but multi-asset hedge basket turnover (> 350x/yr) is prohibitive under institutional perpetual friction (10–25 bps). EXP-008d (Beta-Neutral 48h Total Return LightGBM with 7-tranche overlapping buffering, 43.4x turnover, +8.68% net CAGR at 10 bps) remains the sole viable, accretive 4th sleeve for APEX v45.
 
 ---
@@ -1231,7 +1231,7 @@
   - `apex_multimodal_risk/tests/test_funding_carry.py`: 4/4 passing (Binance funding PnL sign convention verified, closed-form nullspace dollar/beta neutrality verified to $< 10^{-12}$, zero lookahead verified, Newey-West HAC math verified).
   - Full test suite: 38/38 passing (100% green).
   - Ruff: 0 errors across entire repository.
-  - Frozen `research/apex_v45_champion.py` strictly untouched. Zero binary artifacts staged in git.
+  - Frozen `archive/apex_v45_champion.py` strictly untouched. Zero binary artifacts staged in git.
 - **Verdict & Next Step:** `[FALSIFIED AS STANDALONE SLEEVE / METHODOLOGICALLY RIGOROUS]` - While funding carry carries statistically valid predictive rank IC ($t_{\text{HAC}} = +4.60$), the structural trade-off between friction (at high turnover) and adverse basis drift (at low turnover / long holding horizons) prevents funding carry from generating positive standalone Sharpe net of 10 bps slippage. EXP-008d (Beta-Neutral 48h Total Return LightGBM: 43.4x turnover, +8.68% net CAGR at 10 bps, lifting APEX v45 to 1.91 Sharpe / 3.71 Calmar) remains the benchmark empirical cross-sectional alpha sleeve.
 
 
@@ -1301,7 +1301,7 @@
   - Lean CI verification: 32 tests passing with zero `torch`/`lightgbm` imports into `sys.modules`.
   - Full test suite: 55/55 passing (100% green).
   - Ruff: 0 errors across entire repository (`ruff check --config apex_multimodal_risk/pyproject.toml apex_multimodal_risk/`).
-  - Frozen `research/apex_v45_champion.py` strictly untouched. Zero binary artifacts staged in git.
+  - Frozen `archive/apex_v45_champion.py` strictly untouched. Zero binary artifacts staged in git.
 - **Verdict & Recommendation:** `[PROMOTION-READY ENHANCEMENT / METHODOLOGICALLY VALIDATED]` - LightGBM Dynamic Beta ($R_2$) strictly outperforms 30-day rolling OLS ($R_0$) on both statistical accuracy (32.2% vs. 23.4% $R^2$, lowest crisis RMSE) and downstream portfolio quality (23.1% lower beta leakage, +0.13 standalone Sharpe boost from 0.83 to 0.96 at 10 bps slippage).
 
 
@@ -1334,6 +1334,6 @@
      - Added explicit fixed-basket survivorship bias disclosures and Locust Profile 1 teardown drain footnote.
 - **Integrity & Verification:**
   - Zero PyTorch / LightGBM / DuckDB in serving runtime requirements.
-  - Frozen `research/apex_v45_champion.py` strictly untouched.
+  - Frozen `archive/apex_v45_champion.py` strictly untouched.
   - Zero binary files (`.onnx`, `.pt`, `.pkl`, `.parquet`) tracked in git.
   - Full CI test suite 100% green.

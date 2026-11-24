@@ -35,8 +35,8 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-if str(PROJECT_ROOT / "research") not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT / "research"))
+if str(PROJECT_ROOT / "archive") not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT / "archive"))
 
 import lightgbm as lgb
 import numpy as np
@@ -46,7 +46,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.covariance import LedoitWolf
 
-import research.apex_v45_champion as v45
+import archive.apex_v45_champion as v45
 from apex_multimodal_risk.src.serving.portfolio_math import (
     project_multi_factor_neutral,
 )

@@ -268,9 +268,9 @@ def run_downstream_thresholded_overlay(
     - Calm days (p <= tau): scale = 1.0 (zero drag on calm days)
     - Shock days (p > tau): scale = clip(1.0 - gamma * (p - tau), floor, 1.0)
     """
-    sys.path.insert(0, str(PROJECT_ROOT / "research"))
+    sys.path.insert(0, str(PROJECT_ROOT / "archive"))
     sys.path.insert(0, str(PROJECT_ROOT))
-    from research.apex_v45_champion import (
+    from archive.apex_v45_champion import (
         UNIVERSE,
         W_ARB,
         W_DIR,

@@ -572,9 +572,9 @@ def execute_shock_case_studies_and_slippage_overlay(
 
     # 3-Way Stress-Tested APEX Overlay with 25 bps slippage
     logger.info("Executing 3-Way Stress-Tested APEX v45 Overlay with 25 bps Slippage...")
-    sys.path.insert(0, str(PROJECT_ROOT / "research"))
+    sys.path.insert(0, str(PROJECT_ROOT / "archive"))
     sys.path.insert(0, str(PROJECT_ROOT))
-    from research.apex_v45_champion import (
+    from archive.apex_v45_champion import (
         UNIVERSE,
         W_ARB,
         W_DIR,

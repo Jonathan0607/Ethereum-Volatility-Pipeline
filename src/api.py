@@ -281,9 +281,9 @@ def get_latest_state():
 def get_backtest_data():
     from starlette.responses import Response
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    json_path = os.path.join(current_dir, '..', 'research', 'results', 'funding_squeeze_results.json')
+    json_path = os.path.join(current_dir, '..', 'archive', 'results', 'funding_squeeze_results.json')
     if not os.path.exists(json_path):
-        json_path = os.path.join(current_dir, '..', 'research', 'funding_squeeze_results.json')
+        json_path = os.path.join(current_dir, '..', 'archive', 'funding_squeeze_results.json')
     try:
         with open(json_path, 'r') as f:
             content = f.read()

@@ -32,10 +32,10 @@ from apex_multimodal_risk.src.utils import PROJECT_ROOT, get_device, setup_logge
 
 logger = setup_logger("backtest_promoted_quant")
 
-# Ensure research module importable without modifying frozen files
-sys.path.insert(0, str(PROJECT_ROOT / "research"))
+# Ensure archive module importable without modifying frozen files
+sys.path.insert(0, str(PROJECT_ROOT / "archive"))
 sys.path.insert(0, str(PROJECT_ROOT))
-from research.apex_v45_champion import (
+from archive.apex_v45_champion import (
     DIR_HYST,
     DIR_TAKER_FEE,
     DIR_WC,

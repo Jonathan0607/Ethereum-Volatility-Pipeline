@@ -291,8 +291,8 @@ def main():
     ax2.grid(color='gray', linestyle=':', alpha=0.2)
     ax2.legend(loc='upper left', ncol=3)
     
-    os.makedirs('research/results', exist_ok=True)
-    out_path = 'research/results/apex_v26_wfa_hyperparams.png'
+    os.makedirs('archive/results', exist_ok=True)
+    out_path = 'archive/results/apex_v26_wfa_hyperparams.png'
     plt.tight_layout()
     plt.savefig(out_path, dpi=200, bbox_inches='tight', facecolor='#121212')
     print(f"\n[SAVED] {out_path}")

@@ -49,7 +49,8 @@ apex_multimodal_risk/data/
 *.onnx
 *.onnx.data
 best_params.txt
-archive/
+archive/archive/
+src/archive/
 mlruns/
 apex_multimodal_risk/mlruns/
 apex_multimodal_risk/artifacts/

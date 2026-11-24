@@ -128,7 +128,7 @@ def generate_final_tearsheet() -> Path:
     df_panel = engineer_features_and_targets()
 
     # Run the walkforward models to generate clean OOS return series
-    import research.apex_v45_champion as v45
+    import archive.apex_v45_champion as v45
     from apex_multimodal_risk.src.train.exp008d_path_a_audit import (
         TEST_END_FINAL,
         run_walkforward_models_all,

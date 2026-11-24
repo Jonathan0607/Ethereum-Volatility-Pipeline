@@ -316,9 +316,9 @@ def evaluate_hysteresis_overlay(
     - Return to 1.0 only when 6h window expires AND p_crash <= tau.
     """
     logger.info("Evaluating 6h Hysteresis Overlay on APEX v45 Champion...")
-    sys.path.insert(0, str(PROJECT_ROOT / "research"))
+    sys.path.insert(0, str(PROJECT_ROOT / "archive"))
     sys.path.insert(0, str(PROJECT_ROOT))
-    from research.apex_v45_champion import (
+    from archive.apex_v45_champion import (
         UNIVERSE,
         W_ARB,
         W_DIR,

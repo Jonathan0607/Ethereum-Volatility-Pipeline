@@ -16,7 +16,7 @@
 ## 1. System Architecture
 
 The platform operates as two decoupled, high-performance engines:
-1. **The Frozen Quantitative Champion (`research/apex_v45_champion.py`)**: Vectorized multi-strategy alpha ensemble (Directional ACM + Market-Neutral Relative Value Spread + Binary Breakout) with C++20 Monte Carlo simulation and transaction cost modeling.
+1. **The Frozen Quantitative Champion (`archive/apex_v45_champion.py`)**: Vectorized multi-strategy alpha ensemble (Directional ACM + Market-Neutral Relative Value Spread + Binary Breakout) with C++20 Monte Carlo simulation and transaction cost modeling.
 2. **The Production Multimodal Tail-Risk Microservice (`apex_multimodal_risk/`)**: Event-driven streaming architecture ingesting tick-level market microstructure and news headlines, computing stateful causal features with zero lookahead bias, running INT8 ONNX quantized models on CPU, and outputting calibrated crash probabilities ($p_{\text{crash}}$) alongside 6-hour delayed-feedback Adaptive Conformal Inference (ACI) overlay scaling factors.
 
 ```mermaid
@@ -315,7 +315,7 @@ docker compose -f apex_multimodal_risk/docker-compose.yml up --build -d
 
 This repository enforces strict scientific and engineering integrity:
 - **Zero Binary Git Bloat:** All binary artifacts (`*.onnx`, `*.pt`, `*.pkl`, `*.parquet`) are strictly gitignored.
-- **Frozen Champion Protection:** The original alpha baseline [research/apex_v45_champion.py](file:///Users/kingebenezer/Desktop/Coding/Projects/Ethereum%20Tracker/research/apex_v45_champion.py) is immutable and frozen.
+- **Frozen Champion Protection:** The original alpha baseline [archive/apex_v45_champion.py](file:///Users/kingebenezer/Desktop/Coding/Projects/Ethereum%20Tracker/archive/apex_v45_champion.py) is immutable and frozen.
 - **Audited History:** For the complete granular chronological log of all experiments, bug teardowns, slippage reconciliations, and benchmark verifications, consult [timeline.md](file:///Users/kingebenezer/Desktop/Coding/Projects/Ethereum%20Tracker/timeline.md).
 
 ---
