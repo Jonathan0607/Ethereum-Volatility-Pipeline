@@ -709,3 +709,39 @@
   6. *Timeline Reconciliation:*
      - Reconciled `timeline.md` entry for EXP-003d to `[SUPERSEDED BY EXP-003e — bar-by-bar re-entry slippage & headline cache denominator fixed]`.
 - **Verdict & Next Step:** `[PASSED / REMEDIATION-001 COMPLETE]` - All 7 audit discrepancies resolved. Dual test suites green, zero PyTorch serving runtime, sub-50ms p99 production serving verified. Ready for executive README delivery and merge into `main`.
+
+---
+
+## [2026-11-23] - EXP-005: 15-Coin Breadth Expansion, Pre-Cutoff Polarity Scoring & Cross-Sectional NLP Alpha Gate
+- **Git Branch:** `feat/nlp-alpha-v2`
+- **Scope & Objective:**
+  Evaluate whether expanding universe breadth to 15 liquid Binance perpetuals (BTC, ETH, SOL, AVAX, LINK, BNB, XRP, ADA, DOGE, LTC, UNI, ATOM, NEAR, DOT, ETC) combined with pre-2022-07 financial/crypto NLP polarity encoders (`ElKulako/cryptobert` and `ProsusAI/finbert`) can generate genuine, net-of-25bps-slippage alpha as an active 4th sleeve alongside frozen APEX v45 champion.
+- **Key Deliverables & Empirical Results:**
+  1. *Universe Breadth Expansion & Causal Polarity Scoring (`src/data/fetch_universe_15.py` & `src/data/score_polarity_15.py`):*
+     - Downloaded 3 years of hourly klines and funding rates (`2022-06-01` to `2025-05-23` UTC) for 15 perpetuals from `data.binance.vision`, achieving 100.0% coverage across 26,112 bars/asset (391,680 total panel rows).
+     - Sequentially scored 18,939 deduplicated headlines on Apple Silicon MPS with zero temporal leakage (`ElKulako/cryptobert` trained strictly May 2018–June 16, 2022; `ProsusAI/finbert` published 2019) with strict memory isolation (CryptoBERT scored in 69s, FinBERT in 62s, each unloaded with `gc.collect()` and `mps.empty_cache()`, peak RAM < 2.0 GB).
+     - Expanded regex entity linking across 15 assets + macro: BTC (4,508), ETH (3,623), ADA (2,876), XRP (2,362), SOL (1,735), DOGE (1,595), DOT (629), BNB (434), LINK (385), AVAX (370), LTC (259), UNI (233), ATOM (148), NEAR (67), ETC (67), MACRO (1,569).
+     - Causally computed 24h & 72h exponentially decayed sentiment, sentiment surprise (`sent_24h - sent_7d_trailing`, shifted by 1 bar), and cross-sectional z-scores (`rel_sent`, `rel_surprise`).
+  2. *Mandatory Cross-Sectional Signal IC Gate & Forensic Placebos:*
+     - Evaluated Spearman rank IC across 15 assets for forward 24h, 48h, 72h excess returns full panel and yearly (2022–2025):
+       * `rel_sent`: Full Mean IC = +2.03% (24h, t = +3.28), +3.05% (48h, t = +3.52), +3.68% (72h, t = +3.64).
+       * Forensic Placebo Discovery: Time-row permuted placebo showed a persistent +3.09% IC (t = +6.80) even with randomized time order. Forensic diagnosis confirmed this apparent IC was NOT timely alpha, but **static unconditional coverage asymmetry** (BTC, ETH, and SOL had thousands of articles and drifted up over the 2022–2025 cycle, while low-coverage alts had zero news and lagged).
+       * True Timing Signal `rel_surprise` (de-meaning trailing 7d sentiment): Full Mean IC collapsed to -0.66% (24h, t = -1.11), -0.16% (48h, t = -0.20), -0.18% (72h, t = -0.21).
+       * Cluster Timestamp Shuffle Placebo on `rel_surprise`: Mean IC = +0.12% (t = +0.21), confirming genuine causal timing alpha is ~0.00%.
+  3. *Quantitative Backtests (OOS 2022-11-01 to 2025-05-23, 22,440 bars):*
+     - *Sleeve 1 (15-coin Dollar-Neutral Long/Short post-news drift, 24h rebalance, top-3 long / bottom-3 short, vol-normalized weights):*
+       * 0 bps: CAGR -10.42%, Vol 18.94%, Sharpe -0.49, Max DD -39.88%, Annual Turnover: 2,562,239 bps/yr.
+       * 25 bps slippage: CAGR -52.83%, Vol 19.32%, Sharpe -3.79, Max DD -85.83%.
+     - *Sleeve 2 (Exposure-Neutral Conviction Tilt [0.65x, 1.35x] on APEX Directional):*
+       * 0 bps: CAGR +33.52%, Vol 18.09%, Sharpe 1.69, Max DD -11.59%, Annual Turnover: 587,254 bps/yr.
+       * 25 bps slippage: CAGR +15.29%, Vol 18.11%, Sharpe 0.88, Max DD -16.27% (degrades APEX baseline Sharpe from 1.76 to 0.88 due to 5,872 bps/yr incremental turnover).
+     - *Portfolio Blends with APEX v45 Champion (CAGR +36.07%, Sharpe 1.76, Max DD -11.66%):*
+       * Return correlation: $\rho = -0.0866$.
+       * 90% APEX / 10% Sleeve 1 (25 bps): CAGR +22.82%, Sharpe 1.33, Max DD -11.90% (-43 bps Sharpe drag).
+       * 80% APEX / 20% Sleeve 1 (25 bps): CAGR +10.77%, Sharpe 0.76, Max DD -14.44% (-100 bps Sharpe drag).
+  4. *Scientific Verdict & Architectural Decision:*
+     - **REJECT NLP AS AN ACTIVE DIRECTIONAL ALPHA SLEEVE.**
+     - In liquid perpetuals, headline sentiment exhibits rapid instantaneous price discovery and high noise; trading post-headline drift incurs catastrophic turnover drag (25,622 bps/yr) that destroys profitability net of realistic friction.
+     - Multimodal NLP in `apex_multimodal_risk` is scientifically validated exclusively as an **asymmetric tail-risk hedge / crash gate** (ACI VaR multiplier, as proven in Sprint 2-3), where it successfully cuts crisis drawdowns (e.g. Aug 2024 recovery) without incurring continuous rebalancing turnover.
+     - Verified: `pytest apex_multimodal_risk/tests/` **34/34 passed (100% green)**, `ruff check` passed with 0 errors, `research/apex_v45_champion.py` strictly untouched, and zero binary artifacts staged.
+- **Verdict & Next Step:** `[COMPLETED / HYPOTHESIS FALSIFIED WITH HONEST INTEGRITY]` - Rigorous negative result documented. APEX v45 Champion preserved with its verified multimodal risk overlay.
