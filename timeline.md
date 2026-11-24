@@ -1337,3 +1337,61 @@
   - Frozen `archive/apex_v45_champion.py` strictly untouched.
   - Zero binary files (`.onnx`, `.pt`, `.pkl`, `.parquet`) tracked in git.
   - Full CI test suite 100% green.
+
+
+---
+
+## [2026-11-24] - EXP-015: Transfer-Coefficient Diagnostics, Time-Decay Adaptation & Continuous Dispersion-Gated Portfolios
+- **Git Branch:** `feat/ml-exp015-tc-adaptive`
+- **Scope & Objective:**
+  Conduct a strict, zero-snooping diagnostic & portfolio-construction investigation across the full 4.17-year 15-coin panel (`2022-06-01` to `2026-08-31` UTC; 33,600 OOS bars across Window A `2022-11`–`2025-05` [22,440h], Window B Holdout `2025-05-24`–`2026-08-31` [11,160h], and Window C Full 4.17Y [33,600h]) using `universe_15_microstructure_4yr.parquet`:
+  - **Stage 0 (Baseline Reconciliation):** Reconcile `EXP-014`'s `A0` (0.36 Sharpe) against `EXP-013`'s `EXP-008d + R2` (0.84 Sharpe) in Window A and lock the baseline `A0 + R2` strictly to `EXP-013` / `EXP-008d` math.
+  - **Stage 1 (Alpha Decay, Quintiles & Transfer Coefficient):** Measure cross-sectional Spearman IC, Newey-West HAC $t$-stats, Top-4 minus Bottom-4 gross spread at `12h..168h`, 48h quintile monotonicity (`Q1..Q5`), and measured Transfer Coefficient $\text{TC} = \text{corr}(w_{\text{projected}}, \hat{\alpha})$.
+  - **Stage 2 (Time-Decay Weighting & Regime-Conditioned Orthogonal Alpha):** Benchmark `W_unif`, `W_365d`, and `W_180d` exponential sample-weight decay priors on both `A0` (20 OHLCV) and `A1` / `A1_reg` (16 orthogonal derivatives + 3 slow causal market-regime variables), forming `Stack_50_50` via strictly causal Window-A prior selection.
+  - **Stage 3 & 4 (Continuous EMA Nullspace & Dispersion Gating + Torture Battery):** Compare `K0` (7-tranche weekly binary `P1`), `K1` (12h rank-Gaussian nullspace EMA with `hl=48h/72h` and `0.015` deadband), and `K2` (`K1` + causal 7d/expanding-median dispersion gross scaling `[0.25, 1.00]`) against **Honest Vol-Matched 100% APEX v45**, validated via 15-split Purged CPCV (`N=6, k=2`), Bailey & López de Prado DSR (`M=15, 30`), 1,000-sample Circular Block Bootstrap, and a strict 4-gate Kill Switch.
+- **Empirical Results:**
+  1. *Stage 0 Reconciliation:*
+     - Root causes of `EXP-014`'s 0.36 vs `EXP-013`'s 0.84 baseline gap: (1) removal of cross-sectional median & `trailing_vol_168h` scaling in `target_total_48h`; (2) altered Huber hyperparameters (`n_estimators` `100` vs `60`, `colsample` `0.5` vs `0.6`, `reg_lambda` `15` vs `10`) and holdout split boundary; (3) broken trailing 720h covariance target for beta instead of causal forward 48h OLS beta over the 13 `EXP-012` risk features.
+     - Locked `EXP-015` baseline `A0 + R2` reproduces **+0.81 Sharpe (+8.74% CAGR, -15.4% MaxDD, 45.0x turn)** in Window A at 10 bps.
+  2. *Stage 1 Alpha Decay, Quintile Non-Monotonicity & Transfer Coefficient:*
+     - `A0_W_unif` Rank IC grows monotonically across horizons in BOTH windows: **+0.0359** (12h) $\to$ **+0.0483** (48h, $t=+4.82$) $\to$ **+0.0787** (168h, $t=+4.97$) in Window A, and **+0.0413** (12h) $\to$ **+0.0594** (48h, $t=+4.18$) $\to$ **+0.0906** (168h, $t=+3.96$) in Window B.
+     - **Smoking Gun in 48h Quintiles:** While Window A displays clean monotonicity (`Q1..Q5`: `+41.96%`, `+38.18%`, `+39.23%`, `+47.96%`, `+52.81%`, spread `+10.85%`), Window B reveals severe **U-shaped squeeze inversion** (`Q1 = -15.47%`, `Q2 = -37.87%`, `Q3 = -44.96%`, `Q4 = -35.55%`, `Q5 = -9.23%`, spread `+6.25%`), where oversold Q1 shorts rebounded against middle-rank assets.
+     - **Transfer Coefficient:** Binary 7-tranche `K0` achieves `TC = +0.5750` (`A0`) and `+0.4251` (`A1`); continuous rank-Gaussian target `w*` boosts target `TC` to **`+0.8661`** (`A0`) and **`+0.9081`** (`A1`), while EMA smoothing (`K1 EMA48`) yields realized `TC = +0.5799` / `+0.4524`.
+  3. *Stage 2 Exponential Time-Decay IC (Newey-West HAC, $L=48$):*
+     | Model / Prior | Window A IC (HAC-t) | Window B IC (HAC-t) | Full Window C IC (HAC-t) |
+     | :--- | :---: | :---: | :---: |
+     | `A0_W_unif` | +0.0483 (+4.82) | +0.0594 (+4.18) | +0.0520 (+6.35) |
+     | `A0_W_365d` | +0.0543 (+5.31) | **+0.0666 (+4.78)** | +0.0583 (+7.08) |
+     | `A0_W_180d` *(Causal Win-A Winner)* | **+0.0587 (+5.82)** | +0.0588 (+4.28) | **+0.0587 (+7.22)** |
+     | `A1_W_unif` | +0.0444 (+5.13) | +0.0053 (+0.47) | +0.0314 (+4.55) |
+     | `A1_W_365d` | +0.0466 (+5.49) | +0.0156 (+1.28) | +0.0363 (+5.21) |
+     | `A1_W_180d` | +0.0474 (+5.53) | +0.0097 (+0.81) | +0.0349 (+4.99) |
+     | `A1_reg_W_unif` | +0.0373 (+4.28) | +0.0061 (+0.55) | +0.0270 (+3.90) |
+     | `A1_reg_W_365d` *(Causal Win-A Winner)* | **+0.0431 (+5.03)** | +0.0119 (+1.06) | +0.0327 (+4.78) |
+     | `A1_reg_W_180d` | +0.0353 (+4.13) | +0.0150 (+1.22) | +0.0286 (+4.07) |
+     | `Stack_50_50` (`A0_180d + A1reg_365d`) | **+0.0624 (+6.59)** | +0.0456 (+3.68) | **+0.0569 (+7.53)** |
+     | `placebo_shuffle` | +0.0091 (+1.17) | -0.0179 (-1.56) | +0.0002 (+0.03) |
+  4. *Stage 3 & 4 Apples-to-Apples Full 4.17Y Window C Results (10 bps Friction):*
+     | Strategy / Constructor | CAGR (%) | Vol (%) | SR (0 bps) | SR (10 bps) | SR (25 bps) | MaxDD | Turn | 95% Leak | $\rho(\text{APEX VM})$ | 90/10 VM | 80/20 VM |
+     | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+     | **100% APEX v45 [Unlevered]** | +24.86% | 16.14% | — | +1.46 | — | -11.7% | 0.0x | — | 1.0000 | — | — |
+     | **100% APEX v45 [Honest VM]** | **+25.65%** | **16.08%** | — | **+1.50** | — | **-11.0%** | 0.0x | — | 1.0000 | **+1.50** | **+1.50** |
+     | `K0_A0_base` | +3.79% | 10.79% | +0.81 | **+0.40** | -0.22 | -15.4% | 44.6x | 0.0817 | -0.0683 | **+1.52** | **+1.53** |
+     | `K1_72_A0_base` | +1.92% | 13.87% | +0.50 | +0.21 | -0.24 | -23.8% | 41.0x | 0.0877 | -0.0165 | +1.50 | +1.47 |
+     | `K1_72_A1_reg` *(Causal Win-A `K1/K2` Best)* | +1.16% | 13.27% | +0.56 | +0.15 | -0.46 | -31.0% | 54.1x | 0.0907 | +0.0100 | +1.48 | +1.44 |
+     | `K2_72_A1_reg` *(Dispersion-Gated)* | +1.82% | 12.18% | +0.57 | +0.21 | -0.33 | -23.1% | 43.7x | 0.0817 | +0.0130 | +1.49 | +1.47 |
+     | `K2_72_Stack_50_50` | +0.07% | 12.96% | +0.36 | +0.07 | -0.36 | -30.0% | 37.1x | 0.0807 | -0.0283 | +1.48 | +1.45 |
+  5. *Anti-Overfitting Torture Battery & Hard Kill Switch (Candidate `K1_72_A1_reg`):*
+     - **15-Split Purged CPCV (`N=6, k=2`):** Standalone 10 bps Path Sharpes `[-0.49, -0.02, -0.27, -0.30, +0.28]` (Median `-0.27`, 20.0% positive). `90/10 Honest VM` paths `[+1.42, +1.47, +1.46, +1.45, +1.50]` vs. `100% APEX Honest VM` (`+1.50`).
+     - **DSR / PSR:** Standalone `PSR = 61.77%`, `DSR(M=15, SR*=0.40) = 31.69%`, `DSR(M=30, SR*=0.46) = 27.13%`. Blend `90/10 VM`: `DSR(M=15) = 98.11%`, `DSR(M=30) = 97.32%`.
+     - **Paired Circular Block Bootstrap (1,000 Resamples, 168h Blocks):** Standalone 10 bps Sharpe Mean = `+0.17` (`[-0.86, +1.19]`, $p=0.3790$); Marginal Blend Lift $\Delta\text{Sharpe} = +0.009$ (`[-0.099, +0.119]`, one-sided $p=0.4210$).
+     - **Friction Breakeven & Latency:** `13.75 bps` one-way breakeven; Latency Sharpe (10 bps): 1h `+0.15`, 2h `+0.11`, 4h `+0.17`; Shuffle Placebo `-0.08`.
+     - **Kill Switch Gates:**
+       * Gate 1 (4.17Y SR $\ge 0.75$ & Win B SR $> 0.00$): `+0.15 & -1.00` $\to$ **FAIL**
+       * Gate 2 (100% CPCV $> 0$ & Median $\ge 0.65$): `-0.27` (Min `-0.49`) $\to$ **FAIL**
+       * Gate 3 (Standalone DSR $M=15 \ge 80\%$): `31.69%` $\to$ **FAIL**
+       * Gate 4 (Bootstrap $\Delta\text{Sharpe} > 0$ vs APEX VM, $p < 0.10$): `+0.009 (p=0.4210)` $\to$ **FAIL**
+- **Integrity & Artifacts:**
+  - Pure math primitives in `apex_multimodal_risk/src/serving/tc_adaptive_math.py`; experiment driver `apex_multimodal_risk/src/train/exp015_tc_adaptive.py`; 4-panel chart `apex_multimodal_risk/docs/exp015_tc_adaptive_analysis.png`.
+  - Unit tests `apex_multimodal_risk/tests/test_exp015_tc_adaptive.py` (3/3 passing); Clean Ubuntu CI `/tmp/ci_venv_rem2` (`39 passed, 24 deselected`); Ruff `0` errors; `archive/apex_v45_champion.py` untouched (`0` diffs); zero binary files tracked.
+- **Ruthless Scientific Verdict:** `[SIGNAL REAL BUT MONETIZATION BOUNDED / FREEZE REPO]` — Exponential time-decay ($W_{180d}$) boosts OOS Rank IC significantly across all 4.17 years (`+0.0587`, HAC $t=+7.22$), proving the predictive signal is genuinely real. However, U-shaped quintile squeeze inversion in 2025–2026 (`Q1` shorts rebounding above `Q2–Q4`) plus narrow altcoin dispersion prevents `K1`/`K2` continuous constructors from clearing friction or outperforming Honest Vol-Matched `100% APEX v45` (`+1.50` Sharpe) reliably. Freeze the 15-coin ML alpha pipeline without further holdout hyperparameter tuning.
