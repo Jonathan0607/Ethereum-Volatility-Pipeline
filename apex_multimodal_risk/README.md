@@ -38,12 +38,12 @@ flowchart TD
         J --> K1["FastAPI: POST /v1/score<br/>(p_crash, regime, scale_factor)"]
     end
 
-    subgraph PATH2 ["Path 2: Cross-Sectional Alpha Engine"]
+    subgraph PATH2 ["Path 2: Dual-ONNX Alpha & Dynamic Beta Engine"]
         U --> V1["LightGBM Alpha-15 ONNX<br/>(48h Huber Total Return, 28.5 KB)"]
-        V1 --> V2["Raw Expected Return Scores<br/>(s ∈ ℝ¹⁵)"]
-        V2 --> V3["Analytic Nullspace Projection<br/>(P = I - C(CᵀC)⁻¹Cᵀ)"]
+        U_BETA["15-Perp Risk Panel<br/>(13 Causal Risk Features)"] --> V1_BETA["LightGBM Beta-15 ONNX<br/>(R2 Dynamic Beta Forecaster, 62.3 KB)"]
+        V1 & V1_BETA --> V3["Analytic Dual-ONNX Nullspace Projection<br/>(P = I - C(CᵀC)⁻¹Cᵀ, C = [1, beta_LGBM])"]
         V3 --> V4["Strict Neutral Portfolio<br/>(Σw=0, Σwβ=0, |wᵢ|≤15%)"]
-        V4 --> K2["FastAPI: POST /v1/alpha<br/>(target portfolio weights)"]
+        V4 --> K2["FastAPI: POST /v1/alpha<br/>(target portfolio weights & predicted betas)"]
     end
 
     subgraph OBSERVABILITY ["Observability & Infrastructure"]
@@ -138,28 +138,19 @@ Provides strictly causal 6-hour delayed ground-truth realized loss feedback to u
 ---
 
 ### `POST /v1/alpha`
-Generates strictly dollar-neutral and BTC-beta-neutral 15-coin portfolio weights using the exported ONNX 48h Total-Return Huber model and closed-form analytic nullspace projection ($P = I - C(C^T C)^{-1} C^T$).
+Generates strictly dollar-neutral and BTC-beta-neutral 15-coin portfolio weights using Dual-ONNX Runtime CPU (`lightgbm_alpha15.onnx` + `lightgbm_beta15.onnx`) and closed-form analytic nullspace projection ($P = I - C(C^T C)^{-1} C^T$).
 
 **Request Schema:**
 ```json
 {
-  "cross_sections": {
-    "BTCUSDT": {
-      "features": {
-        "beta_30d": 1.0, "iv_rv_spread": 0.02, "realized_vol_168h": 0.03,
-        "fwd_ret_24h": 0.01, "fwd_ret_48h": 0.02, "fwd_ret_72h": 0.03, "fwd_ret_168h": 0.05,
-        "funding_accel_24h": 0.0, "cum_funding_24h": 0.0001, "cum_funding_72h": 0.0003, "cum_funding_168h": 0.0007,
-        "funding_spread_btc": 0.0, "funding_zscore_168h": 0.5, "oi_funding_interaction": 0.1,
-        "parkinson_vol_ratio": 1.0, "downside_semivar_ratio": 0.9, "volume_surprise_24h": 0.2,
-        "taker_flow_imbalance": 0.1, "skew_168h": -0.1, "kurt_168h": 2.5, "basis_annualized": 0.08
-      },
-      "beta": 1.0
-    },
-    "ETHUSDT": {
-      "features": { "... 21 causal features ...": 0.0 },
-      "beta": 1.15
-    }
-  },
+  "features": [
+    [0.05, -0.12, "...", 0.44],  // 15 assets x 21 causal alpha features
+  ],
+  "beta_features": [
+    [0.98, 1.05, "...", 0.35],  // 15 assets x 13 causal risk features (optional)
+  ],
+  "betas": [1.0, 1.15, "...", 0.85], // Optional caller-supplied betas (if beta_features omitted)
+  "assets": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "..."],
   "gross_cap": 1.0,
   "max_weight": 0.15
 }
@@ -174,10 +165,19 @@ Generates strictly dollar-neutral and BTC-beta-neutral 15-coin portfolio weights
     "SOLUSDT": 0.1142,
     "DOGEUSDT": -0.1250
   },
+  "predicted_betas": {
+    "BTCUSDT": 1.0,
+    "ETHUSDT": 1.1842,
+    "SOLUSDT": 1.4520
+  },
+  "beta_source": "onnx_lgbm_r2",
   "net_dollar_exposure": 0.0,
   "net_btc_beta": 0.0,
   "gross_exposure": 1.0,
-  "latency_ms": 3.2
+  "latency_ms": 1.85,
+  "model_version": "v1.0.0"
+}
+```
 }
 ```
 
@@ -280,6 +280,7 @@ apex_multimodal_risk/
 │       ├── exp002e_nlp_angles.py    # Sparse prototype & novelty feature engineering
 │       ├── export_onnx.py           # PyTorch/LightGBM -> ONNX & INT8 static quantizer
 │       ├── export_alpha15_onnx.py   # EXP-008d 15-coin LightGBM -> ONNX & tearsheet generator
+│       ├── export_beta15_onnx.py    # EXP-012 R2 Dynamic Beta LightGBM -> ONNX exporter
 │       └── audit_sprint2_3.py       # Kupiec/Christoffersen statistical audit harness
 └── tests/
     ├── test_no_leakage.py           # Strict train/test boundary & lookahead assertion
@@ -287,6 +288,7 @@ apex_multimodal_risk/
     ├── test_conformal_causal.py     # 6-hour non-overlapping delay queue causal tests
     ├── test_serving_api.py          # FastAPI endpoint integration & fallback tests
     ├── test_alpha_serving.py        # POST /v1/alpha parity, beta neutrality & mock CI tests
+    ├── test_dynamic_covariance.py   # EXP-012 nullspace neutrality, Woodbury & GNN SPD tests
     ├── test_e2e_inference_parity.py # ONNX vs PyTorch bitwise equivalence assertions
     ├── test_train_serve_parity.py   # 500-hour step-by-step stateful parity test
     ├── test_drift_monitor.py        # Distribution shift & centroid shock alarm tests

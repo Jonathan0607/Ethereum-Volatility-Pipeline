@@ -169,7 +169,9 @@ class EngineState:
         self.sess_itransformer: ort.InferenceSession | None = None
         self.sess_lgbm: ort.InferenceSession | None = None
         self.sess_alpha15: ort.InferenceSession | None = None
+        self.sess_beta15: ort.InferenceSession | None = None
         self.alpha15_metadata: dict[str, Any] | None = None
+        self.beta15_metadata: dict[str, Any] | None = None
         self.tokenizer: Any | None = None
         self.proto_matrix: np.ndarray | None = None
         self.proto_keys: list[str] = []
@@ -253,7 +255,8 @@ class FeedbackResponse(BaseModel):
 
 class AlphaRequest(BaseModel):
     features: list[list[float]] = Field(..., description="15 assets x 21 features matrix")
-    betas: list[float] = Field(..., description="15 trailing 30d BTC betas")
+    betas: list[float] | None = Field(default=None, description="Optional 15 caller-supplied trailing BTC betas (used if beta_features omitted)")
+    beta_features: list[list[float]] | None = Field(default=None, description="Optional 15 assets x 13 causal risk features for dynamic ONNX beta prediction")
     assets: list[str] | None = Field(default=None, description="Optional list of 15 asset symbols")
     gross_cap: float = Field(default=1.0, description="Gross notional constraint (default 1.0)")
     max_weight: float = Field(default=0.15, description="Individual asset weight limit (default 0.15)")
@@ -261,6 +264,8 @@ class AlphaRequest(BaseModel):
 
 class AlphaResponse(BaseModel):
     weights: dict[str, float]
+    predicted_betas: dict[str, float]
+    beta_source: str
     net_dollar_exposure: float
     net_btc_beta: float
     gross_exposure: float
@@ -643,6 +648,33 @@ async def lifespan(app: FastAPI):
     elif os.getenv("APEX_ALLOW_MOCK_MODELS", "0") == "1":
         logger.info("APEX_ALLOW_MOCK_MODELS=1: Initialized fallback mock Alpha-15 model.")
 
+    # Load 15-Coin Dynamic Beta Model & Metadata (EXP-012 R2)
+    beta_meta_path = onnx_dir / "beta15_metadata.json"
+    if beta_meta_path.exists():
+        with open(beta_meta_path) as f:
+            state.beta15_metadata = json.load(f)
+        logger.info(f"Loaded Beta-15 metadata from {beta_meta_path}")
+    elif os.getenv("APEX_ALLOW_MOCK_MODELS", "0") == "1":
+        state.beta15_metadata = {
+            "model_version": "v1.0.0",
+            "model_name": "lightgbm_beta15",
+            "n_features": 13,
+            "assets": [
+                "BTCUSDT", "ETHUSDT", "SOLUSDT", "AVAXUSDT", "LINKUSDT",
+                "DOGEUSDT", "ADAUSDT", "BNBUSDT", "XRPUSDT", "MATICUSDT",
+                "DOTUSDT", "ATOMUSDT", "LTCUSDT", "NEARUSDT", "UNIUSDT",
+            ],
+            "btc_asset": "BTCUSDT",
+            "clip_bounds": [0.2, 3.0],
+        }
+
+    beta_path = onnx_dir / "lightgbm_beta15.onnx"
+    if beta_path.exists():
+        state.sess_beta15 = ort.InferenceSession(str(beta_path), sess_options=opts, providers=["CPUExecutionProvider"])
+        logger.info(f"Loaded LightGBM Beta-15 ONNX: {beta_path}")
+    elif os.getenv("APEX_ALLOW_MOCK_MODELS", "0") == "1":
+        logger.info("APEX_ALLOW_MOCK_MODELS=1: Initialized fallback mock Beta-15 model.")
+
     # 3. Load risk prototypes
     proto_path = artifacts_dir / "risk_prototypes.json"
     if proto_path.exists():
@@ -711,8 +743,14 @@ async def health_check():
         models_loaded.append("lightgbm_risk")
     if state.sess_alpha15:
         models_loaded.append("lightgbm_alpha15")
+    if state.sess_beta15:
+        models_loaded.append("lightgbm_beta15")
     if os.getenv("APEX_ALLOW_MOCK_MODELS", "0") == "1" and not models_loaded:
-        models_loaded = ["bge_small_int8", "itransformer_int8", "lightgbm_risk", "lightgbm_alpha15"]
+        models_loaded = ["bge_small_int8", "itransformer_int8", "lightgbm_risk", "lightgbm_alpha15", "lightgbm_beta15"]
+    elif os.getenv("APEX_ALLOW_MOCK_MODELS", "0") == "1":
+        for mock_m in ["lightgbm_alpha15", "lightgbm_beta15"]:
+            if mock_m not in models_loaded:
+                models_loaded.append(mock_m)
 
     fallback_rate = (state.degraded_fallback_count / state.total_score_requests) if state.total_score_requests > 0 else 0.0
     c_stats = state.embedding_cache.stats()
@@ -825,15 +863,27 @@ async def submit_feedback(req: FeedbackRequest):
 @app.post("/v1/alpha", response_model=AlphaResponse)
 async def compute_alpha(req: AlphaRequest):
     """
-    Computes 15-coin cross-sectional alpha scores via ONNX Runtime CPU,
-    then analytically projects weights to strict dollar- and BTC-beta neutrality (EXP-008d).
+    Computes 15-coin cross-sectional alpha scores and dynamic betas via Dual-ONNX Runtime CPU,
+    then analytically projects weights to strict dollar- and BTC-beta neutrality (EXP-008d / EXP-012).
     """
     t0 = time.perf_counter()
-    n_assets = len(req.betas)
-    if len(req.features) != n_assets:
+    n_assets = len(req.features)
+
+    # Validate betas / beta_features dimension against features rows first
+    if req.betas is not None and len(req.betas) != n_assets:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Features rows ({len(req.features)}) must match betas ({n_assets})",
+            detail=f"Features rows ({n_assets}) must match betas ({len(req.betas)})",
+        )
+    if req.beta_features is not None and len(req.beta_features) != n_assets:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"beta_features rows ({len(req.beta_features)}) must match features rows ({n_assets})",
+        )
+    if req.betas is None and req.beta_features is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Either 'beta_features' (15x13 matrix) or 'betas' (15 floats) must be provided.",
         )
 
     meta = state.alpha15_metadata or {}
@@ -845,23 +895,51 @@ async def compute_alpha(req: AlphaRequest):
                 detail=f"Feature row {idx} has length {len(row)}, expected {n_feats}",
             )
 
-    assets = req.assets or meta.get("assets") or [f"ASSET_{i}" for i in range(n_assets)]
+    assets = req.assets or (meta.get("assets") if len(meta.get("assets", [])) == n_assets else None) or [f"ASSET_{i}" for i in range(n_assets)]
     if len(assets) != n_assets:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Asset list length {len(assets)} != {n_assets}",
         )
 
+    # Determine BTC Beta vector and source
+    if req.beta_features is not None:
+        b_meta = state.beta15_metadata or {}
+        n_b_feats = b_meta.get("n_features", 13)
+        for idx, row in enumerate(req.beta_features):
+            if len(row) != n_b_feats:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Beta feature row {idx} has length {len(row)}, expected {n_b_feats}",
+                )
+
+        X_beta = np.array(req.beta_features, dtype=np.float32)
+        if state.sess_beta15 is not None:
+            pred_b = state.sess_beta15.run(None, {"input": X_beta})[0].flatten()
+        else:
+            # Deterministic mock fallback under APEX_ALLOW_MOCK_MODELS=1
+            pred_b = 1.0 + 0.05 * np.mean(X_beta, axis=1)
+
+        betas_arr = np.clip(pred_b, 0.2, 3.0)
+        btc_symbol = b_meta.get("btc_asset", "BTCUSDT")
+        if btc_symbol in assets:
+            btc_idx = assets.index(btc_symbol)
+            betas_arr[btc_idx] = 1.0
+        beta_source = "onnx_lgbm_r2"
+
+    else:
+        betas_arr = np.array(req.betas, dtype=np.float64)
+        beta_source = "caller_supplied"
+
     X_mat = np.array(req.features, dtype=np.float32)
 
-    # ONNX inference or deterministic mock fallback
+    # ONNX inference or deterministic mock fallback for Alpha
     if state.sess_alpha15 is not None:
         raw_scores = state.sess_alpha15.run(None, {"input": X_mat})[0].flatten()
     else:
         # Mock fallback: deterministic score from feature mean
         raw_scores = np.mean(X_mat, axis=1)
 
-    betas_arr = np.array(req.betas, dtype=np.float64)
     w = project_beta_neutral(raw_scores, betas_arr, gross_cap=req.gross_cap, max_weight=req.max_weight)
 
     latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -869,8 +947,12 @@ async def compute_alpha(req: AlphaRequest):
     ALPHA_INFERENCE_LATENCY.observe(latency_ms / 1000.0)
 
     weights_dict = {assets[i]: round(float(w[i]), 6) for i in range(n_assets)}
+    predicted_betas_dict = {assets[i]: round(float(betas_arr[i]), 6) for i in range(n_assets)}
+
     return AlphaResponse(
         weights=weights_dict,
+        predicted_betas=predicted_betas_dict,
+        beta_source=beta_source,
         net_dollar_exposure=round(float(np.sum(w)), 8),
         net_btc_beta=round(float(np.sum(w * betas_arr)), 8),
         gross_exposure=round(float(np.sum(np.abs(w))), 6),
