@@ -709,3 +709,45 @@
   6. *Timeline Reconciliation:*
      - Reconciled `timeline.md` entry for EXP-003d to `[SUPERSEDED BY EXP-003e — bar-by-bar re-entry slippage & headline cache denominator fixed]`.
 - **Verdict & Next Step:** `[PASSED / REMEDIATION-001 COMPLETE]` - All 7 audit discrepancies resolved. Dual test suites green, zero PyTorch serving runtime, sub-50ms p99 production serving verified. Ready for executive README delivery and merge into `main`.
+
+---
+
+## [2026-11-23] - EXP-006: Causal Walk-Forward ML Regime & Dynamic Sleeve Allocator Evaluation
+- **Git Branch:** `feat/ml-sleeve-allocator`
+- **Scope & Objective:**
+  Evaluate whether an expanding walk-forward ML allocator predicting forward 7-day risk-adjusted sleeve returns from causal macro regimes and crypto microstructure can improve upon frozen APEX v45's static `25/55/20` allocation across the FULL 4.17-year dataset (`2022-07-01` to `2026-08-31`), specifically targeting the May 2025–Aug 2026 low-volatility chop window where baseline Sharpe degraded to `0.54`.
+- **Key Deliverables & Empirical Results:**
+  1. *Causal Macro & Liquidity Regimes (`src/data/fetch_macro_regimes.py`):*
+     - Downloaded daily historical series (`2022-01-01` to `2026-09-01`) via `yfinance` (`QQQ, ^VIX, UUP, ^TNX`) and DeFiLlama stablecoin circulating supply (3,283 points).
+     - STRICT UTC CAUSALITY: All daily TradFi and stablecoin features are strictly shifted by 1 full day before forward-filling onto UTC hourly bars.
+     - Extracted internal crypto microstructure features: 72h/168h realized volatility, 24h cross-asset dispersion, 24h funding carry spread, and trailing 7d sleeve Sharpe/drawdowns.
+     - Extracted active gross exposures for true incremental turnover accounting (`gross_dir, gross_spread, gross_fund`). Saved 36,552 hourly bars to `macro_regimes_hourly.parquet` (0 nulls, gitignored).
+  2. *Audited Baseline Identity Verification:*
+     - Verified `0.25*r_dir + 0.55*r_spread + 0.20*r_fund` reproduces the frozen APEX v45 champion stream to exact numerical identity (maximum absolute difference = `0.00e+00`).
+     - Full 4.17-Year Baseline: Sharpe = **1.46**, CAGR = **+24.11%**, Max Drawdown = **-13.06%**, Calmar = **1.85**.
+  3. *Expanding Walk-Forward ML Allocator (`src/train/exp006_sleeve_allocator.py`):*
+     - Warmup: `2022-07` to `2022-12`. OOS Evaluation: `2023-01-01` to `2026-08-31` (32,136 bars across 15 quarters).
+     - Quarterly refits with strict **168h purging embargo** to prevent forward target leakage.
+     - Models: Regularized Ridge regression predicting 7-day forward Sharpe per sleeve, mapped to bounded simplex weights `w_dir in [0.05, 0.45]`, `w_spread in [0.25, 0.70]`, `w_fund in [0.10, 0.50]` anchored to the `[0.25, 0.55, 0.20]` prior.
+     - Rebalance intervals: 24h and 72h with a `0.05` weight deadband. Charged **25 bps one-way stress slippage** strictly on incremental sleeve rebalancing turnover (`sum(|dw_k| * gross_k) * 0.0025`).
+  4. *3-Way Ablation & Placebo Results (OOS 2023-01 to 2026-08, 32,136 bars):*
+     - **Frozen APEX v45 (Static 25/55/20):**
+       * 0 bps & 25 bps: CAGR = **+28.18%**, Vol = **16.07%**, Sharpe = **1.62**, Calmar = **2.54**, Max DD = **-11.08%**, Turnover = **0 bps/yr**.
+     - **ML Allocator — Crypto + TradFi (24h rebalance):**
+       * 0 bps: CAGR = +28.40%, Vol = 17.13%, Sharpe = 1.54, Calmar = 2.64, Max DD = -10.74%.
+       * 25 bps slippage: CAGR = **+25.29%**, Vol = 17.14%, Sharpe = **1.40**, Calmar = 2.14, Max DD = -11.83%, Turnover = **981 bps/yr**.
+     - **ML Allocator — Crypto + TradFi (72h rebalance):**
+       * 0 bps: CAGR = +30.15%, Vol = 17.16%, Sharpe = 1.62, Calmar = 2.98, Max DD = -10.12%.
+       * 25 bps slippage: CAGR = **+28.33%**, Vol = 17.16%, Sharpe = **1.54**, Calmar = 2.63, Max DD = -10.78%, Turnover = **562 bps/yr**.
+     - **Timestamp-Shuffle Placebo:**
+       * Shuffled feature matrix yielded virtually identical OOS net Sharpe (**1.37** at 24h, **1.41** at 72h) to real models, proving macro-regime weight tilting around the prior produces zero statistically significant information edge.
+  5. *Low-Vol Chop Window Findings (2025-05 to 2026-08, 11,160 bars):*
+     - In the low-vol chop, static APEX v45 achieved +5.04% CAGR, **0.54 Sharpe**, -6.93% Max DD (0 turnover).
+     - The ML allocator correctly attempted to rotate away from dormant Spread (dropping Spread mean weight to 0.536 and increasing Directional to 0.304), generating higher gross return (+6.84% gross CAGR, 0.60 gross Sharpe).
+     - However, under realistic 25 bps stress slippage on perpetual contracts, rebalancing between sleeves generated 966 bps/yr of fee friction, reducing net CAGR to **+4.29%**, net Sharpe to **0.40**, and widening Max DD to **-10.15%**.
+  6. *Year-by-Year Net Sharpe (25 bps Slippage):*
+     - 2023: Frozen = **+2.60** | ML 24h = +2.41 | ML 72h = **+2.79** | Placebo = +2.32
+     - 2024: Frozen = **+1.68** | ML 24h = +1.44 | ML 72h = +1.47 | Placebo = +1.49
+     - 2025: Frozen = +1.07 | ML 24h = +1.11 | ML 72h = **+1.13** | Placebo = +0.78
+     - 2026: Frozen = **-0.00** | ML 24h = -0.57 | ML 72h = -0.50 | Placebo = -0.01
+- **Verdict & Architectural Decision:** `[COMPLETED / HYPOTHESIS FALSIFIED WITH RIGOR]` - Dynamic sleeve rebalancing incurs persistent transaction friction that erodes net Sharpe (1.62 $\to$ 1.40–1.54) and fails to overcome low-vol chop drag net of fees. The static `25/55/20` champion allocation remains optimal. APEX v45 champion preserved untouched.
