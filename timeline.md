@@ -709,3 +709,40 @@
   6. *Timeline Reconciliation:*
      - Reconciled `timeline.md` entry for EXP-003d to `[SUPERSEDED BY EXP-003e — bar-by-bar re-entry slippage & headline cache denominator fixed]`.
 - **Verdict & Next Step:** `[PASSED / REMEDIATION-001 COMPLETE]` - All 7 audit discrepancies resolved. Dual test suites green, zero PyTorch serving runtime, sub-50ms p99 production serving verified. Ready for executive README delivery and merge into `main`.
+
+---
+
+## [2026-11-23] - EXP-009: Decision-Focused Learning (Differentiable Net-of-Cost PyTorch Policy) Across 15 Liquid Binance Perpetuals
+- **Git Branch:** `feat/ml-decision-focused`
+- **Scope & Objective:**
+  Execute `EXP-009`: Decision-Focused Learning via an end-to-end differentiable portfolio policy network across 15 liquid Binance perpetuals over the exact 22,440-hour audited OOS period (`2022-11-01 00:00:00` to `2025-05-23 23:00:00` UTC, 935 daily decision steps). Test whether formulating the training objective directly as net-of-cost portfolio Sharpe ($r_{\text{net}} = \sum w_t r_{\text{total\_24h}} - c_{\text{train}} \sum |w_t - w_{t-1}|$) trains the policy network to learn an endogenous no-trade band that slashes turnover and generates accretive net alpha alongside Frozen APEX v45.
+- **Differentiable Architecture & Mathematical Guarantees:**
+  1. *Compact Shared Policy:*
+     - `DecisionFocusedPolicy` with shared weights across all 15 coins: inputs $[features_{i,t}, w_{i,t-1}]$ ($21 \text{ rank features} + 1 \text{ state variable} = 22 \text{ inputs}$) $\to$ Linear(22, 16) $\to$ Tanh $\to$ Linear(16, 1, bias=False).
+     - Total parameters: 384 parameters ($< 500$) — eliminating cross-asset overfitting.
+  2. *Differentiable Nullspace Projection Layer:*
+     - Closed-form projection matrix $P_t = I - C_t (C_t^T C_t)^{-1} C_t^T$ with $C_t = [\mathbf{1}, \beta_t]$ ensuring exact dollar-neutrality ($\sum w_i = 0$) and BTC beta-neutrality ($\sum w_i \beta_i = 0$) to $< 10^{-6}$ precision.
+     - Smooth tanh gross normalization, soft clamping, re-projection, and scalar scaling guarantees strict position bounds ($\sum |w_i| \le 1.0$ and $|w_i| \le 0.15$) with smooth gradient flow.
+  3. *Walk-Forward Refits:*
+     - 10 quarterly expanding refits with 168h embargo ($T_d + 24\text{h} \le t_{\text{train\_end}}$) and AdamW (`lr=1e-3, weight_decay=1e-2`, early stopping on inner validation slice).
+- **Key Empirical Results:**
+  1. *Endogenous Turnover Control Verification:*
+     - **DF-0bps ($c_{\text{train}} = 0.0$ bps):** Turnover = **213.4x/yr** | CAGR: -8.2% (0 bps) / -25.8% (10 bps) / -46.2% (25 bps) | Sharpe: -0.67 / -2.47 / -5.06 | MaxDD: -58.5%.
+     - **DF-10bps ($c_{\text{train}} = 10.0$ bps):** Turnover = **178.8x/yr (-16.2% vs zero-cost)** | CAGR: -3.5% (0 bps) / -19.3% (10 bps) / -38.3% (25 bps) | Sharpe: -0.23 / -1.68 / -3.80 | MaxDD: -48.7%.
+     - **DF-25bps ($c_{\text{train}} = 25.0$ bps):** Turnover = **149.1x/yr (-30.2% vs zero-cost)** | CAGR: +1.2% (0 bps) / -12.8% (10 bps) / -30.3% (25 bps) | Sharpe: +0.16 / -1.02 / -2.77 | MaxDD: -37.3%.
+     - **Shuffle Placebo ($c_{\text{train}} = 10.0$ bps):** Turnover = **354.4x/yr** | CAGR: +1.2% (0 bps) / -29.0% (10 bps) / -58.3% (25 bps) | Sharpe: +0.16 / -3.24 / -7.72 | MaxDD: -59.3%.
+     - *Mathematical Hypothesis Confirmed:* Directly penalizing $L_1$ turnover inside the differentiable loss function endogenously suppresses turnover by 30.2% (149.1x vs 213.4x), proving gradient awareness of transaction friction.
+  2. *Daily Cadence Friction Bottleneck:*
+     - Despite endogenous damping, unconstrained daily rebalancing across 15 assets still yields 149–179x/yr turnover.
+     - At 10 bps slippage, this turnover burns 14.9% to 17.9% in annual fee drag, driving net Sharpe deeply negative (-1.68 for DF-10bps).
+     - By contrast, EXP-008d's 7-tranche overlapping LightGBM model capped turnover at 43.4x/yr, preserving +8.68% net CAGR at 10 bps.
+  3. *APEX v45 Portfolio Blend Performance:*
+     - 100% Frozen APEX v45 (Honest Vol-Matched, 10 bps): **36.82% CAGR / 1.86 Sharpe / 3.36 Calmar / -11.0% MaxDD**.
+     - 90% APEX / 10% DF-10bps (Honest Vol-Matched, 10 bps): **31.34% CAGR / 1.69 Sharpe / 2.77 Calmar / -11.3% MaxDD** (-548 bps CAGR, -0.17 Sharpe).
+     - 80% APEX / 20% DF-10bps (Honest Vol-Matched, 10 bps): **25.16% CAGR / 1.47 Sharpe / 1.90 Calmar / -13.3% MaxDD**.
+- **Integrity & Verification:**
+  - `apex_multimodal_risk/tests/test_decision_focused.py`: 4/4 unit tests passing (nullspace dollar/beta neutrality $< 10^{-5}$, gross/position caps $\le 1.0 / 0.15$, strict gradient flow through $L_1$ turnover term).
+  - Full test suite: 38/38 passing (100% green).
+  - Ruff: 0 errors across entire codebase.
+  - Frozen `research/apex_v45_champion.py` strictly unmodified. Zero binary artifacts staged.
+- **Verdict & Next Step:** `[FALSIFIED AS PRODUCTION CANDIDATE / METHODOLOGICALLY VALIDATED]` - Decision-Focused Learning successfully proves the mathematical principle of endogenous turnover suppression via differentiable loss formulation (-30.2% turnover). However, daily recurrent unrolling without discrete tranche buffering cannot overcome perpetual transaction friction (> 149x/yr turnover). EXP-008d (Beta-Neutral 48h Total Return LightGBM with 7-tranche buffering) remains the champion candidate sleeve for APEX v45.
