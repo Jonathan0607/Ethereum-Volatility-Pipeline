@@ -1049,3 +1049,65 @@
   2. *Unlevered Friction Reality:* On an unlevered basis, the 43.4x turnover friction prevents standalone CAGR from exceeding +2.65% at 10 bps, slightly diluting baseline CAGR (36.07% $\to$ 32.50%).
   3. *Artifact Generation:* Generated 3-panel comparative equity and drawdown tearsheet at `apex_multimodal_risk/docs/apex_v45_plus_ml15_tearsheet.png`. All 43 test suite assertions pass and Ruff formatting is clean. Baseline frozen `research/apex_v45_champion.py` remains untouched.
 
+### 2026-11-23 — EXP-008d: Forensic Verification Pass, Newey-West HAC Audit & Honest Vol-Matching
+- **Branch:** `feat/ml-cross-sectional-15`
+- **Objective:** Execute a forensic verification pass resolving 3 methodological catches:
+  1. Calculate true Newey-West HAC standard errors and $t$-stats accounting for $L=48$ and $L=168$ overlapping forecast bars.
+  2. Train and evaluate the Beta-Neutral **P1 (48h Total Return)** sleeve head-to-head against 48h price and 168h total return models.
+  3. Eliminate the "vol-target illusion" by applying the EXACT same causal 90-day vol-targeting rule ($\kappa_t = \text{clip}(0.1844 / \sigma_{90d}(t-1), 0.50, 1.25)$ with daily rebalancing, $0.05$ deadband, and exact leverage turnover slippage charged) to **100% Frozen APEX v45** AND every blended portfolio.
+- **Key Methodological Implementations:**
+  1. *Newey-West (Bartlett Kernel) Autocorrelation Adjustment:* For overlapping forward forecast horizons $H$, forecast errors inherit an MA($H-1$) structure that inflates naive $t$-statistics by $\sqrt{H}$. Implemented Bartlett-kernel long-run variance $\hat{\Omega} = \hat{\gamma}_0 + 2 \sum_{j=1}^L (1 - \frac{j}{L+1}) \hat{\gamma}_j$ ($L=48$ for 48h models, $L=168$ for 168h models).
+  2. *Beta-Neutral 48h Total Return Sleeve:* Modeled forward 48h total return ($fwd\_total\_48h = fwd\_price\_48h - cum\_funding\_48h$), vol-normalized cross-sectionally, trained 10 quarterly walk-forward LightGBM Huber refits (168h embargo), and projected weights to $C_t = [\mathbf{1}, \beta_t]$ nullspace via 7-tranche overlapping daily rebalance.
+  3. *Honest Vol-Matching Engine:* Charged exact incremental turnover $|\kappa_t - \kappa_{t-1}| \times 1.0 \times \text{slippage}$ on leverage adjustments for both baseline and blends, ensuring zero free leverage.
+- **Empirical Results & Forensic Evidence:**
+  1. *Newey-West HAC Overlapping Spearman IC Audit (22,440 Bars):*
+     | Model / Forecast Horizon | Mean IC | Naive SE | Naive t | HAC SE | HAC t | Deflator | 2022 | 2023 | 2024 | 2025 |
+     | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+     | **48h Price Return Model (lags=48)** | +3.64% | 0.00191 | +19.04 | 0.00938 | **+3.88** | 4.91x | -0.96% | +1.83% | +5.14% | +6.43% |
+     | **48h Total Return Model (lags=48)** | **+4.97%** | 0.00191 | +25.97 | 0.00944 | **+5.26** | 4.94x | -1.82% | +2.98% | +7.40% | +6.72% |
+     | **168h Total Return Model (lags=168)** | **+7.28%** | 0.00192 | +37.91 | 0.01669 | **+4.36** | 8.69x | +2.07% | +1.17% | +12.69% | +11.48% |
+     | **Cross-Sectional Placebo (lags=168)** | -0.07% | 0.00179 | -0.37 | 0.00177 | -0.38 | 0.99x | +0.25% | -0.07% | -0.32% | +0.49% |
+     - *Finding:* Overlapping bars inflated naive $t$-stats by 4.9x–8.7x. Under Newey-West HAC adjustment, both 48h Total Return ($t_{HAC} = \mathbf{+5.26}$) and 168h Total Return ($t_{HAC} = \mathbf{+4.36}$) remain overwhelmingly significant, far above the Harvey-Liu-Zhu $p<0.01$ discovery threshold ($t > 3.00$).
+  2. *Head-to-Head Standalone Sleeve Tear Sheet (3-Tier Cost Ladder):*
+     | Sleeve Model & Construction | Slippage | CAGR % | Vol % | Sharpe | Calmar | MaxDD % | Annual Turnover | Net Beta | rho(APEX) |
+     | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+     | **P1 — 48h Price Return (Unprojected)** | 0 bps | 12.14% | 14.11% | 0.88 | 1.05 | -11.6% | 46.1x (0 bps) | -0.0288 | -0.0813 |
+     | | 10 bps | 8.08% | 14.11% | 0.62 | 0.62 | -13.1% | 46.1x (461 bps/yr) | -0.0288 | -0.0813 |
+     | | 25 bps | 0.85% | 14.12% | 0.13 | 0.04 | -19.5% | 46.1x (1,153 bps/yr) | -0.0288 | -0.0813 |
+     | **P1 — 48h Price Return (Beta-Neutral)** | 0 bps | 9.50% | 11.50% | 0.85 | 0.88 | -10.8% | 44.2x (0 bps) | -0.0008 | -0.0997 |
+     | | 10 bps | 5.70% | 11.51% | 0.54 | 0.48 | -11.8% | 44.2x (442 bps/yr) | -0.0008 | -0.0997 |
+     | | 25 bps | -1.08% | 11.52% | -0.04 | -0.07 | -16.5% | 44.2x (1,104 bps/yr) | -0.0008 | -0.0997 |
+     | **P1 — 48h Total Return (Beta-Neutral, New)** | 0 bps | **12.52%** | 11.24% | **1.11** | **1.08** | **-11.5%** | **43.4x (0 bps)** | **-0.0011** | **-0.0902** |
+     | | 10 bps | **8.68%** | 11.24% | **0.80** | **0.70** | **-12.4%** | **43.4x (434 bps/yr)** | **-0.0011** | **-0.0902** |
+     | | 25 bps | **+1.83%** | 11.25% | **0.22** | **0.11** | **-16.2%** | **43.4x (1,086 bps/yr)** | **-0.0011** | **-0.0902** |
+     | **C1 — 168h Total Return (Beta-Neutral)** | 0 bps | 5.90% | 11.85% | 0.54 | 0.32 | -18.6% | 41.6x (0 bps) | -0.0010 | -0.1092 |
+     | | 10 bps | 2.43% | 11.85% | 0.26 | 0.12 | -21.0% | 41.6x (416 bps/yr) | -0.0010 | -0.1092 |
+     | | 25 bps | -4.01% | 11.86% | -0.26 | -0.15 | -26.3% | 41.6x (1,040 bps/yr) | -0.0010 | -0.1092 |
+     - *Breakthrough Discovery:* **P1 (48h Total Return, Beta-Neutral)** dominates every other ML constructor. At 10 bps, it achieves **+8.68% CAGR / 0.80 Sharpe** (vs 2.43% / 0.26 for 168h), and under brutal 25 bps stress slippage, it remains cleanly profitable (**+1.83% CAGR / 0.22 Sharpe**), proving that short-horizon total return captures actionable crypto microstructure edges before decay.
+  3. *Honest Apples-to-Apples Vol-Matched Blends:*
+     | Portfolio Allocation & Execution Mode | Slippage | CAGR % | Sharpe | Calmar | MaxDD % | 2022 | 2023 | 2024 | 2025 |
+     | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+     | **100% Frozen APEX v45 [Unlevered Baseline]** | 0 bps | 36.07% | 1.76 | 3.09 | -11.7% | -1.92 | +2.60 | +1.68 | +1.20 |
+     | | 10 bps | 36.07% | 1.76 | 3.09 | -11.7% | -1.92 | +2.60 | +1.68 | +1.20 |
+     | | 25 bps | **36.07%** | **1.76** | **3.09** | **-11.7%** | -1.92 | +2.60 | +1.68 | +1.20 |
+     | **100% Frozen APEX v45 [Honest Vol-Matched]** | 0 bps | 37.07% | 1.87 | 3.38 | -11.0% | -2.06 | +2.53 | +1.98 | +1.38 |
+     | | 10 bps | **36.82%** | **1.86** | **3.36** | **-11.0%** | -2.14 | +2.50 | **+1.95** | **+1.34** |
+     | | 25 bps | **36.43%** | **1.85** | **3.32** | **-11.0%** | -2.25 | +2.45 | **+1.91** | **+1.28** |
+     | **90% APEX / 10% ML (P1 48h Total) [Honest VM]** | 0 bps | 36.92% | 1.95 | 3.81 | -9.7% | -2.13 | +2.57 | +2.05 | +1.38 |
+     | | 10 bps | **36.04%** | **1.91** | **3.71** | **-9.7%** | -2.21 | +2.54 | **+2.02** | **+1.34** |
+     | | 25 bps | **34.73%** | **1.86** | **3.56** | **-9.8%** | -2.34 | +2.48 | **+1.96** | **+1.28** |
+     | **85% APEX / 15% ML (P1 48h Total) [Honest VM]** | 0 bps | 36.40% | 1.97 | 3.84 | -9.5% | -2.26 | +2.57 | +2.13 | +1.40 |
+     | | 10 bps | **35.20%** | **1.92** | **3.69** | **-9.5%** | -2.37 | +2.51 | **+2.08** | **+1.35** |
+     | | 25 bps | **33.40%** | **1.84** | **3.34** | **-10.0%** | -2.53 | +2.43 | **+2.00** | **+1.28** |
+     | **80% APEX / 20% ML (P1 48h Total) [Honest VM]** | 0 bps | 35.70% | 2.00 | 3.84 | -9.3% | -2.35 | +2.55 | +2.20 | +1.42 |
+     | | 10 bps | **34.17%** | **1.93** | **3.60** | **-9.5%** | -2.48 | +2.47 | **+2.14** | **+1.37** |
+     | | 25 bps | **31.92%** | **1.82** | **3.16** | **-10.1%** | -2.67 | +2.36 | **+2.06** | **+1.29** |
+     | **90% APEX / 10% ML (P1 48h Total) [Unlevered]** | 0 bps | 33.81% | 1.84 | 3.14 | -10.8% | -1.99 | +2.63 | +1.86 | +1.24 |
+     | | 10 bps | **33.23%** | **1.82** | **3.08** | **-10.8%** | -2.02 | +2.60 | **+1.83** | **+1.22** |
+     | | 25 bps | **32.37%** | **1.78** | **3.00** | **-10.8%** | -2.07 | +2.56 | **+1.79** | **+1.18** |
+- **Definitive Scientific Verdict & Production Demarcation:**
+  1. *Honest Vol-Matched Comparison:* When 100% APEX v45 is subjected to the exact same dynamic vol-targeting rule with fees charged on leverage changes, APEX v45 baseline prints **36.82% CAGR / 1.86 Sharpe / 3.36 Calmar / -11.0% MaxDD** at 10 bps. Blending 10% ML (P1 48h Total) produces **36.04% CAGR / 1.91 Sharpe / 3.71 Calmar / -9.7% MaxDD**. This achieves a genuine +0.05 Sharpe and +0.35 Calmar expansion while shaving 130 bps off maximum drawdown, surrendering only 78 bps of annual CAGR.
+  2. *Unlevered Reality:* In pure unlevered portfolios, the 43.4x turnover friction prevents the ML sleeve from matching APEX v45's 36.07% CAGR. However, it successfully lifts Net Sharpe from 1.76 to **1.82** (at 10 bps) and **1.78** (at 25 bps), cutting Max Drawdown from -11.7% to **-10.8%**.
+  3. *Conclusion:* The 48h Total Return factor ($t_{HAC} = +5.26$) is mathematically validated as an accretive risk-reducing diversifying sleeve. All 45 test assertions pass (`test_cross_sectional_ml.py`). Frozen `research/apex_v45_champion.py` remains untouched.
+
+

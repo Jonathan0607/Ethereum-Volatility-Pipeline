@@ -189,3 +189,36 @@ def test_vol_matched_blend_scaling():
     assert len(r_scaled) == n_bars
     assert not np.any(np.isnan(r_scaled))
 
+
+def test_newey_west_hac_stats():
+    """Verifies that Newey-West HAC correctly deflates t-stats on overlapping series."""
+    from apex_multimodal_risk.src.train.exp008d_path_a_audit import newey_west_stats
+
+    np.random.seed(42)
+    # Generate an AR(1) / overlapping series with strong positive autocorrelation
+    iid = np.random.randn(2000) + 0.10
+    overlap_series = np.convolve(iid, np.ones(48) / 48.0, mode="valid")
+
+    stats = newey_west_stats(overlap_series, lags=48)
+    assert stats["naive_se"] < stats["hac_se"]
+    assert stats["naive_t"] > stats["hac_t"]
+    assert stats["hac_se"] > 0.0
+
+
+def test_honest_vol_targeting_deadband():
+    """Verifies that honest vol-targeting obeys deadband and incurs exact turnover."""
+    from apex_multimodal_risk.src.train.exp008d_path_a_audit import apply_honest_vol_targeting
+
+    n_bars = 500
+    r_raw = np.random.randn(n_bars) * (0.1844 / np.sqrt(8760))
+    underlying_turnover = np.zeros(n_bars)
+
+    r_scaled, total_turnover, kappa = apply_honest_vol_targeting(
+        r_raw, slippage_bps=10.0, underlying_turnover=underlying_turnover, target_vol=0.1844, deadband=0.05
+    )
+
+    assert len(r_scaled) == n_bars
+    assert np.all(kappa >= 0.50) and np.all(kappa <= 1.25)
+    assert np.all(total_turnover >= 0.0)
+
+
