@@ -44,6 +44,7 @@ apex_multimodal_risk/data/
 *.npy
 *.png
 !apex_multimodal_risk/docs/quant_equity_tearsheet.png
+!apex_multimodal_risk/docs/apex_v45_plus_ml15_tearsheet.png
 *.pkl
 *.onnx
 *.onnx.data

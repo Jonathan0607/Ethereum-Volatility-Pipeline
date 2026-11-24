@@ -25,28 +25,29 @@ flowchart TD
         A1["Market Data Feed<br/>(Binance 1h Klines)"] --> B["Redis Streams<br/><code>market:bars</code>"]
         A2["News Feed<br/>(CoinDesk / Cointelegraph RSS)"] --> C["4-Stage Noise Funnel<br/>(Regex, Entity, Trust, Deduplication)"]
         C --> D["Redis Streams<br/><code>news:raw</code>"]
+        A3["15-Perp Microstructure Feed<br/>(Prices, Funding, Trailing Betas)"] --> E_ALPHA["15-Coin Panel State<br/>(21 Causal Microstructure Features)"]
     end
 
-    subgraph ONLINE_STATE ["2. Stateful Feature Engine & Dynamic Batcher"]
+    subgraph ENGINE_PATH1 ["2A. Tail-Risk & Circuit Breaker Engine (/v1/score, /v1/feedback)"]
         B --> E["OnlineFeatureState<br/>(16 Market Features, 1.14ms/bar)"]
         D --> F["OnlineFeatureState<br/>(4 Sparse-Gated NLP Features)"]
         E & F --> G["Dynamic Micro-Batcher<br/>(max_batch=16, wait=2ms)"]
-    end
-
-    subgraph ONNX_INFERENCE ["3. Unified ONNX Runtime Engine (Pure CPU, Zero-PyTorch)"]
-        G --> H1["BGE-Small-en-v1.5 INT8<br/>(34.2 MB, 0.9968 Cos Sim)"]
-        G --> H2["iTransformer INT8<br/>(0.71 MB, 0.9993 Pearson Corr)"]
-        H1 & H2 --> H3["LightGBM Classifier ONNX<br/>(0.09 MB, 9.23e-8 Max Diff)"]
-    end
-
-    subgraph CONFORMAL_CALIBRATION ["4. Calibration & Adaptive Conformal Inference"]
+        G --> H1["BGE-Small-en-v1.5 INT8<br/>(32.6 MB, 0.9968 Cos Sim)"]
+        G --> H2["iTransformer INT8<br/>(0.21 MB, 0.9993 Pearson Corr)"]
+        H1 & H2 --> H3["LightGBM Risk Classifier ONNX<br/>(0.10 MB, 9.23e-8 Max Diff)"]
         H3 --> I["Platt Scaling Engine<br/>(Calibrated p_crash ∈ [0, 1])"]
         I --> J["6h Delayed-Feedback ACI<br/>(Causal Non-Overlapping VaR Sizing)"]
     end
 
-    subgraph SERVING_MONITORING ["5. Serving Microservice & Observability"]
-        J --> K["FastAPI Async App<br/>(POST /v1/score, POST /v1/feedback)"]
-        K --> L1["Prometheus /metrics<br/>(RPS, Latency, Fallbacks, Cache)"]
+    subgraph ENGINE_PATH2 ["2B. 15-Coin Cross-Sectional Alpha Engine (/v1/alpha — EXP-008d)"]
+        E_ALPHA --> M1["LightGBM Alpha-15 ONNX<br/>(28.5 KB, Huber 48h Total Return)"]
+        M1 --> M2["Analytic Nullspace Projection<br/>(P = I - C(C^T C)^-1 C^T)"]
+        M2 --> M3["Strict Dollar & Beta Neutral Weights<br/>(|sum w| < 1e-10, |sum w·beta| < 1e-10)"]
+    end
+
+    subgraph SERVING_MONITORING ["3. Unified Zero-PyTorch FastAPI Serving (< 5ms CPU)"]
+        J & M3 --> K["FastAPI Async Microservice<br/>(POST /v1/score, POST /v1/alpha, POST /v1/feedback)"]
+        K --> L1["Prometheus /metrics<br/>(RPS, Alpha Latency, Drift, Fallbacks)"]
         K --> L2["Live Drift Monitor<br/>(GET /v1/drift: PSI + Centroid Shift)"]
         K --> L3["LRU Headline Embedding Cache<br/>(96.1% Hit Rate under Load)"]
     end
@@ -74,7 +75,7 @@ The quantitative audit evaluated two overlay deployment modes across the strictl
 | **1. Unhedged APEX v45 Champion** | 0 bps | 36.07% | 1.76 | 1.81 | -11.7% | 3.09 | 10.30 | 0.0 bps/yr | 0.0% |
 | | 25 bps | **36.07%** | **1.76** | **1.81** | **-11.7%** | **3.09** | **10.30** | **0.0 bps/yr** | 0.0% |
 | **2. Market-Only LightGBM Gate** | 25 bps | 35.83% | 1.76 | 1.80 | -11.7% | 3.07 | 10.21 | 0.0 bps/yr | 20.2% |
-| **3. Surgical Multimodal NLP Gate** | 25 bps | **35.48%** | **1.75** | **1.80** | **-11.7%** | **3.04** | **10.12** | **55.8 bps/yr** | 19.6% |
+| **3. Surgical Multimodal NLP Gate** | 25 bps | **36.24%** | **1.78** | **1.82** | **-11.7%** | **3.11** | **10.36** | **0.0 bps/yr** | 19.6% |
 | **4. Delayed-Feedback ACI VaR Sizing** | 25 bps | 32.97% | 1.70 | 1.75 | -11.5% | 2.87 | 9.34 | 47.6 bps/yr | 9.9% |
 | **5. Dual-Pillar Multimodal+ACI Overlay** | 25 bps | 33.11% | 1.72 | 1.77 | -11.5% | 2.88 | 9.39 | 46.5 bps/yr | 26.9% |
 
@@ -85,7 +86,7 @@ The quantitative audit evaluated two overlay deployment modes across the strictl
 | **1. Unhedged APEX v45 Champion** | 25 bps | **36.07%** | **1.76** | **1.81** | **-11.7%** | **3.09** | **10.30** | **0.0 bps/yr** | 0.0% |
 | **2. Market-Only LightGBM Gate** | 25 bps | 30.00% | 1.54 | 1.56 | -11.7% | 2.57 | 8.22 | 0.0 bps/yr | 20.2% |
 | **3. Surgical Multimodal NLP Gate** | 25 bps | 28.28% | 1.46 | 1.47 | -12.7% | 2.23 | 7.05 | 0.0 bps/yr | 19.6% |
-| **4. Delayed-Feedback ACI VaR Sizing** | 25 bps | **31.64%** | **1.69** | **1.76** | **-11.3%** | **2.79** | **9.02** | **128.1 bps/yr** | 9.9% |
+| **4. Delayed-Feedback ACI VaR Sizing** | 25 bps | **31.67%** | **1.69** | **1.76** | **-11.3%** | **2.79** | **9.02** | **125.5 bps/yr** | 9.9% |
 | **5. Dual-Pillar Multimodal+ACI Overlay** | 25 bps | 24.19% | 1.37 | 1.40 | -12.6% | 1.93 | 5.91 | 122.5 bps/yr | 26.9% |
 
 > [!NOTE]
@@ -111,7 +112,63 @@ A critical finding from our forensic walk-forward backtest is the asymmetric int
 
 ---
 
-## 3. Machine Learning Engineering & Model Ablation
+## 3. The Promoted 4th Quantitative Sleeve: 15-Coin Cross-Sectional Total-Return ML Alpha (EXP-008d)
+
+Across EXP-005 through EXP-011, seven distinct mathematical formulations were tested to establish whether machine learning could generate genuine, fee-surviving alpha across our 15-liquid-perpetual universe (`BTC`, `ETH`, `SOL`, `AVAX`, `LINK`, `DOGE`, `ADA`, `BNB`, `XRP`, `MATIC`, `DOT`, `ATOM`, `LTC`, `NEAR`, `UNI`).
+
+**EXP-008d emerged as the sole empirically validated, fee-surviving cross-sectional winner.**
+
+![APEX v45 + EXP-008d ML Alpha Tearsheet](apex_multimodal_risk/docs/apex_v45_plus_ml15_tearsheet.png)
+*Figure 2: 2.56-year out-of-sample equity growth, underwater drawdown profile, and rolling 90-day Sharpe comparison showing Honest Vol-Matched APEX v45 Baseline vs. Promoted 90/10 Blend (EXP-008d 48h Total Return ML Sleeve) under 10 bps institutional slippage.*
+
+### Quantitative Formulation & Breakthrough Mechanics:
+1. **Target Horizon Alignment:** Modeled forward 48h total return ($fwd\_total\_ret = fwd\_price\_ret - cum\_funding\_paid$), normalized cross-sectionally by trailing 168h volatility.
+2. **Newey-West HAC Significance:** Under Bartlett kernel adjustment ($L=48$), the overlapping rank IC achieved **$t_{\text{HAC}} = \mathbf{+5.26}$** (Mean $IC = \mathbf{+4.97\%}$), overwhelmingly passing the Harvey-Liu-Zhu $t > 3.0$ discovery bar.
+3. **Analytic Nullspace Beta-Neutral Projection:** Closed-form projection matrix $P_t = I - C_t (C_t^T C_t)^{-1} C_t^T$ where $C_t = [\mathbf{1}, \beta_t]$, enforcing strict dollar-neutrality ($|\sum w| < 10^{-10}$) and rolling 30-day BTC beta-neutrality ($|\sum w \cdot \beta| < 10^{-10}$) down to machine precision.
+4. **7-Tranche Overlapping Execution:** Rebalances daily across 7 overlapping weekly sub-portfolios with top-6/bottom-6 rank buffering, compressing annual turnover to **43.4x/yr**.
+
+### Standalone Tear Sheet (3-Tier Cost Ladder, 22,440 Audited OOS Bars):
+| Model & Constructor | Slippage | CAGR (%) | Volatility | Sharpe Ratio | Calmar Ratio | Max Drawdown | Annual Turnover | Net BTC Beta | Correlation with APEX |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **EXP-008d P1 (48h Total Return, Beta-Neutral)** | 0 bps | **12.52%** | 11.24% | **1.11** | **1.08** | **-11.5%** | **43.4x / yr** | **-0.0011** | **-0.0902** |
+| | 10 bps | **+8.68%** | 11.24% | **0.80** | **0.70** | **-12.4%** | **43.4x / yr** | **-0.0011** | **-0.0902** |
+| | 25 bps | **+1.83%** | 11.25% | **0.22** | **0.11** | **-16.2%** | **43.4x / yr** | **-0.0011** | **-0.0902** |
+| *Prior 168h Model (EXP-008c)* | 10 bps | +2.43% | 11.85% | 0.26 | 0.12 | -21.0% | 41.6x / yr | -0.0010 | -0.1092 |
+| *Prior 48h Price Model (EXP-008b)* | 10 bps | +5.70% | 11.51% | 0.54 | 0.48 | -11.8% | 44.2x / yr | -0.0008 | -0.0997 |
+
+### Multi-Sleeve Blends with Frozen APEX v45 (10 bps Institutional Slippage):
+When 100% APEX v45 is subjected to the exact same causal dynamic vol-targeting rule ($\kappa_t = \text{clip}(0.1844 / \sigma_{90d}(t-1), 0.50, 1.25)$ with daily rebalancing, $0.05$ deadband, and exact leverage turnover slippage charged), APEX v45 baseline prints **36.82% CAGR / 1.86 Sharpe / 3.36 Calmar / -11.0% MaxDD**.
+
+| Portfolio Allocation & Mode | Slippage | CAGR (%) | Net Sharpe | True Calmar | Max Drawdown | 2022 | 2023 | 2024 | 2025 | Production Verdict |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **100% Frozen APEX v45 [Honest VM]** | 10 bps | **36.82%** | **1.86** | **3.36** | **-11.0%** | -2.14 | +2.50 | +1.95 | +1.34 | **Champion Core Baseline** |
+| **90% APEX / 10% ML [Honest VM]** | 10 bps | **36.04%** | **1.91** | **3.71** | **-9.7%** | -2.21 | +2.54 | **+2.02** | **+1.34** | **PROMOTED (+0.05 Sharpe, +0.35 Calmar)** |
+| **85% APEX / 15% ML [Honest VM]** | 10 bps | **35.20%** | **1.92** | **3.69** | **-9.5%** | -2.37 | +2.51 | **+2.08** | **+1.35** | High Sharpe Expansion |
+| **80% APEX / 20% ML [Honest VM]** | 10 bps | **34.17%** | **1.93** | **3.60** | **-9.5%** | -2.48 | +2.47 | **+2.14** | **+1.37** | Peak Sharpe / Max Diversification |
+| **90% APEX / 10% ML [Unlevered]** | 10 bps | **33.23%** | **1.82** | **3.08** | **-10.8%** | -2.02 | +2.60 | +1.83 | +1.22 | Unlevered Risk Reduction |
+
+---
+
+## 4. Master Research Leaderboard & Scientific Falsification Ledger (EXP-001 – EXP-011)
+
+Every hypothesis tested throughout the quantitative research pipeline is recorded with 100% scientific transparency:
+
+| Exp ID | Research Focus & Hypothesis | Turn/yr | Net CAGR @ 10 bps | Standalone Sharpe | APEX Blend Impact | Scientific Mechanism & Production Verdict |
+| :--- | :--- | :---: | :---: | :---: | :---: | :--- |
+| **Baseline** | **Frozen APEX v45 Champion** | — | **36.82%** | **1.86** | — | **FOUNDATION CORE (Directional 25% + Spread 55% + Funding 20%)** |
+| **EXP-001–003e** | Multimodal Risk Overlay & Conformal ACI | <1x | 35.48%–36.24% | 1.76–1.78 | Truncates tail DD | **PROMOTED ASYMMETRIC TAIL-RISK OVERLAY (`/v1/score`)** |
+| **EXP-004a–004b** | Online Parity, Redis Streams & Docker CI | — | — | — | Sub-50ms SLA | **PROMOTED MLE PRODUCTION INFRASTRUCTURE** |
+| **EXP-005** | 15-Coin NLP Polarity Alpha Gate | 256x | -32.5% | -1.85 | -43 bps drag | **FALSIFIED (Extreme Churn):** Headline drift is noisy; 256x turnover destroys net returns. |
+| **EXP-006** | ML Causal Macro Regime Allocator | 12x | 31.2% | 1.58 | -28 bps drag | **FALSIFIED (Regime Lag):** Macro detection lag & switching turnover underperform static 25/55/20. |
+| **EXP-007** | Marcos López de Prado Meta-Labeling | 0–27x | 35.7% | 1.68 | 1.77 (Filter) | **DEFENSIVE ONLY:** High ROC-AUC (0.694), but sizing turnover erodes net Sharpe; filter-only preserved. |
+| **EXP-008d** | **Beta-Neutral 48h Total Return ML** | **43.4x** | **+8.68%** | **0.80** | **1.91 (Calmar 3.71)** | **PROMOTED WINNER (`/v1/alpha`):** $t_{\text{HAC}}=+5.26$, fee-surviving alpha, lifts APEX v45. |
+| **EXP-009** | Decision-Focused PyTorch Policy | 0x | 0.0% | 0.00 | 1.86 | **FALSIFIED (Optimization Collapse):** Differentiable cost penalty landscape collapsed policy to cash. |
+| **EXP-010** | Rolling PCA Eigenportfolio Stat-Arb | >350x | -29.5% | -1.83 | -13 bps drag | **FALSIFIED (Basket Friction):** Strong gross alpha (+25.4%), but 15-coin hedge churn destroys net alpha. |
+| **EXP-011** | ML Beta-Neutral Funding Carry | 20.7x | -6.33% | -0.50 | -5 bps drag | **FALSIFIED (Adverse Basis Drift):** High rank IC ($t_{\text{HAC}}=+4.60$), but 7-14d hold suffers spot momentum drift. |
+
+---
+
+## 5. Machine Learning Engineering & Model Ablation
 
 ### 10-Split Purged Combinatorial Cross-Validation (CPCV)
 
@@ -153,12 +210,13 @@ All models are compiled to ONNX and quantized to INT8 using static calibration o
 | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
 | **BGE-Small-en-v1.5** | ONNX Runtime | INT8 | 133.4 MB (FP32) | **32.6 MB** | **3.90x** | Cosine Similarity: **0.9968** (Max diff: 0.0025) |
 | **iTransformer Temporal Core** | ONNX Runtime | INT8 | 0.60 MB (FP32) | **0.21 MB** | **1.75x** | Pearson Corr: **0.9993** (Max diff: 0.0084) |
-| **LightGBM Classifier** | ONNX Runtime | Float32 | 0.20 MB (Native) | **0.10 MB** | 1.00x | Max Abs Diff: **$9.23 \times 10^{-8}$** |
-| **Total Model Footprint** | Pure CPU Execution | Mixed | 134.2 MB | **~33 MB** | **4.07x** | Sub-millisecond CPU execution |
+| **LightGBM Risk Classifier** | ONNX Runtime | Float32 | 0.20 MB (Native) | **0.10 MB** | 1.00x | Max Abs Diff: **$9.23 \times 10^{-8}$** |
+| **LightGBM Alpha-15 (EXP-008d)** | ONNX Runtime | Float32 | 0.05 MB (Native) | **0.03 MB** | 1.00x | Max Abs Diff: **$2.85 \times 10^{-8}$** |
+| **Total Model Footprint** | Pure CPU Execution | Mixed | 134.25 MB | **~33 MB** | **4.07x** | Sub-millisecond CPU execution |
 
 ---
 
-## 4. Production Serving & Load Benchmarks
+## 6. Production Serving & Load Benchmarks
 
 The serving microservice is built on FastAPI and Uvicorn, utilizing an asynchronous dynamic micro-batcher (`max_batch_size=16`, `max_wait_ms=2.0`), pure Rust tokenization (`tokenizers.Tokenizer`), and a thread-safe LRU headline cache.
 
@@ -172,7 +230,7 @@ Load benchmarks were executed using Locust under 25 concurrent users on pure CPU
 
 ---
 
-## 5. Strict Online Train-Serve Parity & Drift Monitoring
+## 7. Strict Online Train-Serve Parity & Drift Monitoring
 
 ### Incremental Parity Verification
 The stateful feature engine (`OnlineFeatureState`) processes single-bar increments in **1.14 ms/bar**. Evaluated across 500 consecutive historical hours (1,500 asset-bars) against batch offline transformations:
@@ -187,7 +245,7 @@ The microservice exposes `GET /v1/drift` and Prometheus metrics to continuously 
 
 ---
 
-## 6. The Core APEX v45 Quantitative Alpha Engine
+## 8. The Core APEX v45 Quantitative Alpha Engine
 
 The underlying alpha engine operates on an institutional liquid altcoin universe (**SOL/USDT**, **AVAX/USDT**, **LINK/USDT**) using a convex blend of three orthogonal alpha sub-engines:
 
@@ -202,7 +260,7 @@ With target allocations: $(w_{\text{DIR}}, w_{\text{SP}}, w_{\text{BRK}}) = (0.1
 
 ---
 
-## 7. Quickstart & Developer Guide
+## 9. Quickstart & Developer Guide
 
 ### 1. Fresh-Clone CI Test (Zero Local Binary Files Required)
 Verify the complete codebase, fast linter, and ASGI integration suite without needing local weights or market datasets:
@@ -220,7 +278,7 @@ APEX_ALLOW_MOCK_MODELS=1 pytest -c apex_multimodal_risk/pyproject.toml apex_mult
 
 ### 2. Full Local Test Suite (With Exported ONNX Models)
 ```bash
-# Run all 34 integration and parity tests
+# Run all integration and parity tests
 pytest -c apex_multimodal_risk/pyproject.toml apex_multimodal_risk/tests/ -v
 ```
 
@@ -244,7 +302,7 @@ docker compose -f apex_multimodal_risk/docker-compose.yml up --build -d
 
 ---
 
-## 8. Forensic Audit Trail & Integrity Guarantee
+## 10. Forensic Audit Trail & Integrity Guarantee
 
 This repository enforces strict scientific and engineering integrity:
 - **Zero Binary Git Bloat:** All binary artifacts (`*.onnx`, `*.pt`, `*.pkl`, `*.parquet`) are strictly gitignored.
@@ -253,7 +311,7 @@ This repository enforces strict scientific and engineering integrity:
 
 ---
 
-## 9. Disclaimers & Licensing
+## 11. Disclaimers & Licensing
 
 - **Quantitative Research Disclaimer:** Past performance is no guarantee of future returns. The quantitative models, risk overlays, and backtests contained herein are for educational, research, and institutional engineering demonstration purposes.
 - **License:** Released under the [MIT License](file:///Users/kingebenezer/Desktop/Coding/Projects/Ethereum%20Tracker/LICENSE).
