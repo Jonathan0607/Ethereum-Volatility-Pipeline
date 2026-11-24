@@ -915,3 +915,77 @@
      - *The Transaction Cost Wall:* Actively rotating across an 8-coin cross-sectional book generates 169x to 193x annual notional turnover. At institutional 25 bps one-way slippage, this imposes 4,200 to 4,800 bps/year in fee drag, completely eroding net profitability (standalone Sharpe collapses to -1.37; blended Sharpe drops from 1.80 to 1.45).
      - *Weekly Rebalance Low-Turnover Variant:* Stretching rebalance cadence to 168 hours (weekly) cuts turnover to 55.2x (1,380 bps/yr drag), allowing the strategy to survive 25 bps slippage with a positive net Sharpe of **0.58** (CAGR +9.25%, Max DD -23.3%), but this return is insufficient to accretively lift APEX v45's 1.80 Sharpe baseline.
 - **Verdict & Architectural Decision:** `[COMPLETED / HYPOTHESIS FALSIFIED WITH RIGOR / REJECTED AS ACTIVE 4TH SLEEVE]` - Cross-sectional ML alpha is statistically genuine gross of fees, but cannot survive high rebalancing turnover under 25 bps stress slippage. The frozen APEX v45 Champion architecture remains optimal untouched.
+
+---
+
+## [2026-11-23] - EXP-008b: Low-Turnover Cross-Sectional ML Alpha & Causal Walk-Forward Follow-Up
+- **Git Branch:** `feat/ml-cross-sectional-15`
+- **Scope & Objective:**
+  Execute a focused forensic follow-up auditing the 48h-vs-168h Sharpe gap in `EXP-008`, eliminate turnover waste via horizon alignment and low-turnover portfolio constructors (7-tranche overlapping daily rebalancing, EMA-smoothed rank buffering, and convex L1 turnover-penalized optimization), and evaluate blending the low-turnover ML sleeve into frozen APEX v45 across a 3-tier cost ladder (0 bps, 10 bps, 25 bps) on the exact audited 22,440-hour slice (`2022-11-01 00:00:00` to `2025-05-23 23:00:00`).
+- **Key Deliverables & Empirical Results:**
+  1. *Audit 1 (Frozen APEX v45 Baseline Reconciliation):*
+     - Reconciled why APEX v45 printed `36.94% CAGR / 1.80 Sharpe` in `EXP-008` vs `36.07% / 1.76` in `EXP-003e`:
+       | Audit Slice / Window | Bars | CAGR % | Sharpe | Calmar | MaxDD % | Forensic Finding |
+       | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+       | **EXP-008 Initial Slice (ending 19:00 UTC)** | 22,436 | 36.94% | 1.80 | 3.17 | -11.7% | Truncated final 4h drawdown |
+       | **EXP-003e Audited Full Window (ending 23:00 UTC)** | **22,440** | **36.07%** | **1.76** | **3.09** | **-11.7%** | **Exact audited baseline** |
+     - In `EXP-008`, setting `TEST_END_FINAL = "2025-05-23 19:00:00"` truncated the final 4 hours of the dataset (`20:00` to `23:00` on May 23, 2025) where APEX v45 suffered an intraday drawdown of -1.6%, artificially lifting CAGR and Sharpe. In `EXP-008b`, all return series are aligned strictly to the audited 22,440-hour window.
+  2. *Audit 2 (Clock-Luck Check & 7-Phase Staggered Weekly Audit):*
+     - Evaluated the Weekly 168h strategy starting on every day of the week (`offset_hours in [0, 24, 48, 72, 96, 120, 144]`):
+       | Phase / Day of Week | Offset | 0bps CAGR | 0bps Sharpe | 10bps CAGR | 10bps Sharpe | 25bps CAGR | 25bps Sharpe | Annual Turnover |
+       | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+       | **Tue (0h)** | +0h | 25.53% | 1.36 | 20.11% | 1.11 | 10.55% | 0.65 | 55.2x |
+       | **Wed (24h)** | +24h | 12.67% | 0.74 | 7.30% | 0.47 | -2.10% | -0.02 | 61.0x |
+       | **Thu (48h)** | +48h | -0.39% | 0.06 | -5.14% | -0.23 | -13.44% | -0.76 | 60.9x |
+       | **Fri (72h)** | +72h | 15.15% | 0.89 | 9.81% | 0.62 | 0.46% | 0.11 | 59.2x |
+       | **Sat (96h)** | +96h | 23.51% | 1.27 | 17.80% | 1.00 | 7.76% | 0.50 | 59.2x |
+       | **Sun (120h)** | +120h | 12.67% | 0.73 | 7.76% | 0.49 | -0.87% | 0.05 | 55.6x |
+       | **Mon (144h)** | +144h | 12.79% | 0.74 | 7.63% | 0.49 | -1.42% | 0.02 | 58.4x |
+       | **Min Phase** | - | -0.39% | 0.06 | -5.14% | -0.23 | -13.44% | -0.76 | - |
+       | **Median Phase** | - | 12.79% | 0.74 | 7.76% | 0.49 | -0.87% | 0.05 | - |
+       | **Max Phase** | - | 25.53% | 1.36 | 20.11% | 1.11 | 10.55% | 0.65 | - |
+       | **Equal 7-Tranche Ensemble** | All 7 | **15.04%** | **1.08** | **9.78%** | **0.74** | **0.56%** | **0.11** | **58.5x** |
+     - *Diagnosis:* The 1.35 Sharpe observed in `EXP-008` was partially aided by starting on Tuesday at 00:00 UTC (phase luck). A Thursday start drops 0 bps Sharpe to 0.06. Averaging across all 7 daily phases eliminates clock luck, verifying a true structural ensemble Sharpe of **1.08** at 0 bps and **0.11** at 25 bps.
+  3. *Horizon-Aligned 168h LightGBM Cross-Sectional Factor:*
+     - Evaluated OOS Spearman IC across 22,440 hours comparing `Target=48h` vs `Target=168h`:
+       | Model / Horizon Target | Full OOS IC | ICIR | t-stat | 2022 | 2023 | 2024 | 2025 |
+       | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+       | **LightGBM Target = 48h (EXP-008)** | +3.57% | 0.123 | +18.40 | +0.63% | +1.06% | +5.24% | +7.02% |
+       | **LightGBM Target = 168h (Horizon-Aligned)** | **+5.64%** | **0.202** | **+30.20** | **+2.44%** | **+1.59%** | **+8.18%** | **+11.07%** |
+       | **Cross-Sectional Placebo (168h Target)** | -0.08% | -0.003 | -0.44 | 0.00% | 0.00% | 0.00% | 0.00% |
+     - Matching the LightGBM objective horizon directly to the 7-day holding period boosts Spearman IC by **+58%** (+3.57% $\to$ +5.64%) and t-stat from +18.40 to **+30.20**, maintaining positive predictive edge in all 4 calendar years.
+  4. *Low-Turnover Portfolio Constructors Tear Sheet (3-Tier Cost Ladder):*
+     | Constructor Variant | Slippage | CAGR % | Vol % | Sharpe | Calmar | MaxDD % | Annual Turnover | rho(APEX) |
+     | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+     | **P1 — 7-Tranche Overlapping (48h Model)** | 0 bps | +15.01% | 14.21% | 1.06 | 1.15 | -13.1% | 46.1x (0 bps) | -0.0873 |
+     | | 10 bps | +10.85% | 14.21% | 0.80 | 0.75 | -14.4% | 46.1x (461 bps/yr) | -0.0873 |
+     | | 25 bps | **+3.44%** | 14.22% | **0.31** | **0.19** | **-18.3%** | **46.1x (1,152 bps/yr)** | -0.0873 |
+     | **P1 — 7-Tranche Overlapping (168h Model)** | 0 bps | +2.66% | 14.37% | 0.25 | 0.16 | -16.2% | 42.8x (0 bps) | -0.1202 |
+     | | 10 bps | -0.80% | 14.37% | 0.02 | -0.05 | -17.1% | 42.8x (428 bps/yr) | -0.1202 |
+     | | 25 bps | -6.97% | 14.38% | -0.43 | -0.26 | -26.9% | 42.8x (1,070 bps/yr) | -0.1202 |
+     | **P2 — EMA-Smoothed Rank Buffer (48h Model)** | 0 bps | +9.67% | 19.42% | 0.57 | 0.53 | -18.4% | 25.4x (0 bps) | -0.0849 |
+     | | 10 bps | +7.46% | 19.42% | 0.47 | 0.39 | -19.0% | 25.4x (254 bps/yr) | -0.0849 |
+     | | 25 bps | +3.44% | 19.43% | 0.27 | 0.14 | -23.9% | 25.4x (635 bps/yr) | -0.0849 |
+     | **P2 — EMA-Smoothed Rank Buffer (168h Model)** | 0 bps | +0.76% | 18.98% | 0.13 | 0.03 | -27.8% | 22.4x (0 bps) | -0.0920 |
+     | | 10 bps | -1.03% | 18.98% | 0.04 | -0.04 | -27.9% | 22.4x (224 bps/yr) | -0.0920 |
+     | | 25 bps | -4.30% | 18.99% | -0.14 | -0.14 | -31.6% | 22.4x (560 bps/yr) | -0.0920 |
+     | **P3 — Convex L1 Optimizer (24h, 168h Model)** | 0 bps | +12.64% | 17.42% | 0.77 | 0.50 | -25.5% | 59.1x (0 bps) | -0.0735 |
+     | | 10 bps | +7.44% | 17.42% | 0.50 | 0.27 | -27.3% | 59.1x (591 bps/yr) | -0.0735 |
+     | | 25 bps | -1.67% | 17.46% | -0.01 | -0.05 | -30.5% | 59.1x (1,477 bps/yr) | -0.0735 |
+     - Best Low-Turnover Sleeve: **P1 — 7-Tranche Overlapping (48h Model)** cutting annual turnover from 193x down to **46.1x** (saving 3,662 bps/year in friction drag) while achieving **+3.44% net CAGR** and **0.31 net Sharpe** under 25 bps stress slippage.
+  5. *Blended Portfolio Tear Sheet with Frozen APEX v45 Champion:*
+     | Portfolio Allocation | Slippage | CAGR % | Sharpe | Calmar | MaxDD % | 2022 | 2023 | 2024 | 2025 |
+     | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+     | **100% Frozen APEX v45 Champion** | 0 bps | 36.07% | 1.76 | 3.09 | -11.7% | -1.92 | +2.60 | +1.68 | +1.20 |
+     | | 10 bps | 36.07% | 1.76 | 3.09 | -11.7% | -1.92 | +2.60 | +1.68 | +1.20 |
+     | | 25 bps | **36.07%** | **1.76** | **3.09** | **-11.7%** | -1.92 | +2.60 | +1.68 | +1.20 |
+     | **90% APEX / 10% ML (P1 48h)** | 0 bps | 34.16% | 1.86 | 3.22 | -10.6% | -1.95 | +2.60 | +1.89 | +1.29 |
+     | | 10 bps | 33.54% | 1.83 | 3.16 | -10.6% | -1.98 | +2.58 | +1.86 | +1.26 |
+     | | 25 bps | 32.62% | 1.79 | 3.07 | -10.6% | -2.03 | +2.54 | +1.82 | +1.22 |
+     | **85% APEX / 15% ML** | 0 bps | 33.18% | 1.91 | 3.30 | -10.1% | -1.96 | +2.60 | +2.00 | +1.34 |
+     | | 10 bps | 32.26% | 1.87 | 3.20 | -10.1% | -2.01 | +2.56 | +1.96 | +1.29 |
+     | | 25 bps | 30.90% | 1.80 | 3.06 | -10.1% | -2.09 | +2.49 | +1.90 | +1.22 |
+     | **80% APEX / 20% ML** | 0 bps | 32.19% | 1.96 | 3.38 | -9.5% | -1.96 | +2.60 | +2.13 | +1.38 |
+     | | 10 bps | 30.98% | 1.90 | 3.25 | -9.5% | -2.04 | +2.54 | +2.07 | +1.31 |
+     | | 25 bps | 29.18% | 1.81 | 3.05 | -9.6% | -2.15 | +2.44 | +1.98 | +1.22 |
+- **Verdict & Architectural Decision:** `[COMPLETED / HYPOTHESIS FALSIFIED WITH RIGOR / REJECTED AS ACTIVE 4TH SLEEVE]` - While 7-tranche overlapping execution successfully compresses turnover from 193x down to 46.1x (permitting positive standalone Sharpe of 0.31 at 25 bps slippage and lifting blended Sharpe to 1.79–1.81), True Calmar drops from 3.09 to 3.05–3.07 because annual CAGR drops from 36.07% to 29.18%–32.62% due to perpetual funding drag and residual execution friction. Moreover, the blend underperforms baseline APEX v45 in 2022 and 2023. The frozen APEX v45 Champion architecture remains optimal untouched.
