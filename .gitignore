@@ -36,6 +36,7 @@ logs/
 
 # Data and large binary artifacts
 /data/
+data/*.csv
 apex_multimodal_risk/data/
 *.parquet
 *.pt
@@ -45,6 +46,10 @@ apex_multimodal_risk/data/
 *.png
 !apex_multimodal_risk/docs/quant_equity_tearsheet.png
 !apex_multimodal_risk/docs/apex_v45_plus_ml15_tearsheet.png
+!apex_multimodal_risk/docs/cpcv_4yr_validation.png
+!apex_multimodal_risk/docs/orthogonal_dual_threat.png
+!apex_multimodal_risk/docs/exp015_tc_adaptive_analysis.png
+funding_squeeze_results.png
 *.pkl
 *.onnx
 *.onnx.data

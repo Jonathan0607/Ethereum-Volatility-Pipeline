@@ -1130,7 +1130,7 @@ def run_experiment() -> None:
         print("  - Even under Vol-Matched scaling (<= 1.25x), the blend delivers 35.19% CAGR / 1.70 Sharpe at 10 bps.")
         print("  - ARCHITECTURAL DECISION: [DO NOT PROMOTE TO ONNX / MAIN].")
         print("    Frozen APEX v45 Champion (Directional 25% + Spread 55% + Funding Arb 20%) remains the strictly undefeated champion.")
-        print("    The research findings will be documented with 100% scientific integrity in timeline.md.")
+        print("    The experimental findings will be documented with 100% scientific integrity in timeline.md.")
     print("=" * 135)
 
 

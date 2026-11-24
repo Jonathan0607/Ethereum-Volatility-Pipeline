@@ -248,7 +248,7 @@ apex_multimodal_risk/
 ├── Dockerfile                       # Lean production container (python:3.11-slim, appuser)
 ├── docker-compose.yml               # Orchestrates redis, inference-service, shadow-worker
 ├── pyproject.toml                   # Project metadata, pytest markers, ruff linter config
-├── requirements.txt                 # Full research, training, and testing dependencies
+├── requirements.txt                 # Full experimentation, training, and testing dependencies
 ├── requirements-serving.txt         # Zero-PyTorch lean CPU inference serving dependencies
 ├── benchmarks/
 │   ├── locustfile.py                # Dual-profile Locust load test (Cold burst vs Shared load)
@@ -257,8 +257,11 @@ apex_multimodal_risk/
 │   ├── pipeline.yaml                # Canonical pipeline hyperparameters and thresholds
 │   └── drift_baseline.json          # 10-bin reference distributions & centroid baseline
 ├── docs/
-│   ├── quant_equity_tearsheet.png   # Full 2.56-year walk-forward equity tearsheet
-│   └── apex_v45_plus_ml15_tearsheet.png # EXP-008d Alpha-15 + APEX v45 comparison tearsheet
+│   ├── quant_equity_tearsheet.png     # Full 2.56-year walk-forward equity tearsheet
+│   ├── apex_v45_plus_ml15_tearsheet.png # EXP-008d Alpha-15 + APEX v45 comparison tearsheet
+│   ├── cpcv_4yr_validation.png        # EXP-013 full 4.17-year CPCV & holdout validation
+│   ├── orthogonal_dual_threat.png     # EXP-014 orthogonal microstructure ablation
+│   └── exp015_tc_adaptive_analysis.png # EXP-015 TC diagnostics & time-decay analysis
 ├── src/
 │   ├── utils.py                     # Path resolvers, seed controls, lazy torch loader
 │   ├── data/

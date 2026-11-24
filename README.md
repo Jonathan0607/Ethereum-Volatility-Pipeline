@@ -4,12 +4,12 @@
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](file:///Users/kingebenezer/Desktop/Coding/Projects/Ethereum%20Tracker/apex_multimodal_risk/pyproject.toml)
 [![ONNX Runtime INT8](https://img.shields.io/badge/ONNX%20Runtime-INT8%20CPU-orange.svg)](file:///Users/kingebenezer/Desktop/Coding/Projects/Ethereum%20Tracker/apex_multimodal_risk/src/train/export_onnx.py)
 [![FastAPI Microservice](https://img.shields.io/badge/FastAPI-Async%20Microservice-009688.svg)](file:///Users/kingebenezer/Desktop/Coding/Projects/Ethereum%20Tracker/apex_multimodal_risk/src/serving/app.py)
-[![C++20 HPC](https://img.shields.io/badge/C%2B%2B-20%20%2F%20pybind11-red.svg)](file:///Users/kingebenezer/Desktop/Coding/Projects/Ethereum%20Tracker/src/cpp/monte_carlo.cpp)
-[![Docker Compose](https://img.shields.io/badge/Container-Docker%20Compose-2496ED.svg)](file:///Users/kingebenezer/Desktop/Coding/Projects/Ethereum%20Tracker/docker-compose.yml)
+[![Docker Compose](https://img.shields.io/badge/Container-Docker%20Compose-2496ED.svg)](file:///Users/kingebenezer/Desktop/Coding/Projects/Ethereum%20Tracker/apex_multimodal_risk/docker-compose.yml)
 [![CI Green](https://img.shields.io/badge/CI-Passing%20(Ubuntu)-success.svg)](file:///Users/kingebenezer/Desktop/Coding/Projects/Ethereum%20Tracker/.github/workflows/ci.yml)
 
 > **A dual-core financial engineering platform combining a battle-tested quantitative alpha engine (APEX v45 Champion) with a production Machine Learning Engineering microservice (`apex_multimodal_risk`).**  
-> Engineered for institutional cryptocurrency derivatives portfolios trading liquid perpetual futures (SOL, AVAX, LINK). Designed to resolve single-factor blowup risk, preserve capital during liquidation cascades, and serve sub-50ms calibrated tail-risk predictions under real-world CPU production constraints.
+> Engineered for institutional cryptocurrency derivatives portfolios trading liquid perpetual futures (SOL, AVAX, LINK). Designed to resolve single-factor blowup risk, preserve capital during liquidation cascades, and serve sub-50ms calibrated tail-risk predictions under real-world CPU production constraints.  
+> *Archive & Branch Pointer: The legacy v1 Ethereum dashboard and C++ extension are preserved at Git tag `backup/origin-release-v1`; the extended 4.17-year validation and experimental scripts live on branches `feat/validation-cpcv-4yr`, `feat/ml-orthogonal-microstructure`, and `feat/ml-exp015-tc-adaptive`.*
 
 ---
 
@@ -123,6 +123,11 @@ Across EXP-005 through EXP-011, seven distinct mathematical formulations were te
 ![APEX v45 + EXP-008d ML Alpha Tearsheet](apex_multimodal_risk/docs/apex_v45_plus_ml15_tearsheet.png)
 *Figure 2: 2.56-year out-of-sample equity growth, underwater drawdown profile, and rolling 90-day Sharpe comparison showing Honest Vol-Matched APEX v45 Baseline vs. Promoted 90/10 Blend (EXP-008d 48h Total Return ML Sleeve) under 10 bps institutional slippage.*
 
+![Full 4.17-Year Purged CPCV & Untouched Holdout Validation](apex_multimodal_risk/docs/cpcv_4yr_validation.png)
+*Figure 3: EXP-013 full 4.17-year (33,600h OOS) validation across Audited Window A (`2022-11`–`2025-05`), Untouched Forward Holdout Window B (`2025-05`–`2026-08`), 15-split Purged CPCV stitched paths, CSCV PBO (`0.00%`), and LOCO sensitivity.*
+
+*(Additional deep-dive validation figures consolidated in `apex_multimodal_risk/docs/`: [orthogonal_dual_threat.png](apex_multimodal_risk/docs/orthogonal_dual_threat.png) for EXP-014 and [exp015_tc_adaptive_analysis.png](apex_multimodal_risk/docs/exp015_tc_adaptive_analysis.png) for EXP-015.)*
+
 ### Quantitative Formulation & Breakthrough Mechanics:
 1. **Target Horizon Alignment:** Modeled forward 48h total return ($fwd\_total\_ret = fwd\_price\_ret - cum\_funding\_paid$), normalized cross-sectionally by trailing 168h volatility.
 2. **Newey-West HAC Significance:** Under Bartlett kernel adjustment ($L=48$), the overlapping rank IC achieved **$t_{\text{HAC}} = \mathbf{+5.08}$** (Mean $IC = \mathbf{+4.82\%}$, Naive $t = +25.12$), overwhelmingly passing the Harvey-Liu-Zhu $t > 3.0$ discovery bar.
@@ -151,7 +156,7 @@ When 100% APEX v45 is subjected to the exact same causal dynamic vol-targeting r
 
 ---
 
-## 4. Master Research Leaderboard & Scientific Falsification Ledger (EXP-001 – EXP-012)
+## 4. Master Research Leaderboard & Scientific Falsification Ledger (EXP-001 – EXP-015)
 
 Every hypothesis tested throughout the quantitative research pipeline is recorded with 100% scientific transparency using strictly audited facts from `timeline.md`:
 
@@ -170,6 +175,9 @@ Every hypothesis tested throughout the quantitative research pipeline is recorde
 | **EXP-010** | Rolling PCA Eigenportfolio Stat-Arb | 576.3x / yr | +25.4% gross CAGR (0 bps)<br/>-29.5% net CAGR / -1.83 Sharpe (10 bps) | -13 bps Sharpe drag | **FALSIFIED (Multi-Asset Hedge Friction):** Strong gross alpha, but 0.4891 ML filter AUC and 576.3x/yr 15-coin hedge churn destroys net returns. |
 | **EXP-011** | ML-Gated Beta-Neutral Funding Carry | 20.7x–53.2x / yr | F2: -0.27 Sharpe / F3: -0.50 Sharpe (10 bps) | -2 to -5 bps Sharpe drag | **FALSIFIED (Adverse Basis Drift):** High rank IC ($t_{\text{HAC}}=+4.60$), but 7d–14d holding horizons suffer adverse basis/spot momentum drift (-5.03%/yr). |
 | **EXP-012** | **Dynamic Covariance & Latent-Factor Beta Forecasting** | **45.1x / yr** | **R2 LightGBM Beta: 32.24% 48h R^2 (vs 23.41% OLS)<br/>Standalone Net: +10.31% CAGR / 0.96 Sharpe (10 bps)** | **-23.1% 95th-pct Beta Leakage (0.1062 -> 0.0817)<br/>90/10 Blend: 1.91 Sharpe / -9.8% MaxDD** | **PROMOTED WINNER (Dual-ONNX `/v1/alpha`):** R2 LightGBM Dynamic Beta ($t$-stable, lowest crisis RMSE 0.3358, true shuffle placebo -15.46% $R^2$) strictly beats 30d OLS ($R_0$) on 14 altcoins; standalone Sharpe rises +0.13 to 0.96 and CAGR +123 bps to 10.31%; Ledoit-Wolf ($R_1$) cuts GMV vol from 52.89% to 41.94%; R3b 2-factor nullspace over-constrains (0.73 Sharpe). |
+| **EXP-013** | Full 4.17Y Untouched Holdout + 15-Split Purged CPCV | 44.7x / yr<br/>PBO `0.00%` | Full 4.17Y Standalone: **0.43** Sharpe (`DSR=51.4%`)<br/>Win B Rank IC: **+6.08%** ($t_{\text{HAC}}=+4.19$) / SR `-0.45` | 90/10 Blend: **1.52** Sharpe / **-9.8%** MaxDD<br/>Bootstrap lift `+0.00` ($p=0.499$) | **`[OVERFIT / DECAYED IN HOLDOUT]`:** Zero-snooping 4.17Y audit confirms PBO `0.00%` and 100% positive CPCV paths, but Win B compressed dispersion fails to clear 10 bps turnover standalone; 10% overlay cuts MaxDD `-11.7%` $\to$ `-9.8%`. |
+| **EXP-014** | Orthogonal Binance Derivatives Microstructure (`OI`, `OFI`, `Basis`, `Crowding`) | 50.7x / yr<br/>$\rho(A_0, A_1)=+0.1719$ | Win A $A_1$: **+1.48** Sharpe (+14.19% CAGR)<br/>Win B $A_1$: **-1.27** Sharpe / Full 4.17Y: +0.61 | 90/10 Dual-Threat Blend: **+1.51** Sharpe / **-10.4%** MaxDD | **`[METHODOLOGICALLY VALIDATED / ADVISORY PROMOTION]`:** Proves genuine orthogonal alpha vs OHLCV ($\rho=+0.1719$), but 2025–2026 chop/liquidation wash trading inverts standalone $A_1$; strictly advisory sleeve only. |
+| **EXP-015** | Exponential Time-Decay (`W_180d`) + Continuous Dispersion-Gated Portfolios | 54.1x (`K1`)<br/>43.7x (`K2`) | `A0_W_180d` 4.17Y Rank IC: **+0.0587** ($t_{\text{HAC}}=+7.22$)<br/>Win B Q1–Q5: U-shaped squeeze inversion | `K1_72_A1_reg` fails 4/4 kill-switch gates (SR `+0.15`, CPCV `-0.27`, DSR `31.69%`, $\Delta=+0.009, p=0.421$) | **`[SIGNAL REAL BUT MONETIZATION BOUNDED / FREEZE REPO]`:** Time-decay confirms real Rank IC over 4.17Y, but Win B U-shaped short-squeeze inversion + narrow dispersion block net monetization vs Honest VM APEX (`+1.50` SR). Pipeline frozen honestly. |
 
 ---
 
@@ -237,6 +245,10 @@ Load benchmarks were executed using Locust under 25 concurrent users on pure CPU
 
 *\*Note: The 6,957 denominator in Profile 1 includes +200 post-benchmark teardown drain requests issued during Locust worker disconnection.*
 
+**Live 5-Model ONNX Runtime Verification (`APEX_ALLOW_MOCK_MODELS=0`, `CPUExecutionProvider`):**
+- All 5 ONNX sessions loaded cleanly (`bge_small_int8`, `itransformer_int8`, `lightgbm_risk`, `lightgbm_alpha15`, `lightgbm_beta15`) with **zero `torch` or `lightgbm` modules** in runtime `sys.modules`.
+- `POST /v1/alpha` Dual-ONNX (`beta_features` mode): **0.21 ms server / 1.13 ms client latency**, projecting `15/15` weights with **`0.00e+00` net dollar exposure** and **`0.00e+00` net BTC-beta exposure** (`< 1e-10`).
+
 ---
 
 ## 7. Strict Online Train-Serve Parity & Drift Monitoring
@@ -265,7 +277,7 @@ With target allocations: $(w_{\text{DIR}}, w_{\text{SP}}, w_{\text{BRK}}) = (0.1
 1. **Directional ACM (Adaptive Carry Momentum):** Multi-horizon time-series momentum standardized by rolling volatility ($W \in \{24, 72, 168, 336, 720\}$h), inverted 720h funding rate carry, and open interest velocity.
 2. **Market-Neutral Spread:** Pairs-cointegrated relative value trading long the top-ranked composite alpha asset and shorting the bottom-ranked asset, scaled by rank dispersion conviction.
 3. **Binary Volatility Breakout:** Asymmetric Donchian volatility envelopes (72h entry, 336h exit) gated by a $+25\%$ Open Interest expansion filter and a $+20\%$ profit-lock ratchet.
-4. **C++20 Monte Carlo Engine ([src/cpp/monte_carlo.cpp](file:///Users/kingebenezer/Desktop/Coding/Projects/Ethereum%20Tracker/src/cpp/monte_carlo.cpp)):** Compiled via `pybind11`, generating 10,000 Geometric Brownian Motion (GBM) paths with 24-step horizons in **sub-millisecond execution**.
+4. **Archived Legacy C++20 Monte Carlo Engine:** Preserved at Git tag `backup/origin-release-v1` alongside the original v1 Ethereum dashboard (`src/`, `frontend/`).
 
 ---
 
