@@ -122,25 +122,101 @@ def test_alpha_endpoint_validation():
         assert "expected 21" in resp2.json()["detail"]
 
 
+def test_alpha_endpoint_dual_onnx_dynamic_beta_mock_ci(monkeypatch):
+    """Verifies Dual-ONNX POST /v1/alpha with beta_features in fresh-clone CI mode."""
+    monkeypatch.setenv("APEX_ALLOW_MOCK_MODELS", "1")
+
+    with TestClient(app) as client:
+        # 15 assets x 21 alpha features
+        features = [[0.05 * (i - j) for j in range(21)] for i in range(15)]
+        # 15 assets x 13 risk features
+        beta_features = [[0.02 * (i + j) for j in range(13)] for i in range(15)]
+        assets = [
+            "BTCUSDT", "ETHUSDT", "SOLUSDT", "AVAXUSDT", "LINKUSDT",
+            "DOGEUSDT", "ADAUSDT", "BNBUSDT", "XRPUSDT", "MATICUSDT",
+            "DOTUSDT", "ATOMUSDT", "LTCUSDT", "NEARUSDT", "UNIUSDT",
+        ]
+
+        payload = {
+            "features": features,
+            "beta_features": beta_features,
+            "assets": assets,
+            "gross_cap": 1.0,
+            "max_weight": 0.15,
+        }
+
+        resp = client.post("/v1/alpha", json=payload)
+        assert resp.status_code == 200, f"Error: {resp.text}"
+        data = resp.json()
+
+        assert data["beta_source"] == "onnx_lgbm_r2"
+        assert "predicted_betas" in data
+        assert len(data["predicted_betas"]) == 15
+        assert data["predicted_betas"]["BTCUSDT"] == 1.0  # BTC locked to 1.0
+        assert abs(data["net_dollar_exposure"]) < 1e-6
+        assert abs(data["net_btc_beta"]) < 1e-6
+        assert data["gross_exposure"] <= 1.0001
+        for a, w in data["weights"].items():
+            assert abs(w) <= 0.150001, f"Weight bound exceeded for {a}: {w}"
+
+
+def test_alpha_endpoint_missing_betas_and_features():
+    """Verifies 400 Bad Request when neither betas nor beta_features is provided."""
+    with TestClient(app) as client:
+        features = [[0.1] * 21 for _ in range(15)]
+        resp = client.post("/v1/alpha", json={"features": features})
+        assert resp.status_code == 400
+        assert "Either 'beta_features'" in resp.json()["detail"]
+
+
 @pytest.mark.requires_local_artifacts
 def test_alpha_endpoint_onnx_local():
-    """Verifies POST /v1/alpha with real lightgbm_alpha15.onnx model on CPU."""
-    onnx_path = os.path.join("apex_multimodal_risk/artifacts/onnx", "lightgbm_alpha15.onnx")
-    if not os.path.exists(onnx_path):
-        pytest.skip("lightgbm_alpha15.onnx not present locally")
+    """Verifies Dual-ONNX POST /v1/alpha with real models on CPU, sub-5ms latency, and exact neutrality."""
+    alpha_path = os.path.join("apex_multimodal_risk/artifacts/onnx", "lightgbm_alpha15.onnx")
+    beta_path = os.path.join("apex_multimodal_risk/artifacts/onnx", "lightgbm_beta15.onnx")
+    if not (os.path.exists(alpha_path) and os.path.exists(beta_path)):
+        pytest.skip("lightgbm_alpha15.onnx or lightgbm_beta15.onnx not present locally")
 
     with TestClient(app) as client:
         features = [[0.05 * (i - j) for j in range(21)] for i in range(15)]
-        betas = [1.0 + 0.05 * i for i in range(15)]
-        payload = {"features": features, "betas": betas}
+        beta_features = [[0.02 * (i + j) for j in range(13)] for i in range(15)]
+        assets = [
+            "BTCUSDT", "ETHUSDT", "SOLUSDT", "AVAXUSDT", "LINKUSDT",
+            "DOGEUSDT", "ADAUSDT", "BNBUSDT", "XRPUSDT", "MATICUSDT",
+            "DOTUSDT", "ATOMUSDT", "LTCUSDT", "NEARUSDT", "UNIUSDT",
+        ]
+        payload = {
+            "features": features,
+            "beta_features": beta_features,
+            "assets": assets,
+            "gross_cap": 1.0,
+            "max_weight": 0.15,
+        }
 
-        t0 = time.perf_counter()
-        resp = client.post("/v1/alpha", json=payload)
-        latency_ms = (time.perf_counter() - t0) * 1000.0
+        # Warmup
+        for _ in range(5):
+            resp = client.post("/v1/alpha", json=payload)
+            assert resp.status_code == 200
 
-        assert resp.status_code == 200
+        # Benchmark 50 runs for CPU latency
+        latencies = []
+        for _ in range(50):
+            t0 = time.perf_counter()
+            resp = client.post("/v1/alpha", json=payload)
+            latencies.append((time.perf_counter() - t0) * 1000.0)
+            assert resp.status_code == 200
+
         data = resp.json()
+        assert data["beta_source"] == "onnx_lgbm_r2"
         assert len(data["weights"]) == 15
-        assert abs(data["net_dollar_exposure"]) < 1e-6
-        assert abs(data["net_btc_beta"]) < 1e-6
-        assert latency_ms < 50.0
+        assert len(data["predicted_betas"]) == 15
+        assert data["predicted_betas"]["BTCUSDT"] == 1.0
+
+        # Strict dollar and beta neutrality down to machine precision
+        assert abs(data["net_dollar_exposure"]) < 1e-10
+        assert abs(data["net_btc_beta"]) < 1e-10
+
+        mean_latency = float(np.mean(latencies))
+        p95_latency = float(np.percentile(latencies, 95))
+        assert mean_latency < 5.0, f"Mean latency {mean_latency:.2f}ms exceeds 5ms limit!"
+        assert p95_latency < 10.0

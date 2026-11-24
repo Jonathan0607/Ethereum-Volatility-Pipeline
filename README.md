@@ -25,7 +25,8 @@ flowchart TD
         A1["Market Data Feed<br/>(Binance 1h Klines)"] --> B["Redis Streams<br/><code>market:bars</code>"]
         A2["News Feed<br/>(CoinDesk / Cointelegraph RSS)"] --> C["4-Stage Noise Funnel<br/>(Regex, Entity, Trust, Deduplication)"]
         C --> D["Redis Streams<br/><code>news:raw</code>"]
-        A3["15-Perp Microstructure Feed<br/>(Prices, Funding, Trailing Betas)"] --> E_ALPHA["15-Coin Panel State<br/>(21 Causal Microstructure Features)"]
+        A3["15-Perp Microstructure Feed<br/>(Prices, Funding, Trailing Betas)"] --> E_ALPHA["15-Coin Alpha Panel<br/>(21 Causal Microstructure Features)"]
+        A4["15-Perp Risk Panel<br/>(Vol, Squeeze, Correlation Matrix)"] --> E_BETA["15-Coin Risk Panel<br/>(13 Causal Risk Features)"]
     end
 
     subgraph ENGINE_PATH1 ["2A. Tail-Risk & Circuit Breaker Engine (/v1/score, /v1/feedback)"]
@@ -39,9 +40,10 @@ flowchart TD
         I --> J["6h Delayed-Feedback ACI<br/>(Causal Non-Overlapping VaR Sizing)"]
     end
 
-    subgraph ENGINE_PATH2 ["2B. 15-Coin Cross-Sectional Alpha Engine (/v1/alpha — EXP-008d)"]
+    subgraph ENGINE_PATH2 ["2B. 15-Coin Dual-ONNX Alpha & Dynamic Beta Engine (/v1/alpha — EXP-012)"]
         E_ALPHA --> M1["LightGBM Alpha-15 ONNX<br/>(28.5 KB, Huber 48h Total Return)"]
-        M1 --> M2["Analytic Nullspace Projection<br/>(P = I - C(C^T C)^-1 C^T)"]
+        E_BETA --> M1_BETA["LightGBM Beta-15 ONNX<br/>(62.3 KB, R2 Dynamic Beta Forecaster)"]
+        M1 & M1_BETA --> M2["Analytic Dual-ONNX Nullspace Projection<br/>(P = I - C(C^T C)^-1 C^T, C = [1, beta_LGBM])"]
         M2 --> M3["Strict Dollar & Beta Neutral Weights<br/>(|sum w| < 1e-10, |sum w·beta| < 1e-10)"]
     end
 
@@ -149,7 +151,7 @@ When 100% APEX v45 is subjected to the exact same causal dynamic vol-targeting r
 
 ---
 
-## 4. Master Research Leaderboard & Scientific Falsification Ledger (EXP-001 – EXP-011)
+## 4. Master Research Leaderboard & Scientific Falsification Ledger (EXP-001 – EXP-012)
 
 Every hypothesis tested throughout the quantitative research pipeline is recorded with 100% scientific transparency using strictly audited facts from `timeline.md`:
 
@@ -167,6 +169,7 @@ Every hypothesis tested throughout the quantitative research pipeline is recorde
 | **EXP-009** | Decision-Focused PyTorch Policy | 0.0x / yr | Collapsed to 0.0% flat cash | 0.00 Sharpe / flat cash | **FALSIFIED (Non-Convex L1 Landscape):** Recurrent net-of-cost Sharpe optimization collapsed policy to zero weights under non-convex transaction penalties. |
 | **EXP-010** | Rolling PCA Eigenportfolio Stat-Arb | 576.3x / yr | +25.4% gross CAGR (0 bps)<br/>-29.5% net CAGR / -1.83 Sharpe (10 bps) | -13 bps Sharpe drag | **FALSIFIED (Multi-Asset Hedge Friction):** Strong gross alpha, but 0.4891 ML filter AUC and 576.3x/yr 15-coin hedge churn destroys net returns. |
 | **EXP-011** | ML-Gated Beta-Neutral Funding Carry | 20.7x–53.2x / yr | F2: -0.27 Sharpe / F3: -0.50 Sharpe (10 bps) | -2 to -5 bps Sharpe drag | **FALSIFIED (Adverse Basis Drift):** High rank IC ($t_{\text{HAC}}=+4.60$), but 7d–14d holding horizons suffer adverse basis/spot momentum drift (-5.03%/yr). |
+| **EXP-012** | **Dynamic Covariance & Latent-Factor Beta Forecasting** | **42.7x / yr** | **R2 LightGBM Beta: 33.26% 48h R^2 (vs 24.10% OLS)<br/>Standalone Net: +9.35% CAGR / 0.95 Sharpe (10 bps)** | **-26.6% 95th-pct Beta Leakage (0.1031 -> 0.0757)<br/>90/10 Blend: 1.89 Sharpe / -9.8% MaxDD** | **PROMOTED WINNER (Dual-ONNX `/v1/alpha`):** R2 LightGBM Dynamic Beta ($t$-stable, lowest crisis RMSE 0.3366) strictly beats 30d OLS ($R_0$) and GraphBetaCovNet ($R_{3a}$); Ledoit-Wolf ($R_1$) cuts GMV vol from 52.85% to 41.91%; R3b 2-factor nullspace over-constrains (0.68 Sharpe). |
 
 ---
 
