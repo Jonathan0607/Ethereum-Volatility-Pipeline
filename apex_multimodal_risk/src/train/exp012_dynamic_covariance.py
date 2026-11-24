@@ -47,6 +47,9 @@ import torch.nn.functional as F
 from sklearn.covariance import LedoitWolf
 
 import research.apex_v45_champion as v45
+from apex_multimodal_risk.src.serving.portfolio_math import (
+    project_multi_factor_neutral,
+)
 from apex_multimodal_risk.src.train.exp008d_path_a_audit import (
     HOURS_PER_YEAR,
     QUARTERLY_TEST_STARTS,
@@ -115,22 +118,23 @@ def build_risk_features_and_targets(
     beta_mats: dict[int, np.ndarray] = {}
     corr_mats: dict[int, np.ndarray] = {}
     for w in [24, 72, 168, 720]:
-        cov_btc = ret_df.rolling(w, min_periods=max(12, w // 4)).cov(ret_df["BTCUSDT"])
-        var_btc = ret_df["BTCUSDT"].rolling(w, min_periods=max(12, w // 4)).var()
-        b_mat = (cov_btc.div(var_btc + 1e-8, axis=0)).clip(0.2, 3.0).bfill().values
+        min_p = 72 if w >= 72 else max(12, w // 4)
+        cov_btc = ret_df.rolling(w, min_periods=min_p).cov(ret_df["BTCUSDT"])
+        var_btc = ret_df["BTCUSDT"].rolling(w, min_periods=min_p).var()
+        b_mat = (cov_btc.div(var_btc + 1e-8, axis=0)).clip(0.3, 2.5).fillna(1.0).values
         b_mat[:, btc_idx] = 1.0
         beta_mats[w] = b_mat
 
         if w in [72, 168]:
-            c_mat = ret_df.rolling(w, min_periods=max(12, w // 4)).corr(ret_df["BTCUSDT"]).clip(-1.0, 1.0).bfill().values
+            c_mat = ret_df.rolling(w, min_periods=min_p).corr(ret_df["BTCUSDT"]).clip(-1.0, 1.0).fillna(0.0).values
             corr_mats[w] = c_mat
 
     # Volatility of each asset vs BTC
-    vol_168_df = ret_df.rolling(168, min_periods=24).std().bfill()
+    vol_168_df = ret_df.rolling(168, min_periods=24).std().fillna(1e-4)
     vol_btc_168 = vol_168_df["BTCUSDT"].values[:, None]
     vol_ratio_btc_mat = np.clip(vol_168_df.values / (vol_btc_168 + 1e-6), 0.2, 5.0)
 
-    vol_24_df = ret_df.rolling(24, min_periods=12).std().bfill()
+    vol_24_df = ret_df.rolling(24, min_periods=12).std().fillna(1e-4)
     vol_expansion_mat = np.clip(vol_24_df.values / (vol_168_df.values + 1e-6), 0.2, 5.0)
 
     # Cross-sectional dispersion of 1h returns
@@ -160,27 +164,27 @@ def build_risk_features_and_targets(
     fwd_cov_168 = np.full((n_ts, n_assets, n_assets), np.nan)
 
     for t_i in range(n_ts):
-        if t_i + 48 <= n_ts:
-            r_fwd_48 = ret_mat[t_i : t_i + 48]
+        if t_i + 48 < n_ts:
+            r_fwd_48 = ret_mat[t_i + 1 : t_i + 49]
             btc_fwd_48 = r_fwd_48[:, btc_idx]
             var_btc_48 = np.var(btc_fwd_48) + 1e-8
             cov_48 = np.mean(
                 (r_fwd_48 - np.mean(r_fwd_48, axis=0)) * (btc_fwd_48[:, None] - np.mean(btc_fwd_48)),
                 axis=0,
             )
-            b48 = np.clip(cov_48 / var_btc_48, 0.2, 3.0)
+            b48 = np.clip(cov_48 / var_btc_48, 0.3, 2.5)
             b48[btc_idx] = 1.0
             fwd_beta_48[t_i] = b48
 
-        if t_i + 168 <= n_ts:
-            r_fwd_168 = ret_mat[t_i : t_i + 168]
+        if t_i + 168 < n_ts:
+            r_fwd_168 = ret_mat[t_i + 1 : t_i + 169]
             btc_fwd_168 = r_fwd_168[:, btc_idx]
             var_btc_168 = np.var(btc_fwd_168) + 1e-8
             cov_168 = np.mean(
                 (r_fwd_168 - np.mean(r_fwd_168, axis=0)) * (btc_fwd_168[:, None] - np.mean(btc_fwd_168)),
                 axis=0,
             )
-            b168 = np.clip(cov_168 / var_btc_168, 0.2, 3.0)
+            b168 = np.clip(cov_168 / var_btc_168, 0.3, 2.5)
             b168[btc_idx] = 1.0
             fwd_beta_168[t_i] = b168
 
@@ -291,7 +295,7 @@ class GraphBetaCovNet(nn.Module):
         delta_beta = self.beta_head(h2).squeeze(-1)  # (B, 15)
         beta_hat = base_beta_168 + delta_beta
         # BTC is strictly 1.0
-        beta_hat = torch.clamp(beta_hat, 0.2, 3.0)
+        beta_hat = torch.clamp(beta_hat, 0.3, 2.5)
         beta_hat[:, btc_idx] = 1.0
 
         # Factor covariance head
@@ -605,9 +609,12 @@ def run_risk_walkforward(
                     factors_r3[ti] = B_hat.squeeze(0).cpu().numpy()
                     cov_hat_r3[ti] = Sigma_hat_t.squeeze(0).cpu().numpy()
 
-                    # Shuffle placebo (permutes node features across assets)
-                    x_t_shuffled = x_t[:, torch.randperm(n_assets)]
-                    b_hat_pl, _, _ = gnn_model(x_t_shuffled, adj_tensor, base_b_t, btc_idx=btc_idx)
+                    # Shuffle placebo (permutes node features, base beta, and adjacency across assets)
+                    perm = torch.randperm(n_assets)
+                    x_t_shuffled = x_t[:, perm]
+                    base_b_shuffled = base_b_t[:, perm]
+                    adj_shuffled = adj_tensor[:, perm][:, :, perm]
+                    b_hat_pl, _, _ = gnn_model(x_t_shuffled, adj_shuffled, base_b_shuffled, btc_idx=btc_idx)
                     beta_hat_placebo[ti] = b_hat_pl.squeeze(0).cpu().numpy()
 
     # Precompute sample covariances and Ledoit-Wolf covariances across test_idx every 24h
@@ -674,9 +681,13 @@ def evaluate_statistical_risk_gates(risk_data: dict[str, Any]) -> dict[str, Any]
     crisis_mask = ftx_mask | yen_mask
     crisis_idx = np.where(crisis_mask)[0]
 
-    # Baseline historic mean for R^2
-    hist_mean_b48 = np.nanmean(fwd_b48[oos_indices])
-    hist_mean_b168 = np.nanmean(fwd_b168[oos_indices])
+    # Evaluate strictly across the 14 non-BTC altcoins (excluding clamped BTCUSDT == 1.0)
+    btc_idx = risk_data["assets"].index("BTCUSDT")
+    alt_idx = np.array([i for i in range(n_assets) if i != btc_idx])
+
+    # Baseline historic mean across 14 altcoins for uninflated R^2
+    hist_mean_b48 = np.nanmean(fwd_b48[oos_indices][:, alt_idx])
+    hist_mean_b168 = np.nanmean(fwd_b168[oos_indices][:, alt_idx])
 
     beta_models = {
         "R0 (30d OLS Baseline)": risk_data["beta_r0"],
@@ -688,29 +699,29 @@ def evaluate_statistical_risk_gates(risk_data: dict[str, Any]) -> dict[str, Any]
 
     beta_metrics: dict[str, dict[str, float]] = {}
     for name, pred_b in beta_models.items():
-        # Valid 48h evaluation mask
+        # Valid 48h evaluation mask across 14 altcoins
         valid_48 = oos_indices[~np.isnan(fwd_b48[oos_indices, 0]) & ~np.isnan(pred_b[oos_indices, 0])]
-        err_48 = pred_b[valid_48] - fwd_b48[valid_48]
+        err_48 = pred_b[valid_48][:, alt_idx] - fwd_b48[valid_48][:, alt_idx]
         rmse_48 = float(np.sqrt(np.mean(err_48**2)))
         mae_48 = float(np.mean(np.abs(err_48)))
-        ss_tot_48 = np.sum((fwd_b48[valid_48] - hist_mean_b48) ** 2)
+        ss_tot_48 = np.sum((fwd_b48[valid_48][:, alt_idx] - hist_mean_b48) ** 2)
         r2_48 = float(1.0 - (np.sum(err_48**2) / (ss_tot_48 + 1e-8)))
 
         # Crisis RMSE (48h)
         val_crisis_48 = np.intersect1d(crisis_idx, valid_48)
-        rmse_crisis_48 = float(np.sqrt(np.mean((pred_b[val_crisis_48] - fwd_b48[val_crisis_48]) ** 2)))
+        rmse_crisis_48 = float(np.sqrt(np.mean((pred_b[val_crisis_48][:, alt_idx] - fwd_b48[val_crisis_48][:, alt_idx]) ** 2)))
 
-        # Valid 168h evaluation mask
+        # Valid 168h evaluation mask across 14 altcoins
         valid_168 = oos_indices[~np.isnan(fwd_b168[oos_indices, 0]) & ~np.isnan(pred_b[oos_indices, 0])]
-        err_168 = pred_b[valid_168] - fwd_b168[valid_168]
+        err_168 = pred_b[valid_168][:, alt_idx] - fwd_b168[valid_168][:, alt_idx]
         rmse_168 = float(np.sqrt(np.mean(err_168**2)))
         mae_168 = float(np.mean(np.abs(err_168)))
-        ss_tot_168 = np.sum((fwd_b168[valid_168] - hist_mean_b168) ** 2)
+        ss_tot_168 = np.sum((fwd_b168[valid_168][:, alt_idx] - hist_mean_b168) ** 2)
         r2_168 = float(1.0 - (np.sum(err_168**2) / (ss_tot_168 + 1e-8)))
 
         # Crisis RMSE (168h)
         val_crisis_168 = np.intersect1d(crisis_idx, valid_168)
-        rmse_crisis_168 = float(np.sqrt(np.mean((pred_b[val_crisis_168] - fwd_b168[val_crisis_168]) ** 2)))
+        rmse_crisis_168 = float(np.sqrt(np.mean((pred_b[val_crisis_168][:, alt_idx] - fwd_b168[val_crisis_168][:, alt_idx]) ** 2)))
 
         beta_metrics[name] = {
             "rmse_48": rmse_48,
@@ -775,7 +786,7 @@ def evaluate_statistical_risk_gates(risk_data: dict[str, Any]) -> dict[str, Any]
                 w_gmv = np.clip(w_gmv, -0.5, 0.5)
                 w_gmv = w_gmv / np.sum(w_gmv)
                 # Forward 168h realized return series
-                fwd_returns = ret_mat[ti : ti + 168] @ w_gmv
+                fwd_returns = ret_mat[ti + 1 : ti + 169] @ w_gmv
                 gmv_vol = np.std(fwd_returns) * np.sqrt(HOURS_PER_YEAR) * 100.0
                 gmv_vols.append(gmv_vol)
             except Exception:
@@ -791,45 +802,8 @@ def evaluate_statistical_risk_gates(risk_data: dict[str, Any]) -> dict[str, Any]
 
 
 # =================================================================================
-# 5. Multi-Factor Nullspace Projection & Downstream Alpha Engine
+# 5. Downstream Alpha Engine (Uses Single-Source project_multi_factor_neutral)
 # =================================================================================
-
-def project_multi_factor_neutral(
-    w0: np.ndarray,
-    constraint_matrix: np.ndarray,
-    gross_cap: float = 1.0,
-    max_weight: float = 0.15,
-) -> np.ndarray:
-    """
-    Closed-form nullspace projection onto C^T w = 0:
-      P = I - C (C^T C)^-1 C^T
-      w_proj = P @ w0
-    Guarantees dollar-neutrality and beta/factor-neutrality down to machine precision (< 1e-12).
-    Enforces gross exposure cap and individual position boundaries.
-    """
-    n = len(w0)
-    C = constraint_matrix  # Shape (n, K)
-    K = C.shape[1]
-
-    # Orthogonal projection matrix
-    CtC = C.T @ C
-    CtC_inv = np.linalg.inv(CtC + np.eye(K) * 1e-12)
-    P = np.eye(n) - C @ CtC_inv @ C.T
-    w_proj = P @ w0
-
-    # L1 normalization to gross_cap
-    sum_abs = np.sum(np.abs(w_proj))
-    if sum_abs < 1e-12:
-        return np.zeros(n)
-    w_scaled = w_proj * (gross_cap / sum_abs)
-
-    # Position clipping with scalar shrinkage
-    max_w = np.max(np.abs(w_scaled))
-    if max_w > max_weight:
-        w_scaled = w_scaled * (max_weight / max_w)
-
-    return w_scaled
-
 
 def simulate_downstream_sleeve(
     pred_mat: np.ndarray,
@@ -839,7 +813,7 @@ def simulate_downstream_sleeve(
     constraint_matrices: list[np.ndarray],
     ts_index: pd.DatetimeIndex,
     true_beta_mat: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     """
     Simulates the 7-tranche overlapping portfolio with the specified causal risk constraint matrix C_t.
     Holds EXP-008d alpha predictions strictly fixed.
@@ -927,7 +901,7 @@ def simulate_downstream_sleeve(
         "std_net_beta": float(np.std(net_beta)),
         "p95_leakage": float(np.nanpercentile(rolling_7d_leakage, 95)),
     }
-    return r10, turnover, net_beta, m
+    return gross_pnl, r10, turnover, net_beta, m
 
 
 # =================================================================================
@@ -1054,15 +1028,15 @@ def run_exp012() -> None:
 
     downstream_results = {}
     for name, C_list in downstream_candidates:
-        r10, turn, net_beta, m = simulate_downstream_sleeve(
+        gross_pnl, r10, turn, net_beta, m = simulate_downstream_sleeve(
             pred_total_48h, ret_1h_mat, fr_mat, vol_mat, C_list, oos_ts_index, true_beta_mat
         )
-        # Compute blend: 90% APEX / 10% ML
-        r_blend_10bps = 0.90 * r_apex_oos + 0.10 * r10
-        r_blend_honest_vm, _, _ = apply_honest_vol_targeting(
-            r_blend_10bps, slippage_bps=10.0, underlying_turnover=0.10 * turn, target_vol=0.1844
+        # Compute blend: 90% APEX / 10% ML (pass gross_pnl to avoid double slippage deduction)
+        r_blend_raw = 0.90 * r_apex_oos + 0.10 * gross_pnl
+        r_blend_honest_vm, total_turn_vm, _ = apply_honest_vol_targeting(
+            r_blend_raw, slippage_bps=10.0, underlying_turnover=0.10 * turn, target_vol=0.1844, deadband=0.05
         )
-        m_blend = compute_metrics(r_blend_honest_vm, turn * 0.10, 10.0, oos_ts_index)
+        m_blend = compute_metrics(r_blend_honest_vm, total_turn_vm, 10.0, oos_ts_index)
 
         # Correlation with APEX
         rho = float(np.corrcoef(r10, r_apex_oos)[0, 1])

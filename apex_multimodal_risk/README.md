@@ -31,7 +31,7 @@ flowchart TD
         D --> F["OnlineFeatureState<br/>(4 Sparse-Gated NLP Features)"]
         E & F --> G["Dynamic Micro-Batcher<br/>(max_batch=16, wait=2ms)"]
         G --> H1["BGE-Small-en-v1.5 INT8<br/>(34.2 MB, 0.9968 Cos Sim)"]
-        G --> H2["iTransformer INT8<br/>(0.71 MB, 0.9993 Pearson Corr)"]
+        G --> H2["iTransformer INT8<br/>(0.21 MB / 213 KB, 0.9993 Pearson Corr)"]
         H1 & H2 --> H3["LightGBM Classifier ONNX<br/>(0.09 MB, 9.23e-8 Max Diff)"]
         H3 --> I["Platt Scaling<br/>(p_crash ∈ [0, 1])"]
         I --> J["6h Delayed-Feedback ACI<br/>(Non-overlapping Adaptive VaR)"]
@@ -182,7 +182,7 @@ Generates strictly dollar-neutral and BTC-beta-neutral 15-coin portfolio weights
 ```
 
 *Mathematical Guarantees:*  
-The analytic nullspace projection guarantees $|\sum w_i| < 10^{-10}$ and $|\sum w_i \beta_i| < 10^{-10}$ machine precision via pure NumPy linear algebra, with individual position sizes capped at $\pm 15\%$ and gross exposure normalized to $1.0$.
+The analytic nullspace projection guarantees $|\sum w_i| < 10^{-10}$ and $|\sum w_i \beta_i| < 10^{-10}$ machine precision via pure NumPy linear algebra, with predicted dynamic betas bounded to $[0.3, 2.5]$ (clamping $\text{BTCUSDT} \equiv 1.0$), individual position sizes capped at $\pm 15\%$, and gross exposure normalized to $1.0$.
 
 ---
 

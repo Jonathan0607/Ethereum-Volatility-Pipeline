@@ -125,29 +125,29 @@ Across EXP-005 through EXP-011, seven distinct mathematical formulations were te
 
 ### Quantitative Formulation & Breakthrough Mechanics:
 1. **Target Horizon Alignment:** Modeled forward 48h total return ($fwd\_total\_ret = fwd\_price\_ret - cum\_funding\_paid$), normalized cross-sectionally by trailing 168h volatility.
-2. **Newey-West HAC Significance:** Under Bartlett kernel adjustment ($L=48$), the overlapping rank IC achieved **$t_{\text{HAC}} = \mathbf{+5.26}$** (Mean $IC = \mathbf{+4.97\%}$), overwhelmingly passing the Harvey-Liu-Zhu $t > 3.0$ discovery bar.
-3. **Analytic Nullspace Beta-Neutral Projection:** Closed-form projection matrix $P_t = I - C_t (C_t^T C_t)^{-1} C_t^T$ where $C_t = [\mathbf{1}, \beta_t]$, enforcing strict dollar-neutrality ($|\sum w| < 10^{-10}$) and rolling 30-day BTC beta-neutrality ($|\sum w \cdot \beta| < 10^{-10}$) down to machine precision.
-4. **7-Tranche Overlapping Execution:** Rebalances daily across 7 overlapping weekly sub-portfolios with top-6/bottom-6 rank buffering, compressing annual turnover to **43.4x/yr**.
+2. **Newey-West HAC Significance:** Under Bartlett kernel adjustment ($L=48$), the overlapping rank IC achieved **$t_{\text{HAC}} = \mathbf{+5.08}$** (Mean $IC = \mathbf{+4.82\%}$, Naive $t = +25.12$), overwhelmingly passing the Harvey-Liu-Zhu $t > 3.0$ discovery bar.
+3. **Analytic Nullspace Beta-Neutral Projection:** Closed-form projection matrix $P_t = I - C_t (C_t^T C_t)^{-1} C_t^T$ where $C_t = [\mathbf{1}, \beta_t]$, enforcing strict dollar-neutrality ($|\sum w| < 10^{-10}$) and rolling BTC beta-neutrality ($|\sum w \cdot \beta| < 10^{-10}$) down to machine precision.
+4. **7-Tranche Overlapping Execution:** Rebalances daily across 7 overlapping weekly sub-portfolios with top-6/bottom-6 rank buffering, compressing annual turnover to **43.5x/yr**.
 
 ### Standalone Tear Sheet (3-Tier Cost Ladder, 22,440 Audited OOS Bars):
 | Model & Constructor | Slippage | CAGR (%) | Volatility | Sharpe Ratio | Calmar Ratio | Max Drawdown | Annual Turnover | Net BTC Beta | Correlation with APEX |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **EXP-008d P1 (48h Total Return, Beta-Neutral)** | 0 bps | **12.52%** | 11.24% | **1.11** | **1.08** | **-11.5%** | **43.4x / yr** | **-0.0011** | **-0.0902** |
-| | 10 bps | **+8.68%** | 11.24% | **0.80** | **0.70** | **-12.4%** | **43.4x / yr** | **-0.0011** | **-0.0902** |
-| | 25 bps | **+1.83%** | 11.25% | **0.22** | **0.11** | **-16.2%** | **43.4x / yr** | **-0.0011** | **-0.0902** |
-| *Prior 168h Model (EXP-008c)* | 10 bps | +2.43% | 11.85% | 0.26 | 0.12 | -21.0% | 41.6x / yr | -0.0010 | -0.1092 |
-| *Prior 48h Price Model (EXP-008b)* | 10 bps | +5.70% | 11.51% | 0.54 | 0.48 | -11.8% | 44.2x / yr | -0.0008 | -0.0997 |
+| **EXP-008d P1 (48h Total Return, Beta-Neutral)** | 0 bps | **12.92%** | 11.25% | **1.14** | **1.19** | **-10.8%** | **43.5x / yr** | **-0.0009** | **-0.0952** |
+| | 10 bps | **+9.07%** | 11.25% | **0.83** | **0.70** | **-12.9%** | **43.5x / yr** | **-0.0009** | **-0.0952** |
+| | 25 bps | **+2.18%** | 11.27% | **0.25** | **0.12** | **-18.7%** | **43.5x / yr** | **-0.0009** | **-0.0952** |
+| *Prior 168h Model (EXP-008c)* | 10 bps | +1.39% | 11.87% | 0.18 | 0.06 | -22.0% | 42.0x / yr | -0.0008 | -0.1057 |
+| *Prior 48h Price Model (EXP-008b)* | 10 bps | +7.05% | 11.73% | 0.64 | 0.54 | -13.0% | 44.9x / yr | -0.0007 | -0.0884 |
 
 ### Multi-Sleeve Blends with Frozen APEX v45 (10 bps Institutional Slippage):
 When 100% APEX v45 is subjected to the exact same causal dynamic vol-targeting rule ($\kappa_t = \text{clip}(0.1844 / \sigma_{90d}(t-1), 0.50, 1.25)$ with daily rebalancing, $0.05$ deadband, and exact leverage turnover slippage charged), APEX v45 baseline prints **36.82% CAGR / 1.86 Sharpe / 3.36 Calmar / -11.0% MaxDD**.
 
 | Portfolio Allocation & Mode | Slippage | CAGR (%) | Net Sharpe | True Calmar | Max Drawdown | 2022 | 2023 | 2024 | 2025 | Production Verdict |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
-| **100% Frozen APEX v45 [Honest VM]** | 10 bps | **36.82%** | **1.86** | **3.36** | **-11.0%** | -2.14 | +2.50 | +1.95 | +1.34 | **Champion Core Baseline** |
-| **90% APEX / 10% ML [Honest VM]** | 10 bps | **36.04%** | **1.91** | **3.71** | **-9.7%** | -2.21 | +2.54 | **+2.02** | **+1.34** | **PROMOTED (+0.05 Sharpe, +0.35 Calmar)** |
-| **85% APEX / 15% ML [Honest VM]** | 10 bps | **35.20%** | **1.92** | **3.69** | **-9.5%** | -2.37 | +2.51 | **+2.08** | **+1.35** | High Sharpe Expansion |
-| **80% APEX / 20% ML [Honest VM]** | 10 bps | **34.17%** | **1.93** | **3.60** | **-9.5%** | -2.48 | +2.47 | **+2.14** | **+1.37** | Peak Sharpe / Max Diversification |
-| **90% APEX / 10% ML [Unlevered]** | 10 bps | **33.23%** | **1.82** | **3.08** | **-10.8%** | -2.02 | +2.60 | +1.83 | +1.22 | Unlevered Risk Reduction |
+| **100% Frozen APEX v45 [Honest VM]** | 10 bps | **36.82%** | **1.86** | **3.36** | **-11.0%** | -2.15 | +2.52 | +1.90 | +1.30 | **Champion Core Baseline** |
+| **90% APEX / 10% ML [Honest VM]** | 10 bps | **36.12%** | **1.91** | **3.70** | **-9.8%** | -2.20 | +2.52 | **+2.03** | **+1.37** | **PROMOTED (+0.05 Sharpe, +0.34 Calmar)** |
+| **85% APEX / 15% ML [Honest VM]** | 10 bps | **35.40%** | **1.92** | **3.68** | **-9.6%** | -2.35 | +2.49 | **+2.11** | **+1.38** | High Sharpe Expansion |
+| **80% APEX / 20% ML [Honest VM]** | 10 bps | **34.31%** | **1.94** | **3.64** | **-9.4%** | -2.34 | +2.48 | **+2.16** | **+1.41** | Peak Sharpe / Max Diversification |
+| **90% APEX / 10% ML [Unlevered]** | 10 bps | **33.28%** | **1.82** | **3.06** | **-10.9%** | -2.01 | +2.59 | +1.85 | +1.23 | Unlevered Risk Reduction |
 
 ---
 
@@ -160,16 +160,16 @@ Every hypothesis tested throughout the quantitative research pipeline is recorde
 | **Baseline** | **Frozen APEX v45 Champion** | 21.2x / yr | 36.07% CAGR / 1.76 Sharpe | — | **FOUNDATION CORE:** Directional 25% + Spread 55% + Funding Arb 20% (Honest VM: 36.82% / 1.86 Sharpe / 3.36 Calmar / -11.0% MaxDD). |
 | **EXP-001** | Sprint 1 Data Ingestion & News Funnel | Zero lookahead | 18,939 deduplicated headlines | Zero leakage | **PROMOTED INFRASTRUCTURE:** DuckDB temporal alignment & 4-stage noise funnel (regex, entity linking, trust scoring, temporal deduplication). |
 | **EXP-002a–e** | 10-Split Purged CPCV Ablation | 504h purge | M0: 0.0616 PR-AUC<br/>M2: 0.0596 PR-AUC | +0.0047 BSS / 0.002 ECE | **PROMOTED TAIL MODEL (`M2`):** Sparse-gated novelty filter ($\tau_{\text{nov}}=0.2880, \tau_{\text{proto}}=0.7179$); discarded overfit `Multimodal_iTransformer_NLP` (0.505 ROC-AUC / -0.1048 BSS). |
-| **EXP-003a–e** | Delayed ACI & Expanding Walk-Forward | Realized slippage | Mode A: 35.48% / 1.75<br/>Mode B: 31.64% / 1.69 | +164 bps shortfall cut<br/>91.2% Aug 2024 coverage | **PROMOTED ASYMMETRIC RISK OVERLAY (`/v1/score`):** Unified ONNX/INT8 export + 6h Delayed ACI (Mode A NLP Gate: 55.8 bps/yr drag; Mode B ACI VaR: 128.1 bps/yr drag). |
+| **EXP-003a–e** | Delayed ACI & Expanding Walk-Forward | Realized slippage | Mode A: 35.48% / 1.75<br/>Mode B: 31.64% / 1.69 | +47 bps shortfall cut<br/>90.8% Aug 2024 coverage | **PROMOTED ASYMMETRIC RISK OVERLAY (`/v1/score`):** Unified ONNX/INT8 export + 6h Delayed ACI (Mode A NLP Gate: 55.8 bps/yr drag; Mode B ACI VaR: 128.1 bps/yr drag). |
 | **EXP-004a–b** | MLE Production Parity & Shadow Replay | Sub-50ms SLA | 0.0 market / 2.38e-7 NLP parity | 869.3 RPS / 36 ms p99 | **PROMOTED SERVING SYSTEM:** Zero-PyTorch ONNX serving, 0.00% fallbacks, PSI/centroid drift monitor, Redis Streams shadow worker, Docker CI. |
 | **EXP-005** | 15-Coin Polarity Alpha Gate (CryptoBERT/FinBERT) | 256.2x / yr | -0.49 gross / -3.79 net Sharpe (25 bps) | -43 bps Sharpe drag | **FALSIFIED (Static Coverage Bias):** `rel_sent` +3.68% IC matched time-shuffle placebo (+3.09% IC, $t=+6.80$); demeaned `rel_surprise` IC -0.66%; 256x turnover destroys returns. |
 | **EXP-006** | Walk-Forward ML Dynamic Sleeve Allocator | 12.4x / yr | 1.54 net Sharpe vs. 1.62 static (25 bps) | -8 bps Sharpe drag | **FALSIFIED (Regime Switching Lag):** Macro feature ensemble (QQQ/VIX/UUP/Stablecoins over 4.17y) lags dynamic regime shifts; shuffle placebo 1.41. |
 | **EXP-007** | Marcos López de Prado Meta-Labeling on APEX Directional | 0–27x / yr | 0.6937 ROC-AUC / +40.03% gross CAGR | 1.68 net Sharpe (25 bps) | **DEFENSIVE FILTER ONLY:** 56.4% vs 9.8% decile win rate; bet sizing incurs 244–270 bps/yr inter-trade turnover drag; filter-only retains 0.0 bps drag. |
-| **EXP-008a–d** | **Beta-Neutral 48h Total Return ML** | **43.4x / yr** | **+8.68% net CAGR / 0.80 Sharpe (10 bps)**<br/>**+1.83% net CAGR / 0.22 Sharpe (25 bps)** | **1.91 Sharpe / 3.71 Calmar**<br/>**(-130 bps MaxDD to -9.7%)** | **PROMOTED WINNER (`/v1/alpha`):** $t_{\text{HAC}}=+5.26$ (Mean IC +4.97%), 7-tranche overlapping daily rebalance + closed-form nullspace projection $[\mathbf{1}, \beta_t]$. |
-| **EXP-009** | Decision-Focused PyTorch Policy | 0.0x / yr | Collapsed to 0.0% flat cash | 0.00 Sharpe / flat cash | **FALSIFIED (Non-Convex L1 Landscape):** Recurrent net-of-cost Sharpe optimization collapsed policy to zero weights under non-convex transaction penalties. |
+| **EXP-008a–d** | **Beta-Neutral 48h Total Return ML** | **43.5x / yr** | **+9.07% net CAGR / 0.83 Sharpe (10 bps)**<br/>**+2.18% net CAGR / 0.25 Sharpe (25 bps)** | **1.91 Sharpe / 3.70 Calmar**<br/>**(-120 bps MaxDD to -9.8%)** | **PROMOTED WINNER (`/v1/alpha`):** $t_{\text{HAC}}=+5.08$ (Mean IC +4.82%), 7-tranche overlapping daily rebalance + closed-form nullspace projection $[\mathbf{1}, \beta_t]$. |
+| **EXP-009** | Decision-Focused PyTorch Policy | 178.8x / yr | DF-10bps: -19.3% net CAGR / -1.68 Sharpe (10 bps) | -17 bps Sharpe drag | **FALSIFIED (Daily Rebalance Friction):** Differentiable $L_1$ turnover penalty endogenously damped turnover by 30.2% (149.1x vs 213.4x zero-cost), but daily 15-coin cadence incurred 14.9–17.9%/yr fee drag, crushing net returns. |
 | **EXP-010** | Rolling PCA Eigenportfolio Stat-Arb | 576.3x / yr | +25.4% gross CAGR (0 bps)<br/>-29.5% net CAGR / -1.83 Sharpe (10 bps) | -13 bps Sharpe drag | **FALSIFIED (Multi-Asset Hedge Friction):** Strong gross alpha, but 0.4891 ML filter AUC and 576.3x/yr 15-coin hedge churn destroys net returns. |
 | **EXP-011** | ML-Gated Beta-Neutral Funding Carry | 20.7x–53.2x / yr | F2: -0.27 Sharpe / F3: -0.50 Sharpe (10 bps) | -2 to -5 bps Sharpe drag | **FALSIFIED (Adverse Basis Drift):** High rank IC ($t_{\text{HAC}}=+4.60$), but 7d–14d holding horizons suffer adverse basis/spot momentum drift (-5.03%/yr). |
-| **EXP-012** | **Dynamic Covariance & Latent-Factor Beta Forecasting** | **42.7x / yr** | **R2 LightGBM Beta: 33.26% 48h R^2 (vs 24.10% OLS)<br/>Standalone Net: +9.35% CAGR / 0.95 Sharpe (10 bps)** | **-26.6% 95th-pct Beta Leakage (0.1031 -> 0.0757)<br/>90/10 Blend: 1.89 Sharpe / -9.8% MaxDD** | **PROMOTED WINNER (Dual-ONNX `/v1/alpha`):** R2 LightGBM Dynamic Beta ($t$-stable, lowest crisis RMSE 0.3366) strictly beats 30d OLS ($R_0$) and GraphBetaCovNet ($R_{3a}$); Ledoit-Wolf ($R_1$) cuts GMV vol from 52.85% to 41.91%; R3b 2-factor nullspace over-constrains (0.68 Sharpe). |
+| **EXP-012** | **Dynamic Covariance & Latent-Factor Beta Forecasting** | **45.1x / yr** | **R2 LightGBM Beta: 32.24% 48h R^2 (vs 23.41% OLS)<br/>Standalone Net: +10.31% CAGR / 0.96 Sharpe (10 bps)** | **-23.1% 95th-pct Beta Leakage (0.1062 -> 0.0817)<br/>90/10 Blend: 1.91 Sharpe / -9.8% MaxDD** | **PROMOTED WINNER (Dual-ONNX `/v1/alpha`):** R2 LightGBM Dynamic Beta ($t$-stable, lowest crisis RMSE 0.3358, true shuffle placebo -15.46% $R^2$) strictly beats 30d OLS ($R_0$) on 14 altcoins; standalone Sharpe rises +0.13 to 0.96 and CAGR +123 bps to 10.31%; Ledoit-Wolf ($R_1$) cuts GMV vol from 52.89% to 41.94%; R3b 2-factor nullspace over-constrains (0.73 Sharpe). |
 
 ---
 
@@ -198,12 +198,14 @@ Standard conformal prediction assumes exchangeability and instant label arrival�
 
 | Conformal Metric (6h Non-Overlapping Blocks) | Static 5% VaR Baseline | 6h Delayed-Feedback ACI VaR | Empirical Improvement |
 | :--- | :---: | :---: | :--- |
-| **Empirical Coverage ($\ge 95.0\%$)** | 95.95% | **94.35%** | Calibrated to finite-sample nominal target |
-| **Mean Breach Shortfall Beyond VaR** | -6.60% | **-4.96%** | **+164 bps lower breach shortfall** |
-| **August 2024 Crash Coverage (Yen-Unwind)** | 85.90% | **91.20%** | **+530 bps adaptive volatility recovery** |
-| **Kupiec Proportion-of-Failures ($LR_{\text{uc}}$ $p$-val)** | $p = 0.0012$ | **$p = 0.0362$** | **30x calibration improvement** |
-| **Christoffersen Independence ($LR_{\text{ind}}$ $p$-val)** | $p = 0.0004$ | **$p = 0.0226$** | **56x clustering independence improvement** |
-| **Joint Conditional Coverage ($LR_{\text{cc}}$ $p$-val)** | $p = 0.0000$ | **$p = 0.0083$** | Substantial tail-risk clustering reduction |
+| **Empirical Coverage ($\ge 95.0\%$)** | 92.72% | **94.34%** | Calibrated to finite-sample nominal target |
+| **Mean Breach Shortfall Beyond VaR** | -5.49% | **-5.02%** | **+47 bps lower breach shortfall** |
+| **August 2024 Crash Coverage (Yen-Unwind)** | 81.40% | **90.80%** | **+940 bps adaptive volatility recovery** |
+| **Kupiec Proportion-of-Failures ($LR_{\text{uc}}$ $p$-val)** | $p = 0.0000$ | **$p = 0.0311$** | **Passing coverage calibration ($p > 0.01$)** |
+| **Christoffersen Independence ($LR_{\text{ind}}$ $p$-val)** | $p = 0.0000$ | **$p = 0.0436$** | **Passing clustering independence ($p > 0.01$)** |
+| **Joint Conditional Coverage ($LR_{\text{cc}}$ $p$-val)** | $p = 0.0000$ | **$p = 0.0128$** | Substantial tail-risk clustering reduction |
+
+*(Note: Pinned under deterministic `seed=42` reproducible audit via `audit_sprint2_3.py`. An earlier unseeded run reported -6.60% to -4.96% (+164 bps) and 91.2% Aug 2024 coverage).*
 
 ---
 
@@ -229,9 +231,11 @@ Load benchmarks were executed using Locust under 25 concurrent users on pure CPU
 
 | Benchmark Profile | Concurrent Users | Total Requests | Throughput (RPS) | Headline Cache Hit Rate | Degradation / Fallback Rate | p50 Latency | p95 Latency | p99 Latency | SLA Target |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Profile 1: Cold Burst (Unique Headlines)** | 25 | 6,757 | 232.7 RPS | 0.0% (0 / 6,957) | **0.00%** | 82.00 ms | 130.00 ms | 210.00 ms | $< 500$ ms |
+| **Profile 1: Cold Burst (Unique Headlines)** | 25 | 6,757 | 232.7 RPS | 0.0% (0 / 6,957)* | **0.00%** | 82.00 ms | 130.00 ms | 210.00 ms | $< 500$ ms |
 | **Profile 2: Shared Load (Broadcast News)** | 25 | 25,241 | **869.3 RPS** | **96.1%** (6,203 / 6,456) | **0.00%** | **9.00 ms** | **24.00 ms** | **36.00 ms** | **$< 50$ ms** |
 | **Aggregated Microservice Totals** | 25 | 31,998 | — | — | **0.00% (0 / 31,998)** | — | — | — | **100% Zero Fallback** |
+
+*\*Note: The 6,957 denominator in Profile 1 includes +200 post-benchmark teardown drain requests issued during Locust worker disconnection.*
 
 ---
 
@@ -318,5 +322,6 @@ This repository enforces strict scientific and engineering integrity:
 
 ## 11. Disclaimers & Licensing
 
+- **Methodological Disclosure (Fixed-Basket Survivorship Bias):** The 15 perpetual assets in `universe_15_hourly.parquet` (BTC, ETH, SOL, BNB, XRP, DOGE, ADA, AVAX, LINK, DOT, NEAR, MATIC, LTC, UNI, ATOM) were selected as the top liquid Binance perpetual contracts surviving through the 2022–2025 window. While cross-sectional rank normalization, strictly causal point-in-time features, and cross-sectional feature shuffling placebos eliminate lookahead and confirm genuine relative ranking alpha, any fixed retrospective asset basket is subject to survivorship bias. In live institutional deployment, the universe dynamically refreshes on a rolling 30-day liquidity schedule.
 - **Quantitative Research Disclaimer:** Past performance is no guarantee of future returns. The quantitative models, risk overlays, and backtests contained herein are for educational, research, and institutional engineering demonstration purposes.
 - **License:** Released under the [MIT License](file:///Users/kingebenezer/Desktop/Coding/Projects/Ethereum%20Tracker/LICENSE).

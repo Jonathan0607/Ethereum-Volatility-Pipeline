@@ -98,7 +98,7 @@ def export_beta15_model() -> tuple[Path, Path, float]:
         "assets": unique_assets,
         "n_assets": len(unique_assets),
         "btc_asset": btc_asset,
-        "clip_bounds": [0.2, 3.0],
+        "clip_bounds": [0.3, 2.5],
         "params": {
             "objective": "huber",
             "n_estimators": 75,
@@ -126,8 +126,8 @@ def export_beta15_model() -> tuple[Path, Path, float]:
     ort_preds = ort_session.run(None, {"input": X_test.astype(np.float32)})[0].flatten()
 
     # Enforce clamping on both
-    lgb_preds = np.clip(lgb_preds, 0.2, 3.0)
-    ort_preds = np.clip(ort_preds, 0.2, 3.0)
+    lgb_preds = np.clip(lgb_preds, 0.3, 2.5)
+    ort_preds = np.clip(ort_preds, 0.3, 2.5)
 
     # Enforce BTCUSDT == 1.0 on both
     btc_mask = asset_test == btc_asset

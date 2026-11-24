@@ -436,12 +436,17 @@ class ShadowStreamWorker:
         use_real = not synthetic and aligned_path.exists()
 
         if use_real:
-            logger.info(f"Replay mode: Loading {n_bars} historical bars from {aligned_path}...")
-            df = read_parquet_utc(str(aligned_path))
-            unique_ts = sorted(df["timestamp"].unique())
-            replay_ts = unique_ts[1000: 1000 + n_bars] if len(unique_ts) >= 1000 + n_bars else unique_ts[:n_bars]
-            sample_df = df[df["timestamp"].isin(replay_ts)].copy()
-        else:
+            try:
+                logger.info(f"Replay mode: Loading {n_bars} historical bars from {aligned_path}...")
+                df = read_parquet_utc(str(aligned_path))
+                unique_ts = sorted(df["timestamp"].unique())
+                replay_ts = unique_ts[1000: 1000 + n_bars] if len(unique_ts) >= 1000 + n_bars else unique_ts[:n_bars]
+                sample_df = df[df["timestamp"].isin(replay_ts)].copy()
+            except Exception as e:
+                logger.warning(f"Could not load historical parquet ({e}); falling back cleanly to synthetic replay...")
+                use_real = False
+
+        if not use_real:
             logger.info(f"Replay mode: Generating {n_bars} synthetic bars for fresh-clone simulation...")
             dates = pd.date_range("2024-01-01", periods=n_bars, freq="1h", tz=UTC)
             rows = []

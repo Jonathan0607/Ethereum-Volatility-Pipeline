@@ -601,19 +601,29 @@ async def lifespan(app: FastAPI):
     if bge_path.exists():
         state.sess_bge = ort.InferenceSession(str(bge_path), sess_options=opts, providers=["CPUExecutionProvider"])
         if _HAS_TOKENIZERS:
-            try:
-                state.tokenizer = Tokenizer.from_pretrained("BAAI/bge-small-en-v1.5")
-                state.tokenizer.enable_padding(length=48)
-                state.tokenizer.enable_truncation(max_length=48)
-                logger.info(f"Loaded BGE INT8 ONNX & Pure Rust Tokenizer: {bge_path}")
-            except Exception as e:
-                logger.warning(f"Could not load Tokenizer.from_pretrained ({e}), falling back...")
+            local_tok = onnx_dir / "tokenizer.json"
+            if local_tok.exists():
                 try:
-                    from transformers import AutoTokenizer
+                    state.tokenizer = Tokenizer.from_file(str(local_tok))
+                    state.tokenizer.enable_padding(length=48)
+                    state.tokenizer.enable_truncation(max_length=48)
+                    logger.info(f"Loaded BGE INT8 ONNX & Local Tokenizer: {local_tok}")
+                except Exception as e:
+                    logger.warning(f"Could not load local tokenizer.json ({e}), trying from_pretrained...")
+            if state.tokenizer is None:
+                try:
+                    state.tokenizer = Tokenizer.from_pretrained("BAAI/bge-small-en-v1.5")
+                    state.tokenizer.enable_padding(length=48)
+                    state.tokenizer.enable_truncation(max_length=48)
+                    logger.info(f"Loaded BGE INT8 ONNX & Pure Rust Tokenizer: {bge_path}")
+                except Exception as e:
+                    logger.warning(f"Could not load Tokenizer.from_pretrained ({e}), falling back...")
+                    try:
+                        from transformers import AutoTokenizer
 
-                    state.tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-small-en-v1.5")
-                except ImportError:
-                    pass
+                        state.tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-small-en-v1.5")
+                    except ImportError:
+                        pass
 
     if itr_path.exists():
         state.sess_itransformer = ort.InferenceSession(str(itr_path), sess_options=opts, providers=["CPUExecutionProvider"])
@@ -665,7 +675,7 @@ async def lifespan(app: FastAPI):
                 "DOTUSDT", "ATOMUSDT", "LTCUSDT", "NEARUSDT", "UNIUSDT",
             ],
             "btc_asset": "BTCUSDT",
-            "clip_bounds": [0.2, 3.0],
+            "clip_bounds": [0.3, 2.5],
         }
 
     beta_path = onnx_dir / "lightgbm_beta15.onnx"
@@ -920,7 +930,7 @@ async def compute_alpha(req: AlphaRequest):
             # Deterministic mock fallback under APEX_ALLOW_MOCK_MODELS=1
             pred_b = 1.0 + 0.05 * np.mean(X_beta, axis=1)
 
-        betas_arr = np.clip(pred_b, 0.2, 3.0)
+        betas_arr = np.clip(pred_b, 0.3, 2.5)
         btc_symbol = b_meta.get("btc_asset", "BTCUSDT")
         if btc_symbol in assets:
             btc_idx = assets.index(btc_symbol)

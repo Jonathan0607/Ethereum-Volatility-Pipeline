@@ -42,7 +42,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from apex_multimodal_risk.src.train.exp008c_beta_neutral_carry_ml import (
+from apex_multimodal_risk.src.serving.portfolio_math import (
     project_weights_to_beta_neutral,
 )
 from apex_multimodal_risk.src.utils import setup_logger
@@ -159,29 +159,29 @@ def engineer_features_and_targets() -> pd.DataFrame:
             g[f"mom_{w}h"] = rw
             g[f"ram_{w}h"] = np.tanh(rw / (vw + 1e-6))
 
-        high_168 = pd.Series(high_vals).rolling(168, min_periods=24).max().bfill().values
-        low_168 = pd.Series(low_vals).rolling(168, min_periods=24).min().bfill().values
+        high_168 = pd.Series(high_vals).rolling(168, min_periods=24).max().ffill().fillna(high_vals[0]).values
+        low_168 = pd.Series(low_vals).rolling(168, min_periods=24).min().ffill().fillna(low_vals[0]).values
         g["dist_168h_hl"] = (c - low_168) / (high_168 - low_168 + 1e-6)
 
         g["fr_level"] = fr
         g["fr_carry_72h"] = pd.Series(fr).rolling(72, min_periods=12).sum().fillna(0.0).values
-        fr_mu = pd.Series(fr).rolling(720, min_periods=72).mean().bfill().values
-        fr_sig = pd.Series(fr).rolling(720, min_periods=72).std().bfill().values
+        fr_mu = pd.Series(fr).rolling(720, min_periods=72).mean().ffill().fillna(0.0).values
+        fr_sig = pd.Series(fr).rolling(720, min_periods=72).std().ffill().fillna(1.0).values
         g["fr_zscore_30d"] = np.clip((fr - fr_mu) / (fr_sig + 1e-8), -4.0, 4.0)
         g["cum_funding_168h"] = pd.Series(eff_fr).rolling(168, min_periods=24).sum().fillna(0.0).values
 
-        vol_24 = pd.Series(ret_1h).rolling(24, min_periods=12).std().bfill().values
-        vol_168 = pd.Series(ret_1h).rolling(168, min_periods=24).std().bfill().values
+        vol_24 = pd.Series(ret_1h).rolling(24, min_periods=12).std().ffill().fillna(1e-4).values
+        vol_168 = pd.Series(ret_1h).rolling(168, min_periods=24).std().ffill().fillna(1e-4).values
         g["vol_ratio_24_168"] = vol_24 / (vol_168 + 1e-6)
         g["trailing_vol_168h"] = vol_168 * np.sqrt(168)
 
-        v_24 = pd.Series(v).rolling(24, min_periods=12).mean().bfill().values
-        v_168 = pd.Series(v).rolling(168, min_periods=24).mean().bfill().values
+        v_24 = pd.Series(v).rolling(24, min_periods=12).mean().ffill().fillna(1.0).values
+        v_168 = pd.Series(v).rolling(168, min_periods=24).mean().ffill().fillna(1.0).values
         g["vol_surge"] = np.log((v_24 + 1.0) / (v_168 + 1.0))
 
         dollar_vol = v * c
         amihud = np.abs(ret_1h) / (dollar_vol + 1e-4)
-        g["amihud_24h"] = pd.Series(amihud).rolling(24, min_periods=12).mean().bfill().values
+        g["amihud_24h"] = pd.Series(amihud).rolling(24, min_periods=12).mean().ffill().fillna(0.0).values
 
         g["skew_72h"] = pd.Series(ret_1h).rolling(72, min_periods=24).skew().fillna(0.0).values
         g["skew_168h"] = pd.Series(ret_1h).rolling(168, min_periods=24).skew().fillna(0.0).values
@@ -428,7 +428,7 @@ def prepare_matrices(
     ret_df = pd.DataFrame(ret_1h_mat, columns=assets, index=ts_index)
     cov_btc = ret_df.rolling(720, min_periods=72).cov(ret_df["BTCUSDT"])
     var_btc = ret_df["BTCUSDT"].rolling(720, min_periods=72).var()
-    beta_mat = (cov_btc.div(var_btc + 1e-8, axis=0)).clip(0.3, 2.5).bfill().values
+    beta_mat = (cov_btc.div(var_btc + 1e-8, axis=0)).clip(0.3, 2.5).fillna(1.0).values
     beta_mat[:, btc_idx] = 1.0
 
     return preds, ret_1h_mat, fr_mat, vol_mat, beta_mat, ts_index, assets
