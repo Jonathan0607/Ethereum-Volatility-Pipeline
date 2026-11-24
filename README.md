@@ -75,7 +75,7 @@ The quantitative audit evaluated two overlay deployment modes across the strictl
 | **1. Unhedged APEX v45 Champion** | 0 bps | 36.07% | 1.76 | 1.81 | -11.7% | 3.09 | 10.30 | 0.0 bps/yr | 0.0% |
 | | 25 bps | **36.07%** | **1.76** | **1.81** | **-11.7%** | **3.09** | **10.30** | **0.0 bps/yr** | 0.0% |
 | **2. Market-Only LightGBM Gate** | 25 bps | 35.83% | 1.76 | 1.80 | -11.7% | 3.07 | 10.21 | 0.0 bps/yr | 20.2% |
-| **3. Surgical Multimodal NLP Gate** | 25 bps | **36.24%** | **1.78** | **1.82** | **-11.7%** | **3.11** | **10.36** | **0.0 bps/yr** | 19.6% |
+| **3. Surgical Multimodal NLP Gate** | 25 bps | **35.48%** | **1.75** | **1.80** | **-11.7%** | **3.04** | **10.12** | **55.8 bps/yr** | 19.6% |
 | **4. Delayed-Feedback ACI VaR Sizing** | 25 bps | 32.97% | 1.70 | 1.75 | -11.5% | 2.87 | 9.34 | 47.6 bps/yr | 9.9% |
 | **5. Dual-Pillar Multimodal+ACI Overlay** | 25 bps | 33.11% | 1.72 | 1.77 | -11.5% | 2.88 | 9.39 | 46.5 bps/yr | 26.9% |
 
@@ -86,7 +86,7 @@ The quantitative audit evaluated two overlay deployment modes across the strictl
 | **1. Unhedged APEX v45 Champion** | 25 bps | **36.07%** | **1.76** | **1.81** | **-11.7%** | **3.09** | **10.30** | **0.0 bps/yr** | 0.0% |
 | **2. Market-Only LightGBM Gate** | 25 bps | 30.00% | 1.54 | 1.56 | -11.7% | 2.57 | 8.22 | 0.0 bps/yr | 20.2% |
 | **3. Surgical Multimodal NLP Gate** | 25 bps | 28.28% | 1.46 | 1.47 | -12.7% | 2.23 | 7.05 | 0.0 bps/yr | 19.6% |
-| **4. Delayed-Feedback ACI VaR Sizing** | 25 bps | **31.67%** | **1.69** | **1.76** | **-11.3%** | **2.79** | **9.02** | **125.5 bps/yr** | 9.9% |
+| **4. Delayed-Feedback ACI VaR Sizing** | 25 bps | **31.64%** | **1.69** | **1.76** | **-11.3%** | **2.79** | **9.02** | **128.1 bps/yr** | 9.9% |
 | **5. Dual-Pillar Multimodal+ACI Overlay** | 25 bps | 24.19% | 1.37 | 1.40 | -12.6% | 1.93 | 5.91 | 122.5 bps/yr | 26.9% |
 
 > [!NOTE]
@@ -151,20 +151,22 @@ When 100% APEX v45 is subjected to the exact same causal dynamic vol-targeting r
 
 ## 4. Master Research Leaderboard & Scientific Falsification Ledger (EXP-001 – EXP-011)
 
-Every hypothesis tested throughout the quantitative research pipeline is recorded with 100% scientific transparency:
+Every hypothesis tested throughout the quantitative research pipeline is recorded with 100% scientific transparency using strictly audited facts from `timeline.md`:
 
-| Exp ID | Research Focus & Hypothesis | Turn/yr | Net CAGR @ 10 bps | Standalone Sharpe | APEX Blend Impact | Scientific Mechanism & Production Verdict |
-| :--- | :--- | :---: | :---: | :---: | :---: | :--- |
-| **Baseline** | **Frozen APEX v45 Champion** | — | **36.82%** | **1.86** | — | **FOUNDATION CORE (Directional 25% + Spread 55% + Funding 20%)** |
-| **EXP-001–003e** | Multimodal Risk Overlay & Conformal ACI | <1x | 35.48%–36.24% | 1.76–1.78 | Truncates tail DD | **PROMOTED ASYMMETRIC TAIL-RISK OVERLAY (`/v1/score`)** |
-| **EXP-004a–004b** | Online Parity, Redis Streams & Docker CI | — | — | — | Sub-50ms SLA | **PROMOTED MLE PRODUCTION INFRASTRUCTURE** |
-| **EXP-005** | 15-Coin NLP Polarity Alpha Gate | 256x | -32.5% | -1.85 | -43 bps drag | **FALSIFIED (Extreme Churn):** Headline drift is noisy; 256x turnover destroys net returns. |
-| **EXP-006** | ML Causal Macro Regime Allocator | 12x | 31.2% | 1.58 | -28 bps drag | **FALSIFIED (Regime Lag):** Macro detection lag & switching turnover underperform static 25/55/20. |
-| **EXP-007** | Marcos López de Prado Meta-Labeling | 0–27x | 35.7% | 1.68 | 1.77 (Filter) | **DEFENSIVE ONLY:** High ROC-AUC (0.694), but sizing turnover erodes net Sharpe; filter-only preserved. |
-| **EXP-008d** | **Beta-Neutral 48h Total Return ML** | **43.4x** | **+8.68%** | **0.80** | **1.91 (Calmar 3.71)** | **PROMOTED WINNER (`/v1/alpha`):** $t_{\text{HAC}}=+5.26$, fee-surviving alpha, lifts APEX v45. |
-| **EXP-009** | Decision-Focused PyTorch Policy | 0x | 0.0% | 0.00 | 1.86 | **FALSIFIED (Optimization Collapse):** Differentiable cost penalty landscape collapsed policy to cash. |
-| **EXP-010** | Rolling PCA Eigenportfolio Stat-Arb | >350x | -29.5% | -1.83 | -13 bps drag | **FALSIFIED (Basket Friction):** Strong gross alpha (+25.4%), but 15-coin hedge churn destroys net alpha. |
-| **EXP-011** | ML Beta-Neutral Funding Carry | 20.7x | -6.33% | -0.50 | -5 bps drag | **FALSIFIED (Adverse Basis Drift):** High rank IC ($t_{\text{HAC}}=+4.60$), but 7-14d hold suffers spot momentum drift. |
+| Exp ID | Research Focus & Hypothesis | Turnover / Key Metric | Standalone / Model Result | APEX Blend Impact | Scientific Mechanism & Production Verdict |
+| :--- | :--- | :---: | :---: | :---: | :--- |
+| **Baseline** | **Frozen APEX v45 Champion** | 21.2x / yr | 36.07% CAGR / 1.76 Sharpe | — | **FOUNDATION CORE:** Directional 25% + Spread 55% + Funding Arb 20% (Honest VM: 36.82% / 1.86 Sharpe / 3.36 Calmar / -11.0% MaxDD). |
+| **EXP-001** | Sprint 1 Data Ingestion & News Funnel | Zero lookahead | 18,939 deduplicated headlines | Zero leakage | **PROMOTED INFRASTRUCTURE:** DuckDB temporal alignment & 4-stage noise funnel (regex, entity linking, trust scoring, temporal deduplication). |
+| **EXP-002a–e** | 10-Split Purged CPCV Ablation | 504h purge | M0: 0.0616 PR-AUC<br/>M2: 0.0596 PR-AUC | +0.0047 BSS / 0.002 ECE | **PROMOTED TAIL MODEL (`M2`):** Sparse-gated novelty filter ($\tau_{\text{nov}}=0.2880, \tau_{\text{proto}}=0.7179$); discarded overfit `Multimodal_iTransformer_NLP` (0.505 ROC-AUC / -0.1048 BSS). |
+| **EXP-003a–e** | Delayed ACI & Expanding Walk-Forward | Realized slippage | Mode A: 35.48% / 1.75<br/>Mode B: 31.64% / 1.69 | +164 bps shortfall cut<br/>91.2% Aug 2024 coverage | **PROMOTED ASYMMETRIC RISK OVERLAY (`/v1/score`):** Unified ONNX/INT8 export + 6h Delayed ACI (Mode A NLP Gate: 55.8 bps/yr drag; Mode B ACI VaR: 128.1 bps/yr drag). |
+| **EXP-004a–b** | MLE Production Parity & Shadow Replay | Sub-50ms SLA | 0.0 market / 2.38e-7 NLP parity | 869.3 RPS / 36 ms p99 | **PROMOTED SERVING SYSTEM:** Zero-PyTorch ONNX serving, 0.00% fallbacks, PSI/centroid drift monitor, Redis Streams shadow worker, Docker CI. |
+| **EXP-005** | 15-Coin Polarity Alpha Gate (CryptoBERT/FinBERT) | 256.2x / yr | -0.49 gross / -3.79 net Sharpe (25 bps) | -43 bps Sharpe drag | **FALSIFIED (Static Coverage Bias):** `rel_sent` +3.68% IC matched time-shuffle placebo (+3.09% IC, $t=+6.80$); demeaned `rel_surprise` IC -0.66%; 256x turnover destroys returns. |
+| **EXP-006** | Walk-Forward ML Dynamic Sleeve Allocator | 12.4x / yr | 1.54 net Sharpe vs. 1.62 static (25 bps) | -8 bps Sharpe drag | **FALSIFIED (Regime Switching Lag):** Macro feature ensemble (QQQ/VIX/UUP/Stablecoins over 4.17y) lags dynamic regime shifts; shuffle placebo 1.41. |
+| **EXP-007** | Marcos López de Prado Meta-Labeling on APEX Directional | 0–27x / yr | 0.6937 ROC-AUC / +40.03% gross CAGR | 1.68 net Sharpe (25 bps) | **DEFENSIVE FILTER ONLY:** 56.4% vs 9.8% decile win rate; bet sizing incurs 244–270 bps/yr inter-trade turnover drag; filter-only retains 0.0 bps drag. |
+| **EXP-008a–d** | **Beta-Neutral 48h Total Return ML** | **43.4x / yr** | **+8.68% net CAGR / 0.80 Sharpe (10 bps)**<br/>**+1.83% net CAGR / 0.22 Sharpe (25 bps)** | **1.91 Sharpe / 3.71 Calmar**<br/>**(-130 bps MaxDD to -9.7%)** | **PROMOTED WINNER (`/v1/alpha`):** $t_{\text{HAC}}=+5.26$ (Mean IC +4.97%), 7-tranche overlapping daily rebalance + closed-form nullspace projection $[\mathbf{1}, \beta_t]$. |
+| **EXP-009** | Decision-Focused PyTorch Policy | 0.0x / yr | Collapsed to 0.0% flat cash | 0.00 Sharpe / flat cash | **FALSIFIED (Non-Convex L1 Landscape):** Recurrent net-of-cost Sharpe optimization collapsed policy to zero weights under non-convex transaction penalties. |
+| **EXP-010** | Rolling PCA Eigenportfolio Stat-Arb | 576.3x / yr | +25.4% gross CAGR (0 bps)<br/>-29.5% net CAGR / -1.83 Sharpe (10 bps) | -13 bps Sharpe drag | **FALSIFIED (Multi-Asset Hedge Friction):** Strong gross alpha, but 0.4891 ML filter AUC and 576.3x/yr 15-coin hedge churn destroys net returns. |
+| **EXP-011** | ML-Gated Beta-Neutral Funding Carry | 20.7x–53.2x / yr | F2: -0.27 Sharpe / F3: -0.50 Sharpe (10 bps) | -2 to -5 bps Sharpe drag | **FALSIFIED (Adverse Basis Drift):** High rank IC ($t_{\text{HAC}}=+4.60$), but 7d–14d holding horizons suffer adverse basis/spot momentum drift (-5.03%/yr). |
 
 ---
 

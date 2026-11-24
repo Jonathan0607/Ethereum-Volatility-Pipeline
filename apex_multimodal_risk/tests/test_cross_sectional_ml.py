@@ -153,6 +153,7 @@ def test_funding_adjusted_total_return():
     assert pytest.approx(fwd_total_ret, 1e-6) == 0.042  # Net +4.2%
 
 
+@pytest.mark.requires_local_artifacts
 def test_beta_neutral_projection_nullspace():
     """Verifies that nullspace projection enforces both sum(w)=0 and sum(w*beta)=0."""
     from apex_multimodal_risk.src.train.exp008c_beta_neutral_carry_ml import project_weights_to_beta_neutral
@@ -172,6 +173,7 @@ def test_beta_neutral_projection_nullspace():
     assert np.all(w_bn >= -0.1501) and np.all(w_bn <= 0.1501)  # Max position cap
 
 
+@pytest.mark.requires_local_artifacts
 def test_vol_matched_blend_scaling():
     """Verifies causal volatility matching leverage scalar capping at <= 1.25x."""
     from apex_multimodal_risk.src.train.exp008c_beta_neutral_carry_ml import run_vol_matched_blend
@@ -190,6 +192,7 @@ def test_vol_matched_blend_scaling():
     assert not np.any(np.isnan(r_scaled))
 
 
+@pytest.mark.requires_local_artifacts
 def test_newey_west_hac_stats():
     """Verifies that Newey-West HAC correctly deflates t-stats on overlapping series."""
     from apex_multimodal_risk.src.train.exp008d_path_a_audit import newey_west_stats
@@ -205,6 +208,7 @@ def test_newey_west_hac_stats():
     assert stats["hac_se"] > 0.0
 
 
+@pytest.mark.requires_local_artifacts
 def test_honest_vol_targeting_deadband():
     """Verifies that honest vol-targeting obeys deadband and incurs exact turnover."""
     from apex_multimodal_risk.src.train.exp008d_path_a_audit import apply_honest_vol_targeting
