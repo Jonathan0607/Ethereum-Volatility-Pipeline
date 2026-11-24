@@ -14,8 +14,9 @@ WORKDIR /app
 COPY requirements-serving.txt /app/apex_multimodal_risk/requirements-serving.txt
 RUN pip install --no-cache-dir -r /app/apex_multimodal_risk/requirements-serving.txt
 
-# Pre-fetch pure Rust tokenizer.json so runtime container boots 100% air-gapped
-RUN python -c "from tokenizers import Tokenizer; import os; os.makedirs('/app/apex_multimodal_risk/artifacts/onnx', exist_ok=True); tok = Tokenizer.from_pretrained('BAAI/bge-small-en-v1.5'); tok.save('/app/apex_multimodal_risk/artifacts/onnx/tokenizer.json')"
+# Pre-fetch pure Rust tokenizer.json to /opt/apex so runtime container boots 100% air-gapped
+# Stored outside /app/apex_multimodal_risk/artifacts/onnx so host bind mounts do not shadow it
+RUN python -c "from tokenizers import Tokenizer; import os; os.makedirs('/opt/apex', exist_ok=True); tok = Tokenizer.from_pretrained('BAAI/bge-small-en-v1.5'); tok.save('/opt/apex/tokenizer.json')"
 
 # Copy application source tree and configurations
 COPY . /app/apex_multimodal_risk/

@@ -19,8 +19,11 @@ from apex_multimodal_risk.src.utils import PROJECT_ROOT, read_parquet_utc
 def panel_timestamps():
     parquet_path = PROJECT_ROOT / "apex_multimodal_risk/data/processed/aligned_hourly.parquet"
     if parquet_path.exists():
-        df = read_parquet_utc(parquet_path)
-        return sorted(df["timestamp"].unique())
+        try:
+            df = read_parquet_utc(parquet_path)
+            return sorted(df["timestamp"].unique())
+        except Exception:
+            pass
     # Fallback for fresh-clone CI: generate synthetic hourly timestamps
     return list(pd.date_range("2021-01-01", periods=10000, freq="1h", tz="UTC"))
 

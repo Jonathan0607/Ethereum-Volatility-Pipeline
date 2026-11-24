@@ -1274,7 +1274,7 @@
      - **$R_3$ (GraphBetaCovNet)** successfully learns structural graph relationships but exhibits higher matrix scale variance than Ledoit-Wolf statistical shrinkage.
 
   2. *Stage 2: Downstream Portfolio Impact on Fixed EXP-008d Predictions (10 bps Institutional Slippage):*
-     | Risk Projector | 95% Beta Leak | CAGR (%) | Net Sharpe | Calmar | MaxDD (%) | Turnover | $\\rho(\\text{APEX})$ | 90/10 Blend Sharpe |
+     | Risk Projector | 95% Beta Leak | CAGR (%) | Net Sharpe | Calmar | MaxDD (%) | Turnover | $\rho(\text{APEX})$ | 90/10 Blend Sharpe |
      | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
      | **$R_0$ (EXP-008d Baseline 30d OLS)** | 0.1062 | 9.08% | 0.83 | 0.70 | -12.9% | 43.5x | -0.0954 | 1.92 |
      | **$R_1$ (EWMA + Vasicek Shrinkage)** | 0.0825 | 10.06% | 0.92 | 0.98 | -10.2% | 45.3x | -0.0812 | 1.92 |
@@ -1295,7 +1295,7 @@
      *Downstream Findings:*
      - **Beta Leakage Reduction:** $R_2$ reduces 95th-percentile rolling 7-day realized market beta leakage by **23.1%** (from 0.1062 to **0.0817**), while $R_1$ reduces leakage by 22.3% (to 0.0825).
      - **Standalone Alpha Uplift:** Under 10 bps slippage, $R_2$ boosts standalone sleeve Sharpe from **0.83 to 0.96** (+0.13 Sharpe boost) and CAGR from **9.08% to 10.31%** (+123 bps CAGR) while keeping turnover modest (43.5x to 45.1x). MaxDD compresses from -12.9% to -10.4%.
-     - **Multi-Factor Nullspace Over-Constraining ($R_{3b}$):** Constraining against 2 unobserved latent factors removes too much alpha degrees of freedom, dropping standalone Sharpe from 0.83 to 0.73 and blend Sharpe to 1.89. Single-beta nullspace projection ($C = [\\mathbf{1}, \\beta]$) remains the optimal trade-off between neutrality and alpha extraction.
+     - **Multi-Factor Nullspace Over-Constraining ($R_{3b}$):** Constraining against 2 unobserved latent factors removes too much alpha degrees of freedom, dropping standalone Sharpe from 0.83 to 0.73 and blend Sharpe to 1.89. Single-beta nullspace projection ($C = [\mathbf{1}, \beta]$) remains the optimal trade-off between neutrality and alpha extraction.
 - **Integrity & Verification:**
   - `apex_multimodal_risk/tests/test_dynamic_covariance.py`: 5/5 passing (exact multi-factor nullspace neutrality $< 10^{-11}$, Woodbury analytical inversion and determinant lemma parity $< 10^{-10}$, QLIKE loss minimum at identity, Vasicek shrinkage bounds, and GraphBetaCovNet forward pass + SPD guarantee).
   - Lean CI verification: 32 tests passing with zero `torch`/`lightgbm` imports into `sys.modules`.
@@ -1314,12 +1314,12 @@
 - **Architectural & Methodological Hardening:**
   1. *Centralized Portfolio Math & Single-Source Nullspace Projector (`src/serving/portfolio_math.py`):*
      - Unified 2-stage nullspace projection ($P = I - C(C^T C)^{-1} C^T$ with pseudo-inverse, L1 gross scaling, and scalar max-weight shrinkage) as the single shared engine across `app.py`, `exp008d_path_a_audit.py`, and `exp012_dynamic_covariance.py`.
-     - Harmonized beta bounds to $[0.3, 2.5]$ (clamping $\\text{BTCUSDT} \\equiv 1.0$) and minimum rolling warmup periods to `min_periods=72` across all training scripts, serving endpoints, and ONNX metadata.
+     - Harmonized beta bounds to $[0.3, 2.5]$ (clamping $\text{BTCUSDT} \equiv 1.0$) and minimum rolling warmup periods to `min_periods=72` across all training scripts, serving endpoints, and ONNX metadata.
      - Purged all `.bfill()` backward-fill calls from feature engineering and beta estimation pipelines, replacing with strictly causal `.ffill().fillna(...)` and forward `.fillna(1.0)` warmup handling.
   2. *Forensic Bug Fixes in EXP-012 (`exp012_dynamic_covariance.py`):*
      - **Forward Target Slice Alignment:** Corrected index off-by-one from `ret_mat[ti : ti + 48]` to strictly forward `ret_mat[ti + 1 : ti + 49]` (and `ti + 1 : ti + 169`).
-     - **14-Altcoin Metric Evaluation:** Evaluated Stage 1 beta forecasting RMSE, MAE, and $R^2$ strictly across the 14 non-BTC altcoins, preventing artificial baseline metric inflation from the clamped $\\text{BTCUSDT} \\equiv 1.0$ identity.
-     - **Placebo Permutation Rigor:** Fixed feature-shuffle placebo to simultaneously permute input features $x_t$, trailing benchmark beta $base_b_t$, and GNN adjacency tensors, successfully driving placebo $R^2$ to true null ($\\le 0\\%$: $-15.46\\%$ at 48h and $-32.78\\%$ at 168h).
+     - **14-Altcoin Metric Evaluation:** Evaluated Stage 1 beta forecasting RMSE, MAE, and $R^2$ strictly across the 14 non-BTC altcoins, preventing artificial baseline metric inflation from the clamped $\text{BTCUSDT} \equiv 1.0$ identity.
+     - **Placebo Permutation Rigor:** Fixed feature-shuffle placebo to simultaneously permute input features $x_t$, trailing benchmark beta $base_b_t$, and GNN adjacency tensors, successfully driving placebo $R^2$ to true null ($\le 0\%$: $-15.46\%$ at 48h and $-32.78\%$ at 168h).
      - **Single Slippage Deduction in Blends:** Passed raw gross returns (`gross_pnl`) into `apply_honest_vol_targeting` with underlying turnover charged once, eliminating double-slippage penalization.
   3. *Online Feature Engine & Serving Parity (`src/features/alpha15_features.py`, `tests/test_alpha15_parity.py`):*
      - Implemented pure NumPy/Pandas causal feature builder generating 21 alpha features and 13 dynamic beta features directly from raw 15-perp hourly klines and funding rates with zero PyTorch / zero LightGBM dependencies.

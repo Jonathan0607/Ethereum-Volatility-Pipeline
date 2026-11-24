@@ -14,6 +14,7 @@ import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import UTC
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -601,15 +602,22 @@ async def lifespan(app: FastAPI):
     if bge_path.exists():
         state.sess_bge = ort.InferenceSession(str(bge_path), sess_options=opts, providers=["CPUExecutionProvider"])
         if _HAS_TOKENIZERS:
-            local_tok = onnx_dir / "tokenizer.json"
-            if local_tok.exists():
-                try:
-                    state.tokenizer = Tokenizer.from_file(str(local_tok))
-                    state.tokenizer.enable_padding(length=48)
-                    state.tokenizer.enable_truncation(max_length=48)
-                    logger.info(f"Loaded BGE INT8 ONNX & Local Tokenizer: {local_tok}")
-                except Exception as e:
-                    logger.warning(f"Could not load local tokenizer.json ({e}), trying from_pretrained...")
+            # Resolve tokenizer in order: artifacts/onnx/tokenizer.json -> /opt/apex/tokenizer.json -> HF Hub
+            tok_candidates = [
+                onnx_dir / "tokenizer.json",
+                Path("/opt/apex/tokenizer.json"),
+            ]
+            for cand in tok_candidates:
+                if cand.exists():
+                    try:
+                        state.tokenizer = Tokenizer.from_file(str(cand))
+                        state.tokenizer.enable_padding(length=48)
+                        state.tokenizer.enable_truncation(max_length=48)
+                        logger.info(f"Loaded BGE INT8 ONNX & Local Tokenizer: {cand}")
+                        break
+                    except Exception as e:
+                        logger.warning(f"Could not load tokenizer from {cand} ({e}), checking next...")
+
             if state.tokenizer is None:
                 try:
                     state.tokenizer = Tokenizer.from_pretrained("BAAI/bge-small-en-v1.5")
